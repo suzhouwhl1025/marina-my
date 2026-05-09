@@ -145,17 +145,22 @@ export class WindowManager implements IWindowManager {
     if (isDev && process.env.ELECTRON_RENDERER_URL) {
       void win.loadURL(process.env.ELECTRON_RENDERER_URL + queryString);
 
-      // DevTools 默认只为第一个窗口自动打开:
-      // - 每开一个 BrowserWindow 都打 DevTools,会让 Chromium 重复尝试启用
-      //   Autofill 等 Chrome 私有协议 (Electron 不实现),刷
-      //   "Request Autofill.enable failed" stderr 噪音
-      // - 多窗口测试时也避免一堆 detached DevTools 窗口堆屏幕
-      // 用户要 DevTools 直接 F12 / Ctrl+Shift+I,或 EASYTERM_DEVTOOLS=always 强开
+      // DevTools 默认完全不自动打开:
+      // - 每次 DevTools UI 启动 Chromium 会试着调 Autofill.enable /
+      //   Autofill.setAddresses (Chrome 私有协议,Electron 不实现),
+      //   抛 stderr 噪音。这是 Chromium 顽疾,不在我们代码控制范围内。
+      // - 多窗口测试时不堆 detached DevTools 窗口
+      // 用户要 DevTools 自己按 F12 / Ctrl+Shift+I,那次的 Autofill 噪音
+      // 是用户主动操作的副作用,可接受。
+      // 环境变量覆盖:
+      //   EASYTERM_DEVTOOLS=first  → 只为第一个窗口自动开
+      //   EASYTERM_DEVTOOLS=always → 每个窗口都自动开 (最早的默认)
+      //   未设置或其他值          → 不自动开 (新默认)
       const devtoolsMode = process.env['EASYTERM_DEVTOOLS'];
       const isFirstWindow = windowNumber === 1;
       const shouldOpenDevTools =
         devtoolsMode === 'always' ||
-        (devtoolsMode !== 'never' && isFirstWindow);
+        (devtoolsMode === 'first' && isFirstWindow);
       if (shouldOpenDevTools) {
         win.webContents.openDevTools({ mode: 'detach' });
       }
