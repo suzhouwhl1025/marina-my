@@ -36,9 +36,19 @@ export default defineConfig({
       exclude: [
         'src/main/**/*.test.ts',
         'src/main/**/*.spec.ts',
+        'src/shared/**/*.test.ts',
+        // 平台占位 (V1 不实测)
         'src/main/platform/macos.ts',
         'src/main/platform/linux.ts',
-        'src/shared/**/*.test.ts',
+        // V1 阶段全是 throw "not implemented" 占位 (CP-3/4 实现后再测)
+        'src/main/platform/windows.ts',
+        // Wiring / 集成代码,按 AGENTS.md 5.4 不要求单测:
+        // index.ts (Electron 入口装配) / ipc.ts (handler 仅做转发) /
+        // tray.ts (Electron Tray API 强绑定)。CP-4 整体 src/main/ 75%
+        // 目标会通过端到端测试覆盖。
+        'src/main/index.ts',
+        'src/main/ipc.ts',
+        'src/main/tray.ts',
       ],
       reporter: ['text', 'html', 'json'],
     },
