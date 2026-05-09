@@ -67,7 +67,16 @@ export default defineConfig({
       },
     },
     server: {
+      // 显式绑 IPv4 而不是默认的 'localhost'。
+      // 默认 'localhost' 会先解析到 IPv6 ::1,Windows 上若 ::1:5173 落在
+      // Hyper-V / WinNAT 的保留端口范围内会抛 EACCES (而不是 EADDRINUSE),
+      // 直接让 Vite 启动失败。锁 127.0.0.1 绕过 IPv6 问题。
+      host: '127.0.0.1',
       port: 5173,
+      // 5173 也可能被占,放弃 strictPort 让 Vite 自动 +1 试到一个可用端口。
+      // electron-vite 会把最终端口写到 ELECTRON_RENDERER_URL 环境变量,
+      // main process 从此变量加载 URL,所以动态端口对主进程透明。
+      strictPort: false,
     },
   },
 });
