@@ -3,96 +3,105 @@
  * @purpose WindowManager 单元测试。覆盖编号分配、增删查、回调、上限。
  *
  * @关键设计:
- * - 用 vi.mock 替换 electron 模块,提供最小 BrowserWindow stub。
- *   不需要真的 Electron runtime — WindowManager 的逻辑本身和 Electron
+ * - 用 vi.mock + vi.hoisted 替换 electron 模块,提供最小 BrowserWindow stub。
+ *   vi.hoisted 把 mock class 的定义和 vi.mock 一起提升到模块顶部,
+ *   避免 "Cannot access before initialization" 错误。
+ * - 不需要真的 Electron runtime — WindowManager 的逻辑本身和 Electron
  *   解耦,只调用 BrowserWindow 的少数方法。
  * - 测试关注"分配/查询/计数/回调"这些可以确定性断言的行为。
- * - URL 加载 / DevTools 等纯调用不验证 (它们是 Electron 内部副作用,
- *   只要不 throw 即可)。
  *
  * @对应文档章节: AGENTS.md 5.3 (核心管理器必测);
  *   软件定义书.md 6.7 (窗口编号规则)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// 用闭包追踪 mock 的 BrowserWindow 实例,以便在测试中触发 closed/focus 事件
-type MockListener = (...args: unknown[]) => void;
+// vi.hoisted: 把 mock class 定义连同 vi.mock 提升到模块顶部,
+// 解决"Cannot access X before initialization"问题
+const { MockBrowserWindow } = vi.hoisted(() => {
+  type MockListener = (...args: unknown[]) => void;
 
-class MockBrowserWindow {
-  static instances: MockBrowserWindow[] = [];
-  static nextWebContentsId = 100;
+  class MockBrowserWindow {
+    static instances: MockBrowserWindow[] = [];
+    static nextWebContentsId = 100;
 
-  public readonly webContents: { id: number; openDevTools: () => void };
-  private listeners = new Map<string, MockListener[]>();
-  private onceListeners = new Map<string, MockListener[]>();
-  public closed = false;
-  public minimized = false;
-  public focused = false;
+    public readonly webContents: { id: number; openDevTools: () => void };
+    private listeners = new Map<string, MockListener[]>();
+    private onceListeners = new Map<string, MockListener[]>();
+    public closed = false;
+    public minimized = false;
+    public focused = false;
+    public destroyed = false;
 
-  constructor(public readonly options: Record<string, unknown>) {
-    this.webContents = {
-      id: MockBrowserWindow.nextWebContentsId++,
-      openDevTools: vi.fn(),
-    };
-    MockBrowserWindow.instances.push(this);
+    constructor(public readonly options: Record<string, unknown>) {
+      this.webContents = {
+        id: MockBrowserWindow.nextWebContentsId++,
+        openDevTools: vi.fn(),
+      };
+      MockBrowserWindow.instances.push(this);
+    }
+
+    on(event: string, listener: MockListener): this {
+      const list = this.listeners.get(event) ?? [];
+      list.push(listener);
+      this.listeners.set(event, list);
+      return this;
+    }
+
+    once(event: string, listener: MockListener): this {
+      const list = this.onceListeners.get(event) ?? [];
+      list.push(listener);
+      this.onceListeners.set(event, list);
+      return this;
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const listener of this.listeners.get(event) ?? []) listener(...args);
+      const onceList = this.onceListeners.get(event) ?? [];
+      this.onceListeners.delete(event);
+      for (const listener of onceList) listener(...args);
+    }
+
+    loadURL(_url: string): Promise<void> {
+      return Promise.resolve();
+    }
+    loadFile(_path: string, _options?: { search: string }): Promise<void> {
+      return Promise.resolve();
+    }
+    show(): void {}
+    close(): void {
+      if (this.closed) return;
+      this.closed = true;
+      this.destroyed = true;
+      this.emit('closed');
+    }
+    focus(): void {
+      this.focused = true;
+      this.emit('focus');
+    }
+    isMinimized(): boolean {
+      return this.minimized;
+    }
+    isDestroyed(): boolean {
+      return this.destroyed;
+    }
+    restore(): void {
+      this.minimized = false;
+    }
+
+    static reset(): void {
+      MockBrowserWindow.instances = [];
+      MockBrowserWindow.nextWebContentsId = 100;
+    }
   }
 
-  on(event: string, listener: MockListener): this {
-    const list = this.listeners.get(event) ?? [];
-    list.push(listener);
-    this.listeners.set(event, list);
-    return this;
-  }
-
-  once(event: string, listener: MockListener): this {
-    const list = this.onceListeners.get(event) ?? [];
-    list.push(listener);
-    this.onceListeners.set(event, list);
-    return this;
-  }
-
-  emit(event: string, ...args: unknown[]): void {
-    for (const listener of this.listeners.get(event) ?? []) listener(...args);
-    const onceList = this.onceListeners.get(event) ?? [];
-    this.onceListeners.delete(event);
-    for (const listener of onceList) listener(...args);
-  }
-
-  loadURL(_url: string): Promise<void> {
-    return Promise.resolve();
-  }
-  loadFile(_path: string, _options?: { search: string }): Promise<void> {
-    return Promise.resolve();
-  }
-  show(): void {}
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.emit('closed');
-  }
-  focus(): void {
-    this.focused = true;
-    this.emit('focus');
-  }
-  isMinimized(): boolean {
-    return this.minimized;
-  }
-  restore(): void {
-    this.minimized = false;
-  }
-
-  static reset(): void {
-    MockBrowserWindow.instances = [];
-    MockBrowserWindow.nextWebContentsId = 100;
-  }
-}
+  return { MockBrowserWindow };
+});
 
 vi.mock('electron', () => ({
   BrowserWindow: MockBrowserWindow,
 }));
 
-// import 必须在 mock 之后,vitest 会 hoist mock 到顶部 (但显式排在后面更清晰)
-// eslint-disable-next-line import/first -- 测试中 mock 顺序优先
+// 必须在 vi.mock 注册之后再 import 被测模块
 import { WindowManager } from './window-manager';
 
 describe('WindowManager', () => {
@@ -211,7 +220,7 @@ describe('WindowManager', () => {
       expect(list.map((w) => w.id).sort()).toEqual([a.id, b.id].sort());
       // 修改副本不影响内部状态
       list[0]!.number = 999;
-      expect(mgr.list()[0]!.number).not.toBe(999);
+      expect(mgr.list().find((w) => w.number === 999)).toBeUndefined();
     });
   });
 
@@ -227,7 +236,7 @@ describe('WindowManager', () => {
 
     it('focus 时若窗口被最小化则恢复', () => {
       const a = mgr.createWindow();
-      const win = mgr.getById(a.id) as unknown as MockBrowserWindow;
+      const win = mgr.getById(a.id) as unknown as InstanceType<typeof MockBrowserWindow>;
       win.minimized = true;
       mgr.focus(a.id);
       expect(win.minimized).toBe(false);

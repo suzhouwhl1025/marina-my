@@ -46,6 +46,7 @@ import {
   type SessionOutputPayload,
 } from '@shared/protocol';
 import type { WindowManager } from './window-manager';
+import { buildSpawnEnv, validateDimensions } from './pty-utils';
 
 interface ManagedPty {
   sessionId: string; // CP-1 = windowId
@@ -70,19 +71,9 @@ function getDefaultShell(): string {
 }
 
 /**
- * 把 process.env 里的 undefined 值过滤掉,转成 node-pty 要的纯 string 字典。
- * 同时剔除 Electron 的私有变量避免污染子 shell。
+ * Electron 私有环境变量,启动子 shell 时要剔除避免污染。
  */
-function buildSpawnEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  const skip = new Set(['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL']);
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === 'string' && !skip.has(key)) {
-      env[key] = value;
-    }
-  }
-  return env;
-}
+const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
 
 export class PtyController {
   private readonly ptys = new Map<string, ManagedPty>();
@@ -140,7 +131,7 @@ export class PtyController {
     envelope: CommandEnvelope<CreateSessionPayload>,
   ): Promise<CreateSessionResponse> {
     const { windowId, payload } = envelope;
-    const { cols, rows } = this.validateDimensions(payload.cols, payload.rows);
+    const { cols, rows } = validateDimensions(payload.cols, payload.rows);
 
     const win = this.windowManager.getById(windowId);
     if (!win) {
@@ -163,7 +154,7 @@ export class PtyController {
         cols,
         rows,
         cwd,
-        env: buildSpawnEnv(),
+        env: buildSpawnEnv(process.env, SPAWN_ENV_SKIP),
       });
     } catch (err) {
       throw new Error(
@@ -224,7 +215,7 @@ export class PtyController {
     if (!managed) {
       throw new Error(`[PtyController] SessionNotFound: sessionId="${sessionId}"`);
     }
-    const validated = this.validateDimensions(cols, rows);
+    const validated = validateDimensions(cols, rows);
     try {
       managed.pty.resize(validated.cols, validated.rows);
     } catch (err) {
@@ -290,17 +281,4 @@ export class PtyController {
     win.webContents.send(channel, envelope);
   }
 
-  private validateDimensions(cols: number, rows: number): { cols: number; rows: number } {
-    // ConPTY 不喜欢 0 或负数,且过大会内存爆炸。约束在合理范围内。
-    const safe = (n: number, min: number, max: number, fallback: number): number => {
-      if (!Number.isFinite(n) || !Number.isInteger(n)) return fallback;
-      if (n < min) return min;
-      if (n > max) return max;
-      return n;
-    };
-    return {
-      cols: safe(cols, 1, 1000, 80),
-      rows: safe(rows, 1, 1000, 24),
-    };
-  }
 }

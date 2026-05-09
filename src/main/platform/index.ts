@@ -7,13 +7,15 @@
  * - V1 只完整实现 Windows,macOS / Linux 抛 "Not implemented",留给社区
  *   贡献 (软件定义书 12.1、12.2)
  * - 接口故意小,每个方法对应一个具体的系统能力,便于 mock 测试
+ * - 用 top-level import 而非动态 require:整个项目是 ESM,
+ *   require() 在 ESM 模块里不可用
  *
  * @对应文档章节: 软件定义书.md 第 12 章 (跨平台策略);AGENTS.md 第 8 章
  *
  * @AGENTS.md 8.1: V1 只测 Windows,但代码必须 platform-aware。
  *   不许在 windows.ts 之外的地方写 process.platform === 'win32' 判断。
  */
-import type { WindowsAdapter } from './windows';
+import { WindowsAdapter } from './windows';
 
 /**
  * 一个被检测到的 shell 的元数据。
@@ -64,18 +66,11 @@ export function getPlatformAdapter(): PlatformAdapter {
   if (cachedAdapter) return cachedAdapter;
 
   // 仅此处允许检查 process.platform。其他模块必须通过 getPlatformAdapter()。
-  // 动态 import 让 macos.ts / linux.ts 在 Windows 上不被加载,减少打包体积
-  // 并避免他们的 import 副作用 (虽然目前是 throw,未来可能有真实代码)。
-  switch (process.platform) {
-    case 'win32': {
-      // require 同步加载,确保启动时拿到 adapter (Electron main 允许 CJS 风格)
-      // electron-vite 在 main 配置 externalizeDepsPlugin 后这是允许的
-      const { WindowsAdapter: Adapter } = require('./windows') as {
-        WindowsAdapter: new () => WindowsAdapter;
-      };
-      cachedAdapter = new Adapter();
+  const platform = process.platform;
+  switch (platform) {
+    case 'win32':
+      cachedAdapter = new WindowsAdapter();
       return cachedAdapter;
-    }
     case 'darwin':
       throw new Error(
         '[platform] macOS support not implemented yet. Contributions welcome! ' +
@@ -87,12 +82,12 @@ export function getPlatformAdapter(): PlatformAdapter {
           'See CONTRIBUTING.md and src/main/platform/linux.ts.',
       );
     default:
-      throw new Error(`[platform] Unsupported process.platform: "${process.platform}"`);
+      throw new Error(`[platform] Unsupported process.platform: "${platform}"`);
   }
 }
 
 /**
- * 仅供测试使用,允许把 adapter 替换成 mock。
+ * 仅供测试使用,允许把 adapter 替换成 mock 或重置缓存。
  * 生产代码不许调用。
  */
 export function __setPlatformAdapterForTest(adapter: PlatformAdapter | null): void {
