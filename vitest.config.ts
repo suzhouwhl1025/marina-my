@@ -1,0 +1,46 @@
+/**
+ * @file vitest.config.ts
+ * @purpose Vitest 测试配置。后端 (src/main, src/shared) 走 Node 环境,
+ *   不需要 jsdom。覆盖率门槛在 CI 中强化。
+ *
+ * @关键设计:
+ * - 默认 environment: 'node' — main process 测试不需要 DOM
+ * - include 限定 src/main 和 src/shared,不测 renderer (AGENTS.md 5.1)
+ * - alias 与 electron.vite.config.ts 保持一致,测试代码用同样的 import 风格
+ *
+ * @对应文档章节: AGENTS.md 第 5 章 (自动化测试要求)、软件定义书.md 5.2 节
+ *
+ * @覆盖率目标 (AGENTS.md 5.5):
+ * - CP-2: 核心数据模块 > 70%
+ * - CP-3: 状态机模块 > 80%
+ * - CP-4: 整个 src/main/ > 75%
+ */
+import { resolve } from 'node:path';
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@shared': resolve('src/shared'),
+      '@main': resolve('src/main'),
+    },
+  },
+  test: {
+    environment: 'node',
+    globals: false,
+    include: ['src/main/**/*.{test,spec}.ts', 'src/shared/**/*.{test,spec}.ts'],
+    exclude: ['node_modules', 'out', 'dist', 'release'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/main/**/*.ts', 'src/shared/**/*.ts'],
+      exclude: [
+        'src/main/**/*.test.ts',
+        'src/main/**/*.spec.ts',
+        'src/main/platform/macos.ts',
+        'src/main/platform/linux.ts',
+        'src/shared/**/*.test.ts',
+      ],
+      reporter: ['text', 'html', 'json'],
+    },
+  },
+});

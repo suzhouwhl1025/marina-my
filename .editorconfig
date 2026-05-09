@@ -1,0 +1,17 @@
+# https://editorconfig.org/
+# 与 .prettierrc 保持一致,确保各编辑器自动应用相同的格式约定
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.bat]
+end_of_line = crlf

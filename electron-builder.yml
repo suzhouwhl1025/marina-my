@@ -1,0 +1,67 @@
+# electron-builder 打包配置
+#
+# 三平台 target 模板齐全 (软件定义书 12.4 节),V1 只启用 Windows。
+# macOS / Linux 配置保留但不在 npm run build 触发,留给社区贡献者。
+#
+# 对应文档:软件定义书.md 第 14 章 (开源策略)、AGENTS.md 4.2 (CP-4 打包要求)
+
+appId: com.liyue-cheng.easyterm
+productName: EasyTerm
+copyright: Copyright (c) 2026 Liyue-Cheng
+
+directories:
+  output: release/${version}
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/node_modules/*/{CHANGELOG.md,README.md,readme.md,readme}'
+  - '!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}'
+  - '!**/node_modules/*.d.ts'
+  - '!**/node_modules/.bin'
+
+asar: true
+asarUnpack:
+  - node_modules/node-pty/**
+
+# Windows: V1 唯一发布目标
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+  icon: build/icon.ico
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: EasyTerm
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+
+portable:
+  artifactName: ${productName}-Portable-${version}-${arch}.${ext}
+
+# macOS / Linux 占位 (V2.0 由社区贡献者启用)
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Development
+  icon: build/icon.png

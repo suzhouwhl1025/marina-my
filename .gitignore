@@ -3,10 +3,10 @@ node_modules/
 .pnp
 .pnp.js
 
-# Build outputs
+# Build outputs (NOTE: keep build/ — that's electron-builder's resource dir for
+# icons / installer assets, not an output dir; outputs go to dist/ / out/ / release/)
 dist/
 out/
-build/
 release/
 *.tsbuildinfo
 

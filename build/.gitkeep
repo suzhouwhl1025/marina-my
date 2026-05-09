@@ -1,0 +1,2 @@
+# electron-builder 在 build 时会从此目录读取 icon.ico / icon.icns / icon.png。
+# CP-4 (打包) 阶段加入真实图标资源 (软件定义书 14.2)。

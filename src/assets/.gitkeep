@@ -1,0 +1,2 @@
+# 占位 — V1 阶段会放入 icon (icon.ico / icon.png) 与字体子集。
+# 当前 CP-1 项目初始化阶段未引入资源,使用 Electron 默认图标。

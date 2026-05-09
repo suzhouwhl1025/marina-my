@@ -1,0 +1,122 @@
+/*
+ * global.css — 全局样式 + 主题 CSS variable 入口。
+ *
+ * 主题系统设计 (软件定义书 5.1.9):
+ *   - 5 套主题 (Rose Pine / Rose Pine Dawn / Rose Pine Moon / Cutie / Business)
+ *   - 通过 [data-theme="..."] 切换 :root 的 CSS variables
+ *   - 所有 var() 调用必须带 #f0f fallback,防止变量缺失时变色显眼
+ *   - stylelint 静态校验 (CP-4 接入)
+ *
+ * CP-1 阶段:
+ * 仅引入 Rose Pine 默认调色板与最小布局 reset。CP-4 阶段会拆分到独立的
+ * rose-pine-themes.css,并按主题切换。
+ */
+
+:root {
+  /* Rose Pine (default theme — 软件定义书 5.1.9) */
+  --base: #191724;
+  --surface: #1f1d2e;
+  --overlay: #26233a;
+  --muted: #6e6a86;
+  --subtle: #908caa;
+  --text: #e0def4;
+  --love: #eb6f92;
+  --gold: #f6c177;
+  --rose: #ebbcba;
+  --pine: #31748f;
+  --foam: #9ccfd8;
+  --iris: #c4a7e7;
+
+  /* UI 字体 (软件定义书 6.6.2 外观) */
+  --ui-font-family:
+    'LXGW WenKai', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --terminal-font-family:
+    'Cascadia Mono', 'JetBrains Mono', Consolas, 'LXGW WenKai Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: var(--base, #f0f);
+  color: var(--text, #f0f);
+  font-family: var(--ui-font-family, sans-serif);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+a {
+  color: var(--foam, #f0f);
+}
+
+.app-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 32px;
+}
+
+.bootstrap-placeholder {
+  max-width: 640px;
+  text-align: center;
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  border-radius: 8px;
+  padding: 32px 40px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+.bootstrap-placeholder h1 {
+  margin: 0 0 8px;
+  color: var(--iris, #f0f);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.bootstrap-placeholder .subtitle {
+  margin: 0 0 24px;
+  color: var(--subtle, #f0f);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+}
+
+.bootstrap-placeholder .diagnostics {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  margin: 0 0 24px;
+  padding: 16px;
+  background-color: var(--overlay, #f0f);
+  border-radius: 6px;
+  text-align: left;
+  font-family: var(--terminal-font-family, monospace);
+  font-size: 13px;
+}
+
+.bootstrap-placeholder dt {
+  color: var(--gold, #f0f);
+  font-weight: 500;
+}
+
+.bootstrap-placeholder dd {
+  margin: 0;
+  color: var(--text, #f0f);
+}
+
+.bootstrap-placeholder .hint {
+  margin: 0;
+  color: var(--muted, #f0f);
+  font-size: 12px;
+  text-align: left;
+  line-height: 1.6;
+}
