@@ -1,0 +1,317 @@
+/**
+ * @file src/renderer/components/Sidebar.tsx
+ * @purpose 三栏侧栏 (收藏 / 临时 / 最近),路径节点 + 子 session 节点。
+ *   含 + 按钮调文件夹选择器、拖文件夹到收藏区加入收藏 (drag-drop)、
+ *   单击选中、双击新建 session、右键菜单 (CP-2 简化菜单)。
+ *
+ * @关键设计:
+ * - 三栏始终显示,即使空 (软件定义书 6.2.1: 默认全部展开)
+ * - 同 path 在三栏不重叠;每个 path 节点可展开看 sessions
+ * - sessions 显示状态点 (active 绿 / idle 黄 / tombstoned 灰)、
+ *   是否被其他窗口持有 (灰显 + ↗ 图标)
+ * - 拖 Explorer 文件夹到 .sidebar-bookmarks-dropzone (CP-2 完成标志):
+ *   先校验 file:// path 是否存在且是目录,然后调 cmd:bookmark:add
+ * - 设置入口固定在底部 (CP-2 占位,CP-4 接入完整设置)
+ *
+ * @对应文档章节: 软件定义书.md 6.2 (左侧栏)、7.3 (拖拽规格)
+ */
+import { useState, useMemo, type DragEvent, type MouseEvent } from 'react';
+import {
+  COMMAND_CHANNELS,
+  type AddBookmarkResponse,
+  type PickFolderResponse,
+  type CreateSessionResponse,
+} from '@shared/protocol';
+import type { PathNode, SessionInfo } from '@shared/types';
+import { useAppDispatch, useAppState } from '../store';
+
+const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
+  active: 'var(--pine, #f0f)',
+  idle: 'var(--gold, #f0f)',
+  tombstoned: 'var(--muted, #f0f)',
+};
+
+export function Sidebar(): JSX.Element {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const [dragOver, setDragOver] = useState(false);
+
+  const handlePickFolder = async (): Promise<void> => {
+    try {
+      const result = await window.api.invoke<unknown, PickFolderResponse>(
+        COMMAND_CHANNELS.BOOKMARK_PICK_FOLDER,
+        {},
+      );
+      if (result.path === null) return;
+      await window.api.invoke<unknown, AddBookmarkResponse>(
+        COMMAND_CHANNELS.BOOKMARK_ADD,
+        { path: result.path },
+      );
+    } catch (err) {
+      console.error('[Sidebar] pick-folder + add-bookmark failed', err);
+    }
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>): void => {
+    // 只在真正离开容器时清,避免子元素 dragenter 引起 flash
+    if (e.currentTarget === e.target) setDragOver(false);
+  };
+
+  const handleDrop = async (e: DragEvent<HTMLDivElement>): Promise<void> => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    // Electron 把 OS 拖拽的文件信息放在 dataTransfer.files,带原生 path
+    const files = Array.from(e.dataTransfer.files);
+    for (const file of files) {
+      // file.path 是 Electron 提供的扩展属性 (浏览器标准 File API 没有),
+      // V1 我们假定 sandbox: false + nodeIntegration: false + contextIsolation: true
+      // 也就是 webPreferences 默认提供 file.path
+      const path = (file as File & { path?: string }).path;
+      if (!path) continue;
+      try {
+        await window.api.invoke<unknown, AddBookmarkResponse>(
+          COMMAND_CHANNELS.BOOKMARK_ADD,
+          { path },
+        );
+      } catch (err) {
+        console.error('[Sidebar] drop add-bookmark failed', err);
+      }
+    }
+  };
+
+  return (
+    <aside className="sidebar">
+      <div
+        className={`sidebar-bookmarks-dropzone${dragOver ? ' drag-over' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={(e) => void handleDrop(e)}
+      >
+        <Category
+          title="收藏"
+          icon="📌"
+          paths={state.pathTree.bookmarks}
+          actionLabel="+"
+          actionTitle="选择文件夹添加到收藏"
+          onAction={() => void handlePickFolder()}
+        />
+        <Category
+          title="临时"
+          icon="🕐"
+          paths={state.pathTree.temporary}
+        />
+        <Category
+          title="最近"
+          icon="•"
+          paths={state.pathTree.recent}
+        />
+      </div>
+      <div className="sidebar-footer">
+        <button
+          type="button"
+          className="settings-entry"
+          onClick={() => dispatch({ type: 'view/enter-settings' })}
+          title="设置 (CP-4 接入)"
+          disabled
+        >
+          ⚙ 设置
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+interface CategoryProps {
+  title: string;
+  icon: string;
+  paths: PathNode[];
+  actionLabel?: string;
+  actionTitle?: string;
+  onAction?: () => void;
+}
+
+function Category({
+  title,
+  icon,
+  paths,
+  actionLabel,
+  actionTitle,
+  onAction,
+}: CategoryProps): JSX.Element {
+  return (
+    <section className="sidebar-category">
+      <header className="sidebar-category-header">
+        <span className="sidebar-category-title">
+          <span className="sidebar-category-icon" aria-hidden="true">
+            {icon}
+          </span>
+          {title}
+        </span>
+        <span className="sidebar-category-count">{paths.length}</span>
+        {actionLabel && (
+          <button
+            type="button"
+            className="sidebar-category-action"
+            onClick={onAction}
+            title={actionTitle}
+          >
+            {actionLabel}
+          </button>
+        )}
+      </header>
+      {paths.length === 0 ? (
+        <p className="sidebar-empty">空</p>
+      ) : (
+        <ul className="sidebar-paths">
+          {paths.map((p) => (
+            <PathItem key={p.id} node={p} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function PathItem({ node }: { node: PathNode }): JSX.Element {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const expanded = state.expandedPathIds.has(node.id);
+  const selected = state.selectedPathId === node.id;
+  const sessions = useMemo(
+    () => node.sessionIds.map((sid) => state.sessions.get(sid)).filter(Boolean) as SessionInfo[],
+    [node.sessionIds, state.sessions],
+  );
+  const activeCount = sessions.length;
+  const displayName = node.displayName ?? lastSegmentOf(node.path);
+
+  const handleSelect = (): void => {
+    dispatch({ type: 'view/select-path', pathId: node.id });
+  };
+
+  const handleToggleExpand = (e: MouseEvent<HTMLSpanElement>): void => {
+    e.stopPropagation();
+    dispatch({ type: 'view/toggle-path-expand', pathId: node.id });
+  };
+
+  const handleDoubleClick = async (): Promise<void> => {
+    // 双击 = 在该 path 下用默认模板新建 session
+    try {
+      await window.api.invoke<unknown, CreateSessionResponse>(
+        COMMAND_CHANNELS.SESSION_CREATE,
+        { pathId: node.path, templateId: 'shell', cols: 80, rows: 24 },
+      );
+      dispatch({ type: 'view/select-path', pathId: node.id });
+    } catch (err) {
+      console.error('[Sidebar] doubleclick create-session failed', err);
+    }
+  };
+
+  return (
+    <li className={`path-item${selected ? ' selected' : ''}`}>
+      <div
+        className="path-item-row"
+        onClick={handleSelect}
+        onDoubleClick={() => void handleDoubleClick()}
+        title={node.path}
+      >
+        {sessions.length > 0 ? (
+          <span
+            className={`path-expand-arrow${expanded ? ' expanded' : ''}`}
+            onClick={handleToggleExpand}
+            aria-label={expanded ? '收起' : '展开'}
+          >
+            ▶
+          </span>
+        ) : (
+          <span className="path-expand-arrow placeholder" />
+        )}
+        <span className="path-name">{displayName}</span>
+        {activeCount > 0 && (
+          <span className="path-session-count" title={`${activeCount} 个终端`}>
+            {activeCount}
+          </span>
+        )}
+      </div>
+      {expanded && sessions.length > 0 && (
+        <ul className="session-list">
+          {sessions.map((s) => (
+            <SessionItem key={s.id} session={s} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function SessionItem({ session }: { session: SessionInfo }): JSX.Element {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const isMine = session.ownerWindowId === state.myWindowId;
+  const ownedByOther =
+    session.ownerWindowId !== null && session.ownerWindowId !== state.myWindowId;
+  const selected = state.selectedSessionId === session.id;
+
+  const handleClick = async (): Promise<void> => {
+    // 本窗口持有 → 切到该 session
+    if (isMine) {
+      dispatch({ type: 'view/select-path', pathId: session.pathId });
+      dispatch({ type: 'view/select-session', sessionId: session.id });
+      return;
+    }
+    // 其他窗口持有 → 聚焦那个窗口
+    if (ownedByOther) {
+      try {
+        await window.api.invoke(COMMAND_CHANNELS.SESSION_FOCUS_OWNER, {
+          sessionId: session.id,
+        });
+      } catch (err) {
+        console.error('[Sidebar] focus-owner failed', err);
+      }
+      return;
+    }
+    // 无主 → 接管
+    try {
+      await window.api.invoke(COMMAND_CHANNELS.SESSION_CLAIM, {
+        sessionId: session.id,
+      });
+      dispatch({ type: 'view/select-path', pathId: session.pathId });
+      dispatch({ type: 'view/select-session', sessionId: session.id });
+    } catch (err) {
+      console.error('[Sidebar] claim failed', err);
+    }
+  };
+
+  return (
+    <li
+      className={`session-item${selected ? ' selected' : ''}${
+        ownedByOther ? ' owned-by-other' : ''
+      }`}
+      onClick={() => void handleClick()}
+      title={
+        ownedByOther
+          ? `${session.displayName} (在其他窗口,点击聚焦那个窗口)`
+          : session.displayName
+      }
+    >
+      <span
+        className="session-state-dot"
+        style={{ backgroundColor: STATE_DOT_COLOR[session.state] }}
+      />
+      <span className="session-name">{session.displayName}</span>
+      {ownedByOther && <span className="session-owned-by-other">↗</span>}
+    </li>
+  );
+}
+
+function lastSegmentOf(path: string): string {
+  // 跨平台:取 / 或 \ 分隔的最后一段;空字符串 / 根路径回退到原路径
+  const m = path.match(/[^/\\]+$/);
+  return m ? m[0] : path;
+}

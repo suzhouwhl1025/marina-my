@@ -1,22 +1,22 @@
 /*
- * global.css — 全局样式 + 主题 CSS variable 入口。
+ * global.css — 全局样式 + 主题 CSS variables + 主布局。
  *
  * 主题系统设计 (软件定义书 5.1.9):
- *   - 5 套主题 (Rose Pine / Rose Pine Dawn / Rose Pine Moon / Cutie / Business)
- *   - 通过 [data-theme="..."] 切换 :root 的 CSS variables
- *   - 所有 var() 调用必须带 #f0f fallback,防止变量缺失时变色显眼
- *   - stylelint 静态校验 (CP-4 接入)
+ *   - 5 套主题,通过 [data-theme="..."] 切换 :root 的 CSS variables
+ *   - 所有 var() 调用必须带 #f0f fallback (CP-4 接 stylelint 静态校验)
  *
- * CP-1 阶段:
- * 仅引入 Rose Pine 默认调色板 + 应用骨架样式 (header / main / terminal-wrapper)。
- * CP-4 阶段会拆分到独立的 rose-pine-themes.css,并按主题切换。
+ * CP-2 阶段:Rose Pine 默认 + 完整 app shell + sidebar + main-pane + terminal。
+ * CP-4 阶段拆出独立 themes 文件并接主题切换。
  */
 
 :root {
-  /* Rose Pine (default theme — 软件定义书 5.1.9) */
+  /* Rose Pine 默认主题 */
   --base: #191724;
   --surface: #1f1d2e;
   --overlay: #26233a;
+  --highlight-low: #21202e;
+  --highlight-med: #403d52;
+  --highlight-high: #524f67;
   --muted: #6e6a86;
   --subtle: #908caa;
   --text: #e0def4;
@@ -27,7 +27,6 @@
   --foam: #9ccfd8;
   --iris: #c4a7e7;
 
-  /* UI 字体 (软件定义书 6.6.2 外观) */
   --ui-font-family:
     'LXGW WenKai', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --terminal-font-family:
@@ -57,7 +56,17 @@ a {
   color: var(--foam, #f0f);
 }
 
-/* ── 应用骨架 ── */
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── App shell ── */
 
 .app-root {
   display: flex;
@@ -65,7 +74,7 @@ a {
   height: 100%;
 }
 
-.app-root.with-terminal {
+.app-root.with-shell {
   background-color: var(--base, #f0f);
 }
 
@@ -102,18 +111,422 @@ a {
   font-size: 11px;
 }
 
-.app-main {
+.app-body {
   flex: 1 1 0;
   display: flex;
   min-height: 0;
 }
 
+/* ── Sidebar ── */
+
+.sidebar {
+  flex: 0 0 280px;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--surface, #f0f);
+  border-right: 1px solid var(--overlay, #f0f);
+  overflow: hidden;
+}
+
+.sidebar-bookmarks-dropzone {
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: 8px 0;
+  transition: background-color 100ms ease;
+}
+
+.sidebar-bookmarks-dropzone.drag-over {
+  background-color: var(--highlight-low, #f0f);
+  outline: 2px dashed var(--iris, #f0f);
+  outline-offset: -8px;
+}
+
+.sidebar-category {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--overlay, #f0f);
+}
+
+.sidebar-category:last-child {
+  border-bottom: none;
+}
+
+.sidebar-category-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--subtle, #f0f);
+}
+
+.sidebar-category-icon {
+  font-size: 11px;
+}
+
+.sidebar-category-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.sidebar-category-count {
+  font-family: var(--terminal-font-family, monospace);
+  color: var(--muted, #f0f);
+  font-size: 10px;
+}
+
+.sidebar-category-action {
+  background: transparent;
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 14px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-category-action:hover {
+  background-color: var(--highlight-med, #f0f);
+}
+
+.sidebar-empty {
+  margin: 0;
+  padding: 6px 16px;
+  font-size: 11px;
+  color: var(--muted, #f0f);
+  font-style: italic;
+}
+
+.sidebar-paths {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.path-item {
+  font-size: 13px;
+}
+
+.path-item-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+  color: var(--text, #f0f);
+}
+
+.path-item-row:hover {
+  background-color: var(--highlight-low, #f0f);
+}
+
+.path-item.selected > .path-item-row {
+  background-color: var(--highlight-med, #f0f);
+}
+
+.path-expand-arrow {
+  display: inline-block;
+  width: 12px;
+  font-size: 9px;
+  color: var(--muted, #f0f);
+  transition: transform 100ms ease;
+  cursor: pointer;
+  text-align: center;
+}
+
+.path-expand-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.path-expand-arrow.placeholder {
+  cursor: default;
+}
+
+.path-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.path-session-count {
+  font-family: var(--terminal-font-family, monospace);
+  font-size: 10px;
+  color: var(--gold, #f0f);
+  background-color: var(--overlay, #f0f);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px 3px 32px;
+  font-size: 12px;
+  color: var(--text, #f0f);
+  cursor: pointer;
+}
+
+.session-item:hover {
+  background-color: var(--highlight-low, #f0f);
+}
+
+.session-item.selected {
+  background-color: var(--highlight-med, #f0f);
+}
+
+.session-item.owned-by-other {
+  opacity: 0.55;
+}
+
+.session-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.session-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-owned-by-other {
+  color: var(--foam, #f0f);
+  font-size: 11px;
+}
+
+.sidebar-footer {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--overlay, #f0f);
+}
+
+.settings-entry {
+  background: transparent;
+  border: none;
+  color: var(--subtle, #f0f);
+  font-size: 12px;
+  padding: 4px 6px;
+  width: 100%;
+  text-align: left;
+}
+
+.settings-entry:hover:not(:disabled) {
+  color: var(--text, #f0f);
+  background-color: var(--highlight-low, #f0f);
+  border-radius: 3px;
+}
+
+/* ── Main pane ── */
+
+.main-pane {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background-color: var(--base, #f0f);
+}
+
+.welcome-state {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #f0f);
+  text-align: center;
+  padding: 24px;
+}
+
+.welcome-state h2 {
+  margin: 0 0 12px;
+  color: var(--iris, #f0f);
+  font-size: 24px;
+}
+
+.welcome-state strong {
+  color: var(--gold, #f0f);
+}
+
+.empty-path-state {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+}
+
+.empty-create-btn {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px solid var(--iris, #f0f);
+  background-color: transparent;
+  color: var(--iris, #f0f);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.empty-create-btn:hover:not(:disabled) {
+  background-color: var(--iris, #f0f);
+  color: var(--base, #f0f);
+}
+
+.empty-hint {
+  margin: 0;
+  color: var(--subtle, #f0f);
+  font-size: 13px;
+}
+
+.empty-hint code {
+  font-family: var(--terminal-font-family, monospace);
+  background-color: var(--overlay, #f0f);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--gold, #f0f);
+}
+
+.empty-templates {
+  display: flex;
+  gap: 8px;
+}
+
+.template-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.template-button:hover:not(:disabled) {
+  background-color: var(--highlight-low, #f0f);
+  border-color: var(--iris, #f0f);
+}
+
+.template-icon {
+  font-size: 14px;
+}
+
+/* ── Tab bar ── */
+
+.tab-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  background-color: var(--surface, #f0f);
+  border-bottom: 1px solid var(--overlay, #f0f);
+  min-height: 32px;
+  overflow-x: auto;
+}
+
+.tab-list {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background-color: transparent;
+  border: none;
+  border-right: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  font-size: 12px;
+  min-width: 100px;
+  max-width: 180px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.tab:hover {
+  background-color: var(--highlight-low, #f0f);
+}
+
+.tab.selected {
+  background-color: var(--base, #f0f);
+  border-bottom: 2px solid var(--iris, #f0f);
+  color: var(--iris, #f0f);
+}
+
+.tab.owned-by-other {
+  opacity: 0.55;
+  color: var(--subtle, #f0f);
+}
+
+.tab.orphan {
+  color: var(--gold, #f0f);
+  font-style: italic;
+}
+
+.tab-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  font-size: 14px;
+  line-height: 14px;
+  color: var(--muted, #f0f);
+  padding: 0 2px;
+  border-radius: 2px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.tab-close:hover {
+  background-color: var(--love, #f0f);
+  color: var(--base, #f0f);
+}
+
+.tab-new-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted, #f0f);
+  padding: 0 12px;
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+
+.tab-new-btn:hover {
+  color: var(--iris, #f0f);
+}
+
 /* ── Terminal ── */
 
 .terminal-wrapper {
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  flex: 1 1 0;
   min-height: 0;
   background-color: var(--base, #f0f);
 }
@@ -160,15 +573,6 @@ a {
 }
 
 .terminal-host {
-  /*
-   * 关键: flex-basis = 0 + min-height: 0 + overflow: hidden 三件套,确保
-   * .terminal-host 自身尺寸完全由父级 flex 计算决定,不被 xterm 内部
-   * DOM 撑大反弹。否则 fitAddon.fit() → term.resize() → xterm DOM
-   * 高度变 → ResizeObserver 又触发 → 死循环,表现为终端区域闪烁。
-   *
-   * position: relative 给 .xterm 一个 positioning context,我们用
-   * absolute + inset 让 xterm 完全脱离 .terminal-host 的 layout 影响。
-   */
   flex: 1 1 0;
   min-height: 0;
   min-width: 0;
@@ -179,49 +583,42 @@ a {
 .terminal-host .xterm {
   position: absolute;
   inset: 8px;
-  /* xterm 的 padding 视觉效果由 inset: 8px 实现,代替原来的
-     .terminal-host { padding: 8px } —— 后者会让 .xterm 100%
-     高宽撑满 padding-box,但 padding 本身参与 ResizeObserver 抖动循环。 */
 }
 
 .terminal-host .xterm-viewport {
   background-color: transparent !important;
 }
 
-/* ── 错误 / 占位状态 ── */
-
-.terminal-error {
+.terminal-not-owner {
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
-  padding: 32px;
-  flex: 1 1 0;
-  background-color: var(--base, #f0f);
-  color: var(--text, #f0f);
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+  color: var(--subtle, #f0f);
 }
 
-.terminal-error h2 {
-  color: var(--love, #f0f);
-  margin: 0 0 16px;
+.terminal-not-owner strong {
+  color: var(--gold, #f0f);
 }
 
-.terminal-error pre {
-  background-color: var(--overlay, #f0f);
-  padding: 12px;
+.terminal-claim-btn {
+  background-color: var(--iris, #f0f);
+  color: var(--base, #f0f);
+  border: none;
   border-radius: 4px;
-  font-family: var(--terminal-font-family, monospace);
-  font-size: 12px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  margin: 0 0 16px;
+  padding: 8px 16px;
+  font-size: 13px;
 }
 
-.terminal-error .hint {
-  color: var(--muted, #f0f);
-  font-size: 12px;
-  line-height: 1.6;
-  margin: 0;
+.terminal-claim-btn:hover {
+  background-color: var(--foam, #f0f);
 }
+
+/* ── Bootstrap / 错误占位 ── */
 
 .bootstrap-placeholder {
   max-width: 640px;
@@ -238,8 +635,6 @@ a {
   margin: 0 0 8px;
   color: var(--iris, #f0f);
   font-size: 28px;
-  font-weight: 600;
-  letter-spacing: 1px;
 }
 
 .bootstrap-placeholder.error h1 {
@@ -250,15 +645,6 @@ a {
   margin: 0 0 24px;
   color: var(--subtle, #f0f);
   font-size: 13px;
-  letter-spacing: 0.5px;
-}
-
-.bootstrap-placeholder .hint {
-  color: var(--muted, #f0f);
-  font-size: 12px;
-  text-align: left;
-  line-height: 1.6;
-  margin: 0;
 }
 
 .bootstrap-placeholder .error-pre {

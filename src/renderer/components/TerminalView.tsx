@@ -1,39 +1,41 @@
 /**
  * @file src/renderer/components/TerminalView.tsx
- * @purpose CP-1 终端视图。在窗口内挂载一个 xterm.js 实例,通过 IPC
- *   连接到 main 进程的 PowerShell PTY,完成双向字节流 + 自动 fit。
+ * @purpose 把 xterm.js 实例附加到一个已存在的 session,完成双向字节流。
+ *   session 由父组件 (Sidebar/MainPane) 通过 cmd:session:create 创建,
+ *   TerminalView 只是 session 的"观察窗"。
  *
  * @关键设计:
- * - xterm.js + FitAddon + WebLinksAddon (Search 等其他 addon 在 CP-4 接入)
+ * - props.session 是已创建的 SessionInfo,不在此处 spawn PTY (CP-2 起改);
+ *   CP-1 的 TerminalView 既创建又消费,CP-2 把创建职责交给 Sidebar/TabBar
  * - 主题颜色与 CSS variables 同步 (软件定义书 5.1.9 Rose Pine)
- * - 字节流: PTY → base64 → IPC → atob → xterm.write
- *           xterm.onData → utf8 → base64 → IPC → PTY
- * - resize: ResizeObserver 监听容器大小,fit 后把 cols/rows 同步给 PTY
- * - 组件卸载时关闭 session (避免僵尸 PTY,虽然 main 端窗口关闭也会清理)
+ * - 字节流: PTY → main → evt:session:output → atob → xterm.write
+ *           xterm.onData → utf8 → base64 → cmd:session:send-input → main
+ * - 用 sessionId 作 React key,session 切换时强制重建 xterm 实例
+ *   (避免 viewport / 滚动状态错乱)
+ * - 组件卸载时不调 cmd:session:close (session 跨 mount 存活,
+ *   关闭由 Tab × 显式触发 / 窗口关闭由 main 端 handleWindowClosed 处理)
  *
  * @对应文档章节:
  *   软件定义书.md 5.1.4 (终端体验)、5.1.9 (主题);
- *   ipc-protocol.md 第 5.2、第 8 (字节流);
- *   AGENTS.md CP-1 完成标志 ("xterm 里能正确显示 PowerShell 提示符,能输入命令")
+ *   ipc-protocol.md 第 5.2、第 8 (字节流)
  *
- * @CP-1 限制:
- * - 一窗一终端 (sessionId = windowId)
- * - 不接入 OSC 1337 cwd 跟踪 (CP-3)
- * - 不接入复制粘贴菜单 / 搜索 (CP-4)
- * - 简单的 Rose Pine 默认主题,主题切换在 CP-4
+ * @CP-2 限制:
+ * - 切换 session 后再切回:看不到历史输出 (无 scrollback,CP-3 接入)
+ * - 不接 OSC 1337 cwd 跟踪 (CP-3)
+ * - 不接复制粘贴菜单 / 搜索 (CP-4)
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { COMMAND_CHANNELS, EVENT_CHANNELS, type SessionOutputPayload } from '@shared/protocol';
+import {
+  COMMAND_CHANNELS,
+  EVENT_CHANNELS,
+  type SessionOutputPayload,
+} from '@shared/protocol';
+import type { SessionInfo } from '@shared/types';
 import '@xterm/xterm/css/xterm.css';
 
-/**
- * Rose Pine xterm 主题 (软件定义书 5.1.9)。
- * 16 色 ANSI 映射尽量贴近官方 Rose Pine 调色板,确保 ls --color 等
- * 输出在视觉上与 UI 主题一致。
- */
 const ROSE_PINE_XTERM_THEME = {
   background: '#191724',
   foreground: '#e0def4',
@@ -59,36 +61,23 @@ const ROSE_PINE_XTERM_THEME = {
 } as const;
 
 interface TerminalViewProps {
-  /** 当前窗口的 ID,作为 session 创建依据 (CP-1 sessionId = windowId) */
-  windowId: string;
+  session: SessionInfo;
+  myWindowId: string;
 }
 
-interface TerminalSessionInfo {
-  sessionId: string;
-  pid: number;
-  shellPath: string;
-  cwd: string;
-}
-
-export function TerminalView({ windowId }: TerminalViewProps): JSX.Element {
+export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [info, setInfo] = useState<TerminalSessionInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const isOwner = session.ownerWindowId === myWindowId;
 
   useEffect(() => {
-    if (windowId === 'bootstrap') {
-      // bootstrap 占位窗口 (没经过 WindowManager 分配真实 UUID),不启 PTY
-      setError(
-        'windowId 是 bootstrap 占位值,说明窗口不是由 WindowManager 创建的。' +
-          '检查 main/index.ts 是否走了正常 bootstrap 流程。',
-      );
+    const container = containerRef.current;
+    if (!container) return undefined;
+    if (!isOwner) {
+      // 非 owner 不渲染终端 (output 不会推过来)。CP-2 简化:
+      // 显示提示。CP-3 接入 scrollback 后非 owner 也可看历史。
       return undefined;
     }
 
-    const container = containerRef.current;
-    if (!container) return undefined;
-
-    // —— 创建 xterm 实例 ——
     const term = new Terminal({
       fontFamily:
         '"Cascadia Mono", "JetBrains Mono", Consolas, "LXGW WenKai Mono", monospace',
@@ -105,98 +94,58 @@ export function TerminalView({ windowId }: TerminalViewProps): JSX.Element {
     const webLinksAddon = new WebLinksAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
-
     term.open(container);
 
-    // 初次 fit 后才知道实际 cols/rows
-    let cols = 80;
-    let rows = 24;
     try {
       fitAddon.fit();
-      cols = term.cols;
-      rows = term.rows;
     } catch {
-      // 极小窗口下 fit 可能抛错,fallback 到 80x24
+      /* 忽略极小窗口 fit 错误 */
     }
 
-    // —— 创建 PTY session ——
-    let cleanupOutput: (() => void) | null = null;
-    let cleanupExited: (() => void) | null = null;
-    let disposed = false;
-    let sessionId: string | null = null;
+    const cols = term.cols;
+    const rows = term.rows;
 
-    void (async () => {
-      try {
-        const response = await window.api.invoke<
-          { cols: number; rows: number },
-          TerminalSessionInfo
-        >(COMMAND_CHANNELS.SESSION_CREATE, { cols, rows });
-        if (disposed) {
-          // 组件已卸载,关掉刚开的 PTY 避免泄漏
-          await window.api
-            .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId: response.sessionId })
-            .catch(() => {});
-          return;
-        }
-        sessionId = response.sessionId;
-        setInfo(response);
+    // 启动后立即同步初始尺寸给 PTY (session 的初始 cols/rows 可能与
+    // 当前 xterm fit 后的实际值不同,一次性矫正)
+    if (cols !== session.cols || rows !== session.rows) {
+      window.api
+        .invoke(COMMAND_CHANNELS.SESSION_RESIZE, {
+          sessionId: session.id,
+          cols,
+          rows,
+        })
+        .catch(() => {});
+    }
 
-        // 接收 PTY 输出
-        cleanupOutput = window.api.on<SessionOutputPayload>(
-          EVENT_CHANNELS.SESSION_OUTPUT,
-          (payload) => {
-            if (payload.sessionId !== response.sessionId) return;
-            const bytes = decodeBase64ToBytes(payload.data);
-            term.write(bytes);
-          },
-        );
+    // 接 PTY 输出
+    const cleanupOutput = window.api.on<SessionOutputPayload>(
+      EVENT_CHANNELS.SESSION_OUTPUT,
+      (payload) => {
+        if (payload.sessionId !== session.id) return;
+        const bytes = decodeBase64ToBytes(payload.data);
+        term.write(bytes);
+      },
+    );
 
-        // PTY 退出 → 显示提示
-        cleanupExited = window.api.on<{ sessionId: string; exitCode: number }>(
-          EVENT_CHANNELS.SESSION_EXITED,
-          (payload) => {
-            if (payload.sessionId !== response.sessionId) return;
-            term.write(
-              `\r\n\x1b[33m[EasyTerm] PTY 退出,exitCode=${payload.exitCode}\x1b[0m\r\n`,
-            );
-          },
-        );
+    // 用户键盘输入 → 发回 PTY
+    const dataHandler = term.onData((data) => {
+      const base64 = encodeStringToBase64(data);
+      window.api
+        .invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
+          sessionId: session.id,
+          data: base64,
+        })
+        .catch((err) => console.error('[TerminalView] send-input failed', err));
+    });
 
-        // 把用户输入回传给 PTY
-        term.onData((data) => {
-          const base64 = encodeStringToBase64(data);
-          window.api
-            .invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
-              sessionId: response.sessionId,
-              data: base64,
-            })
-            .catch((err) => {
-              console.error('[TerminalView] send-input failed', err);
-            });
-        });
-      } catch (err) {
-        if (!disposed) {
-          setError(
-            `创建 session 失败: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    })();
-
-    // —— 监听容器大小变化,自动 resize ——
-    //
-    // 关键防抖三件:
-    // 1. requestAnimationFrame 合并同一帧内的多次 ResizeObserver 触发
-    //    (fit() 可能引起 xterm 内部 DOM 重排,即使 .terminal-host 用
-    //     flex:1 1 0 + overflow:hidden 隔离也尽量保险)
-    // 2. lastCols/lastRows 比较,cols/rows 没真的变化时不发 IPC,避免
-    //    cmd:session:resize 风暴 (PTY resize 是相对昂贵的系统调用)
-    // 3. fit() 失败时直接退出,避免抛错让 xterm 进入半死状态
-    let lastCols = -1;
-    let lastRows = -1;
+    // ResizeObserver:容器变化 → fit + cmd:session:resize (RAF debounce)
+    let lastCols = cols;
+    let lastRows = rows;
     let pendingFrame: number | null = null;
-    const triggerFit = (): void => {
-      if (pendingFrame !== null) return; // 已有一帧排队,等它跑完
+    let disposed = false;
+    const resizeObserver = new ResizeObserver(() => {
+      if (disposed) return;
+      if (pendingFrame !== null) return;
       pendingFrame = requestAnimationFrame(() => {
         pendingFrame = null;
         if (disposed) return;
@@ -210,52 +159,45 @@ export function TerminalView({ windowId }: TerminalViewProps): JSX.Element {
         if (newCols === lastCols && newRows === lastRows) return;
         lastCols = newCols;
         lastRows = newRows;
-        if (sessionId) {
-          window.api
-            .invoke(COMMAND_CHANNELS.SESSION_RESIZE, {
-              sessionId,
-              cols: newCols,
-              rows: newRows,
-            })
-            .catch((err) => {
-              console.warn('[TerminalView] resize PTY failed', err);
-            });
-        }
+        window.api
+          .invoke(COMMAND_CHANNELS.SESSION_RESIZE, {
+            sessionId: session.id,
+            cols: newCols,
+            rows: newRows,
+          })
+          .catch(() => {});
       });
-    };
-
-    const resizeObserver = new ResizeObserver(triggerFit);
+    });
     resizeObserver.observe(container);
 
     return () => {
       disposed = true;
+      if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
       resizeObserver.disconnect();
-      if (pendingFrame !== null) {
-        cancelAnimationFrame(pendingFrame);
-        pendingFrame = null;
-      }
-      cleanupOutput?.();
-      cleanupExited?.();
-      if (sessionId) {
-        // 主动关闭 session;main 端窗口关闭时也会清理,这里是双保险
-        window.api
-          .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId })
-          .catch(() => {});
-      }
+      cleanupOutput();
+      dataHandler.dispose();
       term.dispose();
     };
-  }, [windowId]);
+  }, [session.id, isOwner, session.cols, session.rows, myWindowId]);
 
-  if (error) {
+  if (!isOwner) {
     return (
-      <div className="terminal-error">
-        <h2>终端启动失败</h2>
-        <pre>{error}</pre>
-        <p className="hint">
-          常见排查: 1) 检查 PowerShell 是否在 PATH; 2) 检查 node-pty 是否
-          为当前 Electron 重编译过 (跑 npm run postinstall);
-          3) 看主进程日志。
+      <div className="terminal-not-owner">
+        <p>
+          这个会话当前由 <strong>另一个窗口</strong> 持有。
+          点击此处接管 (CP-2 简化:接管后看不到历史输出,CP-3 接入 scrollback 后修)。
         </p>
+        <button
+          type="button"
+          className="terminal-claim-btn"
+          onClick={() =>
+            void window.api.invoke(COMMAND_CHANNELS.SESSION_CLAIM, {
+              sessionId: session.id,
+            })
+          }
+        >
+          接管会话
+        </button>
       </div>
     );
   }
@@ -263,44 +205,30 @@ export function TerminalView({ windowId }: TerminalViewProps): JSX.Element {
   return (
     <div className="terminal-wrapper">
       <div className="terminal-statusbar">
-        {info ? (
-          <>
-            <span className="status-dot active" />
-            <span className="status-text">PowerShell · pid {info.pid}</span>
-            <span className="status-cwd" title={info.cwd}>
-              {info.cwd}
-            </span>
-          </>
-        ) : (
-          <>
-            <span className="status-dot pending" />
-            <span className="status-text">正在启动 PowerShell…</span>
-          </>
-        )}
+        <span className="status-dot active" />
+        <span className="status-text">
+          {session.displayName} · pid {session.pid}
+        </span>
+        <span className="status-cwd" title={session.cwd}>
+          {session.cwd}
+        </span>
       </div>
       <div className="terminal-host" ref={containerRef} />
     </div>
   );
 }
 
-// ─── 帮助函数:base64 ⇄ bytes ─────────────────────────────────────────
-
 function decodeBase64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const len = binary.length;
   const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
 function encodeStringToBase64(str: string): string {
-  // 用 TextEncoder 拿到 UTF-8 字节,再走 btoa
   const utf8 = new TextEncoder().encode(str);
   let binary = '';
-  for (const byte of utf8) {
-    binary += String.fromCharCode(byte);
-  }
+  for (const byte of utf8) binary += String.fromCharCode(byte);
   return btoa(binary);
 }

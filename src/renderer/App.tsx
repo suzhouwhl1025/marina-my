@@ -1,24 +1,19 @@
 /**
  * @file src/renderer/App.tsx
- * @purpose 应用根组件。CP-1 阶段做 handshake (协议版本校验) + 渲染
- *   单一 TerminalView。CP-2 起接入路由切换 MainView (侧栏 + tabs) /
- *   SettingsView。
+ * @purpose 应用根组件:handshake 协议 → AppStateProvider → useIpcSync 拉
+ *   snapshot + 订阅事件 → 渲染 Sidebar + MainPane 主布局。
  *
- * @关键设计 (CP-1):
- * - handshake: 启动后立即调 cmd:app:get-protocol-version,版本不匹配
- *   显示明显错误页 (ipc-protocol.md 4.3、10.3)
- * - 通过 window.api 提供的 windowNumber 显示在标题区,验证 windowId
- *   的 query string 传递链路
- *
- * @对应文档章节: 软件定义书.md 6.1 (整体布局);ipc-protocol.md 第 4 章
+ * @对应文档章节: 软件定义书.md 6.1 (整体布局);ipc-protocol.md 第 4 章 handshake
  */
 import { useEffect, useState } from 'react';
 import { PROTOCOL_VERSION } from '@shared/protocol';
-import { TerminalView } from './components/TerminalView';
+import { AppStateProvider, useAppState, useIpcSync } from './store';
+import { Sidebar } from './components/Sidebar';
+import { MainPane } from './components/MainPane';
 
 type HandshakeState =
   | { status: 'pending' }
-  | { status: 'ok'; buildVersion: string; protocolVersion: number }
+  | { status: 'ok'; buildVersion: string }
   | { status: 'mismatch'; mainVersion: number; rendererVersion: number }
   | { status: 'error'; message: string };
 
@@ -44,7 +39,7 @@ export function App(): JSX.Element {
           });
           return;
         }
-        setHandshake({ status: 'ok', buildVersion, protocolVersion });
+        setHandshake({ status: 'ok', buildVersion });
       })
       .catch((err: unknown) => {
         setHandshake({
@@ -55,56 +50,94 @@ export function App(): JSX.Element {
   }, []);
 
   if (handshake.status === 'pending') {
-    return (
-      <div className="app-root">
-        <div className="bootstrap-placeholder">
-          <h1>EasyTerm</h1>
-          <p className="subtitle">正在握手…</p>
-        </div>
-      </div>
-    );
+    return <FullPagePlaceholder title="EasyTerm" subtitle="正在握手…" />;
   }
 
   if (handshake.status === 'mismatch') {
     return (
-      <div className="app-root">
-        <div className="bootstrap-placeholder error">
-          <h1>EasyTerm</h1>
-          <p className="subtitle">协议版本不匹配</p>
-          <p className="hint">
-            主进程协议版本 {handshake.mainVersion},渲染端 {handshake.rendererVersion}。
-            这通常意味着应用文件被部分替换。请重启 EasyTerm 或重装。
-          </p>
-        </div>
-      </div>
+      <FullPagePlaceholder
+        title="EasyTerm"
+        subtitle="协议版本不匹配"
+        body={`主进程协议版本 ${handshake.mainVersion},渲染端 ${handshake.rendererVersion}。请重启应用或重装。`}
+        variant="error"
+      />
     );
   }
 
   if (handshake.status === 'error') {
     return (
-      <div className="app-root">
-        <div className="bootstrap-placeholder error">
-          <h1>EasyTerm</h1>
-          <p className="subtitle">启动失败</p>
-          <pre className="error-pre">{handshake.message}</pre>
-        </div>
-      </div>
+      <FullPagePlaceholder
+        title="EasyTerm"
+        subtitle="启动失败"
+        body={handshake.message}
+        variant="error"
+      />
     );
   }
 
-  // handshake OK — 渲染主视图
+  // handshake OK
   return (
-    <div className="app-root with-terminal">
+    <AppStateProvider
+      myWindowId={window.api.windowId}
+      myWindowNumber={window.api.windowNumber}
+    >
+      <ConnectedShell buildVersion={handshake.buildVersion} />
+    </AppStateProvider>
+  );
+}
+
+function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element {
+  const sync = useIpcSync();
+  const state = useAppState();
+
+  if (sync.error) {
+    return (
+      <FullPagePlaceholder
+        title="EasyTerm"
+        subtitle="加载 snapshot 失败"
+        body={sync.error}
+        variant="error"
+      />
+    );
+  }
+
+  if (!sync.ready) {
+    return <FullPagePlaceholder title="EasyTerm" subtitle="加载状态…" />;
+  }
+
+  return (
+    <div className="app-root with-shell">
       <header className="app-header">
         <span className="app-title">EasyTerm</span>
-        <span className="app-window-badge">
-          Window {window.api.windowNumber || '?'}
-        </span>
-        <span className="app-version">v{handshake.buildVersion}</span>
+        <span className="app-window-badge">Window {state.myWindowNumber || '?'}</span>
+        <span className="app-version">v{buildVersion}</span>
       </header>
-      <main className="app-main">
-        <TerminalView windowId={window.api.windowId} />
-      </main>
+      <div className="app-body">
+        <Sidebar />
+        <MainPane />
+      </div>
+    </div>
+  );
+}
+
+function FullPagePlaceholder({
+  title,
+  subtitle,
+  body,
+  variant,
+}: {
+  title: string;
+  subtitle: string;
+  body?: string;
+  variant?: 'error';
+}): JSX.Element {
+  return (
+    <div className="app-root">
+      <div className={`bootstrap-placeholder${variant === 'error' ? ' error' : ''}`}>
+        <h1>{title}</h1>
+        <p className="subtitle">{subtitle}</p>
+        {body && <pre className="error-pre">{body}</pre>}
+      </div>
     </div>
   );
 }
