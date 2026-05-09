@@ -213,7 +213,12 @@ export class PtyController {
     const { sessionId, cols, rows } = envelope.payload;
     const managed = this.ptys.get(sessionId);
     if (!managed) {
-      throw new Error(`[PtyController] SessionNotFound: sessionId="${sessionId}"`);
+      // 关闭窗口时常见的竞态:ResizeObserver 在窗口收缩动画里还在触发,
+      // 此时 onWindowClosed 已经把 PTY 杀了。renderer 进程要等 webContents
+      // 销毁后才停 IPC,这中间堆积的 resize 全部命中 SessionNotFound。
+      // resize 是纯 UI 提示,session 没了静默 no-op 是正确语义,
+      // 抛错只会污染 main 日志。同样适用于 HMR 重连的瞬间。
+      return;
     }
     const validated = validateDimensions(cols, rows);
     try {
