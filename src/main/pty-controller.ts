@@ -202,7 +202,11 @@ export class PtyController {
     const { sessionId, data } = envelope.payload;
     const managed = this.ptys.get(sessionId);
     if (!managed) {
-      throw new Error(`[PtyController] SessionNotFound: sessionId="${sessionId}"`);
+      // 与 resize 同样的关闭/HMR/StrictMode 双挂载竞态:用户在窗口
+      // 关闭瞬间或 dev 双挂载间隙敲键,xterm.onData 仍会 fire,IPC 到达
+      // 时 PTY 已被 killByWindowId 清掉。input 丢失是正确语义 (PTY 死了
+      // 输入本就无去处),抛错只污染 main 日志。
+      return;
     }
     // data 是 base64,转回字符串再 write
     const text = Buffer.from(data, 'base64').toString('utf8');
