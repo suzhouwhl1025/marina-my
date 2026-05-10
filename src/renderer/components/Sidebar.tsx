@@ -237,8 +237,7 @@ export function Sidebar(): JSX.Element {
             type="button"
             className="settings-entry"
             onClick={() => dispatch({ type: 'view/enter-settings' })}
-            title="设置 (CP-4 接入)"
-            disabled
+            title="设置"
           >
             ⚙ 设置
           </button>

@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.preload.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint --ext .ts,.tsx src",
     "lint:fix": "eslint --ext .ts,.tsx src --fix",
+    "lint:css": "stylelint \"src/**/*.css\"",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,html,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,html,json}\"",
     "test": "vitest run",

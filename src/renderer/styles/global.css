@@ -28,7 +28,7 @@
   --ui-font-family:
     'LXGW WenKai', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --terminal-font-family:
-    'Cascadia Mono', 'JetBrains Mono', Consolas, 'LXGW WenKai Mono', monospace;
+    'Cascadia Mono', 'JetBrains Mono', consolas, 'LXGW WenKai Mono', monospace;
 }
 
 /* Rose Pine — 默认 (尚未 data-theme 设置时也用此) */
@@ -302,7 +302,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px 4px 12px;
+  padding: 4px 12px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.6px;
@@ -649,6 +649,7 @@ button:disabled {
   font-size: 12px;
   user-select: none;
 }
+
 .ctx-menu-title {
   padding: 6px 10px 4px;
   color: var(--subtle, #f0f);
@@ -659,6 +660,7 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
 .ctx-menu-item {
   display: flex;
   align-items: center;
@@ -674,18 +676,22 @@ button:disabled {
   border-radius: 3px;
   white-space: nowrap;
 }
+
 .ctx-menu-item:hover {
   background-color: var(--highlight-low, #f0f);
 }
+
 .ctx-menu-item.checked {
   color: var(--iris, #f0f);
 }
+
 .ctx-menu-check {
   width: 12px;
   flex: 0 0 auto;
   text-align: center;
   font-weight: bold;
 }
+
 .ctx-menu-label {
   flex: 1 1 auto;
   overflow: hidden;
@@ -700,12 +706,15 @@ button:disabled {
   flex: 0 0 auto;
   background-color: var(--muted, #f0f);
 }
+
 .tab-state-active {
   background-color: var(--pine, #f0f);
 }
+
 .tab-state-idle {
   background-color: var(--gold, #f0f);
 }
+
 .tab-state-exited {
   background-color: var(--muted, #f0f);
 }
@@ -887,6 +896,332 @@ button:disabled {
 .sidebar-bookmarks-dropzone::-webkit-scrollbar-thumb:hover,
 .tab-bar::-webkit-scrollbar-thumb:hover {
   background-color: var(--highlight-high, #f0f);
+}
+
+/* ── Settings View (CP-4) ─────────────────────────────────────── */
+
+.settings-view {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background-color: var(--base, #f0f);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background-color: var(--surface, #f0f);
+  border-bottom: 1px solid var(--overlay, #f0f);
+  flex: 0 0 auto;
+}
+
+.settings-close {
+  background: transparent;
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 16px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-close:hover {
+  background-color: var(--love, #f0f);
+  color: var(--base, #f0f);
+  border-color: var(--love, #f0f);
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text, #f0f);
+}
+
+.settings-error {
+  margin-left: auto;
+  color: var(--love, #f0f);
+  font-size: 12px;
+}
+
+.settings-body {
+  flex: 1 1 0;
+  display: flex;
+  min-height: 0;
+}
+
+.settings-nav {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px;
+  background-color: var(--surface, #f0f);
+  border-right: 1px solid var(--overlay, #f0f);
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text, #f0f);
+  font-size: 13px;
+  border-radius: 4px;
+  text-align: left;
+}
+
+.settings-nav-item:hover {
+  background-color: var(--highlight-low, #f0f);
+}
+
+.settings-nav-item.active {
+  background-color: var(--highlight-med, #f0f);
+  color: var(--iris, #f0f);
+}
+
+.settings-nav-icon {
+  width: 16px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+
+.settings-nav-label {
+  flex: 1 1 auto;
+}
+
+.settings-detail {
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: 24px 32px;
+  background-color: var(--base, #f0f);
+}
+
+.settings-panel {
+  max-width: 720px;
+}
+
+.settings-panel-title {
+  margin: 0 0 20px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--iris, #f0f);
+}
+
+.settings-row {
+  display: flex;
+  gap: 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--overlay, #f0f);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-meta {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-row-label {
+  color: var(--text, #f0f);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-row-hint {
+  color: var(--subtle, #f0f);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-row-control {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.settings-placeholder {
+  color: var(--muted, #f0f);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* 主题选择卡片网格 */
+.settings-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.settings-theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 80ms ease;
+}
+
+.settings-theme-card:hover {
+  border-color: var(--iris, #f0f);
+}
+
+.settings-theme-card.selected {
+  border-color: var(--iris, #f0f);
+  background-color: var(--highlight-low, #f0f);
+}
+
+.settings-theme-card input[type='radio'] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.settings-theme-swatch {
+  display: flex;
+  height: 18px;
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--overlay, #f0f);
+}
+
+.settings-theme-swatch > span {
+  flex: 1 1 0;
+}
+
+.swatch-base {
+  background-color: var(--base, #f0f);
+}
+
+.swatch-iris {
+  background-color: var(--iris, #f0f);
+}
+
+.swatch-pine {
+  background-color: var(--pine, #f0f);
+}
+
+.swatch-gold {
+  background-color: var(--gold, #f0f);
+}
+
+.swatch-love {
+  background-color: var(--love, #f0f);
+}
+
+.settings-theme-name {
+  font-size: 12px;
+  color: var(--text, #f0f);
+  font-weight: 500;
+}
+
+.settings-theme-tone {
+  font-size: 10px;
+  color: var(--subtle, #f0f);
+}
+
+/* 复选 / 单选 / 数字框 / 下拉框 通用样式 */
+.settings-input {
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  padding: 4px 8px;
+  font-size: 13px;
+  border-radius: 4px;
+  min-width: 160px;
+  font-family: inherit;
+}
+
+.settings-input:focus {
+  outline: 1px solid var(--iris, #f0f);
+  outline-offset: -1px;
+  border-color: var(--iris, #f0f);
+}
+
+.settings-input.numeric {
+  min-width: 80px;
+}
+
+.settings-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #f0f);
+  cursor: pointer;
+}
+
+.settings-checkbox input {
+  margin: 0;
+  accent-color: var(--iris, #f0f);
+}
+
+.settings-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #f0f);
+  cursor: pointer;
+}
+
+.settings-radio input {
+  margin: 0;
+  accent-color: var(--iris, #f0f);
+}
+
+.settings-button {
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.settings-button:hover:not(:disabled) {
+  background-color: var(--highlight-low, #f0f);
+  border-color: var(--iris, #f0f);
+}
+
+.settings-button.danger {
+  border-color: var(--love, #f0f);
+  color: var(--love, #f0f);
+}
+
+.settings-button.danger:hover:not(:disabled) {
+  background-color: var(--love, #f0f);
+  color: var(--base, #f0f);
+}
+
+.settings-info-text {
+  color: var(--muted, #f0f);
+  font-size: 12px;
+  font-family: var(--terminal-font-family, monospace);
+  word-break: break-all;
 }
 
 /* ── Bootstrap / 错误占位 ── */

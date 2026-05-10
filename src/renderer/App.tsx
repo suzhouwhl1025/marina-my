@@ -1,26 +1,20 @@
 /**
  * @file src/renderer/App.tsx
  * @purpose 应用根组件:handshake 协议 → AppStateProvider → useIpcSync 拉
- *   snapshot + 订阅事件 → 渲染 Sidebar + MainPane 主布局。
+ *   snapshot + 订阅事件 → 渲染主布局。
  *
- * @对应文档章节: 软件定义书.md 6.1 (整体布局);ipc-protocol.md 第 4 章 handshake
+ *   CP-4 起 inSettingsView=true 时,整个 body 被 SettingsView 替换 (用户
+ *   决策对齐:"替换整个 body" 而非 modal 或仅替换 main pane)。
+ *
+ * @对应文档章节: 软件定义书.md 6.1 (整体布局)、6.6 (设置页面);
+ *   ipc-protocol.md 第 4 章 handshake
  */
 import { useEffect, useState } from 'react';
-import { COMMAND_CHANNELS, PROTOCOL_VERSION } from '@shared/protocol';
-import type { ThemeId } from '@shared/types';
+import { PROTOCOL_VERSION } from '@shared/protocol';
 import { AppStateProvider, useAppState, useIpcSync } from './store';
 import { Sidebar } from './components/Sidebar';
 import { MainPane } from './components/MainPane';
-
-const THEME_CYCLE: ThemeId[] = [
-  'rose-pine',
-  'rose-pine-dawn',
-  'rose-pine-moon',
-  'cutie',
-  'business',
-  'ubuntu',
-  'windows-terminal',
-];
+import { SettingsView } from './components/SettingsView';
 
 type HandshakeState =
   | { status: 'pending' }
@@ -118,35 +112,21 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
 
   const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
 
-  const cycleTheme = (): void => {
-    const idx = THEME_CYCLE.indexOf(currentTheme);
-    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length]!;
-    window.api
-      .invoke(COMMAND_CHANNELS.SETTINGS_UPDATE, {
-        partial: { appearance: { theme: next } },
-      })
-      .catch((err) => console.error('[App] theme cycle failed', err));
-  };
-
   return (
     <div className="app-root with-shell" data-theme={currentTheme}>
       <header className="app-header">
         <span className="app-title">EasyTerm</span>
         <span className="app-window-badge">Window {state.myWindowNumber || '?'}</span>
-        <button
-          type="button"
-          className="theme-cycle-btn"
-          onClick={cycleTheme}
-          title="切换主题 (CP-2 演示跨窗口同步;颜色实际应用在 CP-4 接入)"
-        >
-          🎨 {currentTheme}
-        </button>
         <span className="app-version">v{buildVersion}</span>
       </header>
-      <div className="app-body">
-        <Sidebar />
-        <MainPane />
-      </div>
+      {state.inSettingsView ? (
+        <SettingsView />
+      ) : (
+        <div className="app-body">
+          <Sidebar />
+          <MainPane />
+        </div>
+      )}
     </div>
   );
 }
