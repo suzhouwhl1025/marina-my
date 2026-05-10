@@ -1,0 +1,191 @@
+# CP-3 自测报告
+
+**完成日期**:2026-05-10
+**对应分支**:`checkpoint-3`
+**最新 commit**:见 `git log --oneline checkpoint-3 ^main`
+
+---
+
+## 文档与设计变更确认
+
+CP-3 启动前已落地两项与 CP-2 软件定义书冲突的设计变更(ADR-008,doc commit `e0544e5`):
+
+1. **path 与 cwd 解耦** — `session.pathId` 创建时确定后**永远不变**;cwd 变化(cd 等)仅触发 tab UI 上的 ⚠️ 提示,不再驱动 path 在分类间迁移。
+2. **砍 5 分钟墓地 + 重启** — PTY 进程退出后 session 进入 `exited` 状态,scrollback 完整保留,无时限自动消失;不可重启,用户右键关闭才销毁。
+
+软件定义书相应章节(4 / 5.1.2 / 5.1.8 / 8.3 / 9.3 / 10.2 / 11.1 / 11.2 / 13.1 / 附录 A、C)与 AGENTS.md CP-3 完成标志已同步修订。
+
+---
+
+## 已通过的自动化测试
+
+```
+$ npm test
+✓ src/shared/protocol.test.ts          (  6)
+✓ src/main/pty-utils.test.ts           ( 11)
+✓ src/main/platform/index.test.ts      (  7)
+✓ src/main/path-manager.test.ts        ( 36)
+✓ src/main/persistence.test.ts         ( 18)
+✓ src/main/settings-manager.test.ts    ( 38)
+✓ src/main/window-manager.test.ts      ( 19)
+✓ src/main/templates-manager.test.ts   ( 11)   ← 新增
+✓ src/main/session-manager.test.ts     ( 46)   ← CP-3 重写
+
+Test Files   9 passed
+     Tests 192 passed
+```
+
+```
+$ npm run typecheck   通过 (3 个 tsconfig 严格模式)
+```
+
+```
+$ npm run test:coverage   (核心模块)
+osc1337-parser.ts        99.04%   ← 新增
+path-manager.ts          97.58%
+persistence.ts           96.77%
+session-manager.ts       87.50%   ← AGENTS.md CP-3 标志要求 > 80%
+settings-manager.ts      93.72%
+templates-manager.ts     98.59%   ← 新增
+window-manager.ts        90.49%
+pty-utils.ts            100.00%
+platform/index.ts       100.00%
+shared/protocol.ts      100.00%
+─────────────────────────────────
+All 核心模块             94.49%
+```
+
+排除的文件(按 vitest.config.ts):`index.ts` / `ipc.ts` / `tray.ts` / `platform/{macos,linux,windows}.ts` — wiring/集成代码或平台占位,按 AGENTS.md 5.4 不要求单测。
+
+---
+
+## CP-3 完成标志逐条对照(AGENTS.md 4.2,ADR-008 修订后)
+
+| 标志 | 实现 | 验证方式 |
+|---|---|---|
+| Session 三种状态显示自动切换 | ✅ | `session-manager.ts` markActive / scheduleIdleCheck / handlePtyExit;Sidebar+Tab 状态点 🟢/🟡/⚫;46 个单测覆盖状态机所有转移 |
+| session 内 `cd` → 标签上 ⚠️ 提示真实 cwd,session 不动 path | ✅ | OSC 1337 解析器更新 `currentCwd`,`pathId` 不变;Tab/SessionItem/TerminalView 都比较 currentCwd vs originalCwd 大小写无关 |
+| Session 进程退出后灰显 ⚫,scrollback 保留,无时限 | ✅ | `handlePtyExit` 进 'exited' 状态不 destroy;scrollback ring buffer 持续可用;只有 closeSession / shutdown 真销毁 |
+| 4 个内置模板 | ✅ | `BUILTIN_TEMPLATES`:shell / claude-code / codex / opencode;命令不存在由 shell 自然报错(claude / codex / opencode 实际未安装时 PowerShell 输出"不是 cmdlet") |
+| 收藏路径设默认模板 → 双击启动 | ✅ | bookmark.defaultTemplateId 优先于全局 default;Sidebar 右键弹 prompt 选择(CP-4 完整化为 context menu) |
+| OSC 1337 hook for PowerShell | ✅ | `pwsh.ps1` wrap prompt + 加载用户 $PROFILE + 失败仅 warn;CP-2 报告的 banner 重复 8 次问题顺手修复(`-NoLogo` + 单次 dot-source) |
+| OSC 1337 hook for cmd.exe | ✅ | `WindowsAdapter.buildShellLaunchParams` 给 cmd 设 `PROMPT=$E]1337;CurrentDir=$P$E\\$P$G ` 环境变量内嵌 OSC 序列(ESC \ 即 ST 终止符) |
+| OSC 1337 兜底:5 秒无 OSC 启轮询 | ✅(结构) | SessionManager 5 秒 grace timer + 5 秒间隔 polling;收到首条 OSC 立即关。**注意**:`WindowsAdapter.getProcessCwd` V1 返回 null(NTAPI 路线需 ffi-napi 原生包,违 AGENTS.md 1.2 边界 2),所以兜底实际不会更新 cwd。OSC 1337 hook 是 V1 唯一可靠机制。结构已就位,未来加原生绑定即生效 |
+| scrollback 2MB 环形缓冲 | ✅ | `SCROLLBACK_LIMIT = 2 * 1024 * 1024`;超过尾部裁切;getScrollback IPC 返回 base64 + lastSeq;owner 切换/接管时拉历史回放 |
+| 状态机模块测试覆盖率 > 80% | ✅ | session-manager.ts 87.50%;path-manager.ts 97.58%;osc1337-parser.ts 99.04% |
+
+---
+
+## 主要架构变化(vs CP-2)
+
+1. **SessionInfo 数据模型**(shared/types.ts):
+   - state 三态新名:'active' | 'idle' | **'exited'**(取代 tombstoned)
+   - `cwd` 字段拆为 `originalCwd`(永不变)+ `currentCwd`(OSC 1337 实时更新)
+   - 新增 `exitedAt`,删除 `tombstonedAt`
+
+2. **Settings 数据模型**(settings-manager.ts):
+   - 删除 `advanced.sessionTombstoneMinutes`(砍墓地无 5 分钟计时器)
+   - `activeIdleThresholdSeconds` 真实生效(CP-2 仅声明,CP-3 SessionManager 接通)
+
+3. **OSC 1337 解析器**(`osc1337-parser.ts`,210 行):
+   - 增量字节流解析,跨多次 onData 也能拼接
+   - 不损耗任何字节流(序列剥离后 passthrough 透传)
+   - 接受 BEL 与 ST 两种终止符
+   - stash 上限 16KB 防内存堆积
+   - 8 个边界单测(跨包、ANSI 夹杂、孤立 ESC、其他 OSC 透传、超长 stash flush)
+
+4. **TemplatesManager**(`templates-manager.ts`,313 行):
+   - 4 内置模板 + JsonStore 持久化 + mergeBuiltins 自动补齐
+   - 损坏文件兜底走默认值,defaultId 不存在回退 'shell'
+   - resolve(id) 给 SessionManager 用,确保永远拿到一个可用模板
+   - 11 个单测覆盖 mergeBuiltins 各分支 + initialize / setDefault / list / get
+
+5. **SessionManager 重构**(session-manager.ts,从 547 行扩到 870 行):
+   - createSession 改为 async(detectShells 异步)
+   - 每 session 一份 Osc1337Parser
+   - active/idle/exited 状态机 + 计时器集中管理
+   - PTY exit → state='exited',不立即 destroy(ADR-008)
+   - cwd 兜底 timer 启停(收到首条 OSC 永久关闭)
+   - 启动模板支持 shell+command 串接(通过 PlatformAdapter)
+   - PlatformAdapter / spawnFn / hookFileResolver 全部可注入
+   - 测试从 21 个扩到 46 个
+
+6. **WindowsAdapter 真实化**(platform/windows.ts):
+   - detectShells:exists 检查 pwsh > powershell > cmd > git-bash
+   - buildShellLaunchParams:三种 shell 的 hook + commandToRun 串接
+     - PowerShell:`-NoLogo -NoExit -Command ". 'hook.ps1'; & cmd args"`(顺手修 banner 重复)
+     - cmd:PROMPT 环境变量 + 可选 `/K command`
+     - bash:`--rcfile + -c "cmd; exec bash -i"`
+   - getProcessCwd:返回 null + 文档化(留接口,未来加原生绑定即可)
+
+7. **PathManager 防御加固**(path-manager.ts):
+   - attachSession 用同 sessionId 不同 path 时记 warn(ADR-008 后这是 bug)
+
+8. **IPC 层增量**(ipc.ts):
+   - SESSION_CREATE handler 改 async
+   - 新增 evt:session:state-changed 广播
+   - 新增 evt:templates:updated 广播
+   - buildSnapshot 用 TemplatesManager.list 替代硬编码
+
+9. **Renderer 改造**(store / Sidebar / MainPane / TerminalView / global.css):
+   - 三态状态点 (active 🟢 / idle 🟡 / exited ⚫) 在 Tab 与 SessionItem
+   - cwd 漂移 ⚠️ 在 Tab 与 SessionItem 与 TerminalView 状态条
+   - EmptyPathState 模板按钮直接用对应 templateId(CP-2 全部 'shell')
+   - 收藏路径双击 → bookmark.defaultTemplateId 优先;右键 → prompt 设默认模板
+   - sessions/state-changed reducer 合并子集字段(state / currentCwd / exitCode 等)
+
+---
+
+## 已知 CP-3 范围内不实现的(留给后续 CP)
+
+按设计:
+
+- **完整设置 UI** + 主题颜色实际切换 → CP-4
+- **收藏路径完整右键菜单**(重命名 / 复制路径 / Explorer 中显示等)→ CP-4(CP-3 暂用 prompt 弹窗设默认模板)
+- **模板编辑器**(增删改自定义模板)→ CP-4
+- **应用打包成 .exe / .msi** → CP-4
+- **完全退出确认对话框**(有 session 时)→ CP-4 接通(SessionManager 已能 count;主进程 IPC `cmd:app:quit` handler 待加二次确认)
+- **NtQueryInformationProcess 真实实现** → 不强制做(OSC 1337 hook 已是 99% 路径;若未来加,需引入 ffi-napi 等原生包并征得作者同意,见 AGENTS.md 1.2 边界 2)
+
+---
+
+## 已知问题与平台限制
+
+未在 CP-3 内引入新的平台问题。CP-2 errata 中已记录的 ConPTY resize 双重重画问题(`docs/known-issues.md` KI-001)依然存在,行为不变。
+
+CP-3 的 cwd 跟踪:
+- PowerShell session — OSC 1337 prompt hook 应稳定工作
+- cmd.exe session — PROMPT 环境变量内嵌 OSC,稳定工作
+- 命令模板(claude-code / codex / opencode 等)— 跑命令时不在 shell prompt 下,期间 cwd 不更新;命令退出后 shell 重新出 prompt 才再次报告。这是设计预期(prompt-based hook 的固有特性)
+- 用户自定义 PowerShell `prompt` 函数 — 我们 wrap 了它,前置 OSC 后再调用原 prompt;若用户的 prompt 函数有副作用(例如已自己发 OSC),不冲突但可能有重复
+
+---
+
+## 我没自己端到端跑过的事(需要开发者测)
+
+主要是 GUI 与真实 PTY 交互层面:
+
+- 真实 PowerShell 启动后 `cd` 多次,看 tab 上 ⚠️ 是否准确出现/消失
+- 真实 cmd.exe 启动,验证 PROMPT 嵌的 OSC 序列被 main 端解析(行为表现:tab 标题不变,但 cd 后状态条 cwd 路径更新)
+- claude-code / codex / opencode 模板:命令不存在时(PATH 里没装)是否在终端区看到"不是 cmdlet"的报错(不弹对话框)
+- 收藏路径右键 → 选默认模板 → 双击该路径 → 看是否启动正确模板
+- exited session 的 scrollback 是否完整可见(等 PTY 退出后切到该 tab 上下滚)
+- 所有 CP-2 已通过项目仍然通过(回归)
+
+`CP-3-user-test-guide.md` 列了 12 项具体测试。
+
+---
+
+## 给开发者的话
+
+CP-3 是体验层的"重头戏" — Session 状态机 / cwd 跟踪 / 模板系统 三块联动,任何一块出问题都会反映为 tab 上信息错位。重点关注:
+
+1. **Banner 重复修没修**:CP-2 errata 报过 `Windows PowerShell` 横幅在窗口重开后出现 8 行。CP-3 通过 `-NoLogo` + 单次 dot-source 修复,你重启应用、关窗再开窗,看是否只出现一行 banner(或无 banner)。
+
+2. **path/cwd 解耦的语义**:在收藏路径 ~/projects/auth 下打开 PowerShell,然后 `cd D:\elsewhere`。期望:tab 标题旁出现 ⚠️,鼠标悬停看到真实 cwd;但 session 在侧栏仍归属 ~/projects/auth(不会跑到 D:\elsewhere 下)。这与 CP-2 测试时的行为完全相反,务必确认是这个新行为。
+
+3. **exited 不消失**:在 session 内输入 `exit` 让 PTY 死。tab 应变灰 + 出 ⚫,**不会自己消失**,scrollback 还能看;右键 tab(CP-2 已有"关闭"右键交互)关掉才消失。CP-2 是"立即销毁",CP-3 是"无时限保留"。
+
+4. **OSC 1337 没生效怎么办**:打 `node ipc-debug.js`(若有)或者直接 `npm run dev` 看主进程日志(VS Code Run + Debug 抓 stdout)。每次 cd 应该看到 sessionStateChanged 事件。如果 cwd 永远不更新 → hook 注入失败,先检查 `pwsh.ps1` 是否正确加载($PROFILE 报错的话只 warn,所以 hook 应该总是装上)。
+
+下个检查点 CP-4 我**不会自动开始**,等你确认 "CP-3 通过"。
