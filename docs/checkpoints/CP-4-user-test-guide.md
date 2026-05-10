@@ -207,37 +207,46 @@ npm run dev   # 启动应用
 
 ---
 
-## 测试 12:打包产物 ⚠️ 已知问题(预计 5 分钟)
+## 测试 12:打包产物(预计 5 分钟)
 
-> 见 `docs/checkpoints/CP-4-self-test.md` "已知问题 #1":Windows 上跑 `npm run build` 会因 winCodeSign 工具的符号链接权限问题失败。
+> Agent 端已验证 `npm run build` 跑通,产物在 `release/0.1.0-alpha.0/` 下。
 
-### 选项 A(推荐):启用开发者模式后构建
+### 12.1 验证产物存在
 
-1. Win+I → 隐私和安全性 → 开发者选项 → 打开"开发者模式"
-2. 关掉开发者模式确认对话框,**新开**一个 PowerShell(让权限生效)
-3. 在项目根目录 `cd <repo>` 然后 `npm run build`
-4. 等待 5 - 10 分钟(electron-builder 第一次会下 Electron 二进制 + native rebuild)
-5. 期望产物:
-   - `release/0.1.0-alpha.0/EasyTerm-Setup-0.1.0-alpha.0-x64.exe` — NSIS 安装包
-   - `release/0.1.0-alpha.0/EasyTerm-Portable-0.1.0-alpha.0-x64.exe` — Portable 版
-6. 双击 NSIS Setup → 完整安装向导(选位置 / 桌面快捷方式 / 开始菜单快捷方式)
-7. 双击 Portable → 直接启动,无需安装
+```powershell
+ls release\0.1.0-alpha.0
+```
 
-### 选项 B:管理员模式构建
+应有这几个文件:
+- `EasyTerm-Setup-0.1.0-alpha.0-x64.exe` — ~78 MB,NSIS 安装包
+- `EasyTerm-Portable-0.1.0-alpha.0-x64.exe` — ~78 MB,Portable 版
+- `EasyTerm-Setup-0.1.0-alpha.0-x64.exe.blockmap` — 增量更新元数据
+- `win-unpacked/` 目录 — 未压缩产物
 
-1. PowerShell 图标右键 → 以管理员身份运行
-2. 进项目目录 → `npm run build`
-3. 同上
+### 12.2 NSIS 安装包测试
 
-### 选项 C:清缓存后再试
+1. 双击 `EasyTerm-Setup-0.1.0-alpha.0-x64.exe`
+2. 选择安装路径(默认 `%LOCALAPPDATA%\Programs\EasyTerm`)
+3. 确认创建桌面快捷方式 + 开始菜单快捷方式
+4. 安装完成 → 双击桌面图标 → 应用启动正常
+5. 在控制面板 → 程序 → 检查"EasyTerm"已注册
+6. 卸载验证:从安装目录的 uninstaller 或控制面板卸载 → 文件清理干净
 
-1. 删除 `%LOCALAPPDATA%\electron-builder\Cache\winCodeSign\` 整个目录
-2. 启用开发者模式或管理员
-3. 重试
+### 12.3 Portable 版测试
 
-**通过条件**:`release/<ver>/` 下出现两个 .exe 文件,且双击各能启动应用。
+1. 双击 `EasyTerm-Portable-0.1.0-alpha.0-x64.exe`
+2. **应该直接启动,不弹任何安装向导**
+3. 关闭后:任务管理器查看进程已退出
+4. **可以拷贝到 U 盘 / 其他机器直接跑**(免安装)
 
-**如果跑不通**:**不视为 CP-4 失败**,这是工程师机器 + Windows 默认权限问题,不是代码问题。在 self-test 里已记为 known issue。
+### 12.4 关于页验证(确认 build 信息注入正确)
+
+1. 启动应用 → 设置 → 关于
+2. **构建信息**应显示 `commit <短 hash> · <ISO 时间>`
+3. 短 hash 应该是当前 git HEAD 的前 7 位,可对比 `git rev-parse --short HEAD`
+4. ISO 时间应该是构建时间(几分钟前)
+
+**通过条件**:Setup .exe 能正常安装 + 卸载;Portable .exe 双击直跑;关于页 build 信息正确注入。
 
 ---
 
