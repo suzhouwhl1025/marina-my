@@ -308,15 +308,20 @@ export class PathManager extends EventEmitter {
    * - 若 path 不在收藏 → 自动进入临时
    * - 若 path 在最近 → 从最近移除 (因为它要去临时了)
    *
-   * 同 sessionId 重复 attach 到不同 path 会先 detach 再 attach (CP-3 cwd
-   * 跟踪用此机制)。
+   * v1.2 起 (ADR-008):session.pathId 创建后永不变,本方法对每个 sessionId
+   * 只会被调一次。"先 detach 再 attach" 的旧逻辑保留为防御代码,正常路径
+   * 不会触发。
    */
   attachSession(sessionId: string, path: string): void {
     const normalized = normalizePath(path);
     const previousPath = this.sessionToPath.get(sessionId);
-    if (previousPath === normalized) return; // 无变化
+    if (previousPath === normalized) return; // 无变化 (重复调用)
     if (previousPath !== undefined) {
-      // 不同 path,先把旧的 detach
+      // 防御:理论上 ADR-008 后不会到这。若到了,说明上层有 bug,记一条 warn。
+      console.warn(
+        `[PathManager] attachSession 不一致: sessionId="${sessionId}" 旧 path="${previousPath}" 新 path="${normalized}"。` +
+          `ADR-008 之后 session.pathId 应永久不变,这是 bug。`,
+      );
       this.detachSessionInternal(sessionId, /* emit */ false);
     }
     this.sessionToPath.set(sessionId, normalized);

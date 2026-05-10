@@ -1,59 +1,76 @@
 /**
  * @file src/main/session-manager.ts
- * @purpose 完整 Session 管理器 — CP-2 接管 CP-1 简化版 PtyController。
- *   sessionId UUID 与 windowId 解耦,owner 字段独立,多 session 每窗口每路径。
+ * @purpose 完整 Session 管理器 — CP-3 接入状态机 (active/idle/exited)、
+ *   OSC 1337 cwd 跟踪、启动模板、scrollback ring buffer、cwd 兜底轮询。
  *
  * @关键设计:
- * - sessionId: UUID,与 windowId 完全解耦
- *   (CP-1 用 sessionId == windowId 是临时简化;现在改正)
- * - 每个 session 隶属一个 path (PathManager.attachSession 维护映射)
- * - owner_window_id 字段独立:窗口关闭时 owner 变 null,session 不死
- *   (软件定义书 8.4 + AGENTS.md CP-2 完成标志:跨窗口接管)
- * - PTY 字节流仅推送给 owner (软件定义书 9.3)。owner 切换时新 owner 通过
- *   cmd:session:get-scrollback 拉历史 — 但 CP-2 不实现 scrollback 缓冲
- *   (留给 CP-3),所以 owner 切换后看不到历史输出,接管后看到的是从此刻
- *   往后的新输出。这是 CP-2 文档化的限制。
- * - PTY 退出 → CP-2 直接 destroy session 不进墓地。墓地 5 分钟保留是
- *   CP-3 的事 (软件定义书 8.3)
- * - spawn 函数可注入,便于测试 (避免 mock 整个 node-pty 模块)
+ * - sessionId UUID,与 windowId 完全解耦
+ * - **path 与 cwd 解耦** (ADR-008):session.pathId 由创建时确定,生命周期内
+ *   不变。OSC 1337 报告的 cwd 仅写到 currentCwd 字段,触发 UI ⚠️ 提示,
+ *   不再驱动 path 在分类间迁移。
+ * - **砍掉 5 分钟墓地** (ADR-008):PTY 退出后 session 进入 'exited' 状态,
+ *   scrollback 保留,owner 不变,**无时限自动消失**;只能由用户右键关闭
+ *   或应用退出销毁。重启功能不再提供。
+ * - PTY 字节流仅推送给 owner;新 owner 通过 cmd:session:get-scrollback 拉
+ *   历史,渲染端用 lastSeq 去重 evt:session:output
+ * - **OSC 1337 解析器**每个 session 一份,从字节流剥离序列后再转发
+ *   xterm,避免 OSC 在终端里渲染成乱码
+ * - **active / idle 计时**:每次有 passthrough 字节 → state=active + 重置
+ *   idle 计时器;计时器到 → state=idle (默认 2s 阈值,可配)
+ * - **cwd 兜底**:启动后 5 秒未收到 OSC 1337 → 启动 5 秒间隔的进程查询
+ *   (PlatformAdapter.getProcessCwd);收到第一条 OSC 后立即关掉所有 cwd
+ *   timer,永不再启
+ * - 启动模板:从 TemplatesManager 拉,空 command → 纯 shell;有 command →
+ *   通过 PlatformAdapter.buildShellLaunchParams 让 hook 之后再 exec command
+ * - spawn 函数可注入 (PtySpawnFn) 便于测试;PlatformAdapter 也可注入
+ *   (默认从 getPlatformAdapter() 拿)
  *
  * @对应文档章节:
- *   软件定义书.md 5.1.2、8.3、8.4;ipc-protocol.md 5.2、6.2
- *   AGENTS.md CP-2 完成标志 (跨窗口数据共享 + owner 接管)
+ *   软件定义书.md 5.1.2、5.1.3、5.1.8、8.3、ADR-003、ADR-008
+ *   ipc-protocol.md 5.2、6.2
+ *   AGENTS.md CP-3 完成标志
  *
  * @AGENTS.md 5.3 必测:
- * - SessionManager 创建/销毁/状态查询/owner 切换
- * - Session 状态机所有转移 (CP-2 范围: active ↔ idle [TODO CP-3] ↔ destroyed)
- *
- * @CP-3 待补:
- * - 墓地 (tombstoned 状态保留 5 分钟,可重启)
- * - scrollback ring buffer (2MB,owner 切换时拉历史)
- * - cwd 跟踪 (OSC 1337 hook + path 迁移)
- * - 16ms 字节流聚合
+ * - SessionManager 创建/销毁/状态查询/owner 切换/状态机所有转移
+ * - OSC 1337 解析器 (osc1337-parser.ts 单测)
+ * - active/idle 计时
+ * - exited 状态语义 (无自动销毁)
  */
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename } from 'node:path';
+import { basename, resolve as resolvePath } from 'node:path';
 import { spawn as defaultSpawnPty, type IPty, type IDisposable } from 'node-pty';
 import type {
   SessionExitedPayload,
   SessionOutputPayload,
+  SessionStateChangedPayload,
 } from '@shared/protocol';
-import type { SessionInfo } from '@shared/types';
+import type { SessionInfo, Template, Settings } from '@shared/types';
 import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
+import type { TemplatesManager } from './templates-manager';
+import type { SettingsManager } from './settings-manager';
+import { Osc1337Parser } from './osc1337-parser';
+import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
 
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
 
 /**
- * Scrollback ring buffer 上限 (软件定义书 5.1.4 / SessionRuntimeShape 注释)。
- * 超过则尾部裁切 — 保留最新 SCROLLBACK_LIMIT 字节,旧字节丢弃。
- * 2MB 是为大量 ANSI 转义包装的纯文本输出留余量,远小于 PTY 原始输出
- * 速率上限,实际运行中很少触顶。
+ * Scrollback ring buffer 上限 (软件定义书 5.1.4)。2MB 远小于 PTY 输出
+ * 速率,实际很少触顶。超过则尾部裁切。
  */
 export const SCROLLBACK_LIMIT = 2 * 1024 * 1024;
+
+/**
+ * cwd 兜底参数:
+ * - GRACE_MS:启动后多少毫秒未收到 OSC 才启动轮询
+ * - POLL_INTERVAL_MS:轮询周期
+ * 与 ADR-003 一致。
+ */
+const CWD_GRACE_MS = 5000;
+const CWD_POLL_INTERVAL_MS = 5000;
 
 /**
  * spawn 工厂,与 node-pty 的 spawn 兼容。测试中用 mock 替换。
@@ -71,24 +88,13 @@ export type PtySpawnFn = (
 ) => IPty;
 
 /**
- * 默认 shell 解析。CP-3 通过 PlatformAdapter.detectShells() 优先 pwsh 7。
- */
-export function getDefaultShell(): string {
-  if (process.platform === 'win32') return 'powershell.exe';
-  return process.env['SHELL'] ?? '/bin/sh';
-}
-
-/**
  * 由 shell 可执行路径推断 session 的默认 displayName。
  *
  * 用 basename + 小写比对常见 shell。命中 → 返回规范化大小写的 shell 名;
  * 未命中 → 返回去 .exe 后的 basename (用户自定义 shell 时也有合理回退)。
- *
- * 暴露此函数主要便于单测验证 (避免 mock node-pty 全套)。
  */
 export function inferDisplayName(shellPath: string): string {
   const base = basename(shellPath).toLowerCase();
-  // 把 .exe 等扩展名去掉再比对
   const stem = base.replace(/\.[^.]+$/, '');
   switch (stem) {
     case 'powershell':
@@ -109,30 +115,61 @@ export function inferDisplayName(shellPath: string): string {
   }
 }
 
+/**
+ * 解析 shell hook 文件路径。文件位于源码 src/shell-hooks/。
+ *
+ * 开发模式 (npm run dev,ts 直跑) 与打包模式都通过 __dirname 相对项目根
+ * 解析。打包后 electron-builder 应配置把 src/shell-hooks 拷到 resourcesPath
+ * 旁边 (CP-4 处理),目前 V1 仅支持开发态运行。
+ */
+export function defaultHookFileResolver(shellId: string): string {
+  // 当前文件位于 src/main/,hook 文件在 src/shell-hooks/。
+  // 注:ESM/Vite 环境下 __dirname 由 tsconfig + esbuild 处理,生产构建会
+  // 重定向到 dist/main/。为了健壮,直接 resolve 到项目根再拼。
+  const projectRoot = resolvePath(__dirname, '..', '..');
+  switch (shellId) {
+    case 'pwsh':
+    case 'powershell':
+      return resolvePath(projectRoot, 'src', 'shell-hooks', 'pwsh.ps1');
+    case 'cmd':
+      return resolvePath(projectRoot, 'src', 'shell-hooks', 'cmd.bat');
+    case 'git-bash':
+      return resolvePath(projectRoot, 'src', 'shell-hooks', 'bash.sh');
+    default:
+      return resolvePath(projectRoot, 'src', 'shell-hooks', 'pwsh.ps1');
+  }
+}
+
 interface ManagedSession {
   info: SessionInfo;
-  pty: IPty;
+  /** PTY 实例,exited 状态下置为 null */
+  pty: IPty | null;
   /** evt:session:output 单调序号,从 0 开始,每次 emit 后 ++ */
   outputSeq: number;
   /** PTY 监听句柄,destroy 时释放 */
   disposables: IDisposable[];
   /**
-   * Ring buffer:存所有 PTY 输出的原始 UTF-8 字节流。
+   * Ring buffer:存所有透传后字节流 (OSC 1337 已剥离)。
    * 软件定义书 5.1.4 + 8.4 (跨窗口接管时新 owner 拉历史回放)。
-   *
-   * 不论 session 是否有 owner 都缓冲 — 这样:
-   *  (1) 切 tab 后 release → 切回时 claim,能通过 getScrollback 重放历史
-   *  (2) 关窗后 owner 变 null → 别的窗口接管也能看到历史
-   * 为节省内存只保留最末 SCROLLBACK_LIMIT 字节 (老内容丢弃)。
    */
   scrollback: Buffer;
   /** scrollback 中最末一条 PTY data 对应的 outputSeq。-1 表示尚未有输出。 */
   scrollbackLastSeq: number;
+  /** OSC 1337 解析器 (每 session 一份,持有未完结 stash) */
+  parser: Osc1337Parser;
+  /** active → idle 转移计时器 */
+  idleTimer: NodeJS.Timeout | null;
+  /** 启动后等 OSC 1337 的宽限计时器;到点未收到则启动 cwd 轮询 */
+  cwdGraceTimer: NodeJS.Timeout | null;
+  /** cwd 兜底轮询计时器 */
+  cwdPollTimer: NodeJS.Timeout | null;
+  /** 是否已收到过任意 OSC 1337。一旦 true,所有 cwd 兜底永久关闭 */
+  oscReceived: boolean;
 }
 
 export interface CreateSessionInput {
   pathId: string; // 已 normalize 的绝对路径
-  templateId: string; // CP-2 只支持 'shell',CP-3 接 TemplateManager
+  templateId: string;
   ownerWindowId: string;
   cols: number;
   rows: number;
@@ -147,7 +184,8 @@ export class SessionManagerError extends Error {
       | 'SessionAlreadyOwned'
       | 'NotOwner'
       | 'PtySpawnFailed'
-      | 'CwdNotAccessible',
+      | 'CwdNotAccessible'
+      | 'NoShellAvailable',
     message: string,
     public readonly details?: Record<string, unknown>,
   ) {
@@ -156,21 +194,42 @@ export class SessionManagerError extends Error {
   }
 }
 
+/**
+ * 可选的注入项,主要给测试用。生产代码不传则用默认实现。
+ */
+export interface SessionManagerOptions {
+  spawnFn?: PtySpawnFn;
+  platformAdapter?: PlatformAdapter;
+  hookFileResolver?: (shellId: string) => string;
+}
+
 export class SessionManager extends EventEmitter {
   private readonly sessions = new Map<string, ManagedSession>();
 
+  private readonly spawnFn: PtySpawnFn;
+  private readonly platformAdapter: PlatformAdapter;
+  private readonly hookFileResolver: (shellId: string) => string;
+
+  /**
+   * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
+   */
+  private cachedShells: ShellInfo[] | null = null;
+
   constructor(
-    /**
-     * 持有 WindowManager 引用主要为后续 CP-3 cwd 跟踪与 owner 路由用,
-     * CP-2 阶段未直接使用 (IPC 层在 owner 切换时自己查 WindowManager)。
-     * 留接口避免 CP-3 时反复改 constructor 签名。
-     */
     private readonly _windowManager: WindowManager,
     private readonly pathManager: PathManager,
-    private readonly spawnFn: PtySpawnFn = defaultSpawnPty,
+    private readonly templatesManager: TemplatesManager,
+    private readonly settingsManager: SettingsManager,
+    options: SessionManagerOptions = {},
   ) {
     super();
     void this._windowManager; // 抑制 noUnusedLocals
+    this.spawnFn = options.spawnFn ?? defaultSpawnPty;
+    // 测试或非 Windows 不走 getPlatformAdapter (会 throw)
+    this.platformAdapter =
+      options.platformAdapter ??
+      (process.platform === 'win32' ? getPlatformAdapter() : createNoopAdapter());
+    this.hookFileResolver = options.hookFileResolver ?? defaultHookFileResolver;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -180,39 +239,53 @@ export class SessionManager extends EventEmitter {
   /**
    * 创建一个 session 并启动 PTY。
    *
-   * @throws SessionManagerError PtySpawnFailed / CwdNotAccessible /
-   *   TemplateNotFound (CP-2 只支持 'shell' 一个模板)
+   * @throws SessionManagerError NoShellAvailable / TemplateNotFound /
+   *   PtySpawnFailed / CwdNotAccessible
    */
-  createSession(input: CreateSessionInput): SessionInfo {
-    if (input.templateId !== 'shell') {
+  async createSession(input: CreateSessionInput): Promise<SessionInfo> {
+    const template = this.templatesManager.resolve(input.templateId);
+    const dims = validateDimensions(input.cols, input.rows);
+    const shells = await this.getShells();
+    if (shells.length === 0) {
       throw new SessionManagerError(
-        'TemplateNotFound',
-        `CP-2 仅支持 'shell' 模板,实际: ${input.templateId}。完整模板系统在 CP-3。`,
+        'NoShellAvailable',
+        '系统中未检测到任何 shell (pwsh / powershell / cmd / bash)。' +
+          '请确保至少一个 shell 在 %ProgramFiles% 或 %SystemRoot%\\System32 下。',
       );
     }
-    const dims = validateDimensions(input.cols, input.rows);
-    const shellPath = getDefaultShell();
-    // CP-2: 把 path 作为 cwd 启动 PTY (CP-3 后还会 OSC 1337 跟踪 cwd 变化)
+    const shell = pickShell(shells, this.settingsManager.get());
     const cwd = input.pathId || homedir();
+    const hookFile = this.hookFileResolver(shell.id);
+    const launchParams = this.platformAdapter.buildShellLaunchParams(
+      shell,
+      hookFile,
+      template.command
+        ? { command: template.command, args: template.args }
+        : undefined,
+    );
+
+    const env = buildSpawnEnv(process.env, SPAWN_ENV_SKIP);
+    Object.assign(env, launchParams.env);
+    Object.assign(env, template.env);
 
     let pty: IPty;
     try {
-      pty = this.spawnFn(shellPath, [], {
+      pty = this.spawnFn(shell.executablePath, launchParams.args, {
         name: 'xterm-color',
         cols: dims.cols,
         rows: dims.rows,
         cwd,
-        env: buildSpawnEnv(process.env, SPAWN_ENV_SKIP),
+        env,
       });
     } catch (err) {
       throw new SessionManagerError(
         'PtySpawnFailed',
-        `无法启动 "${shellPath}" cwd="${cwd}". ` +
+        `无法启动 "${shell.executablePath}" cwd="${cwd}". ` +
           `可能原因: (1) shell 不在 PATH; (2) cwd 不可访问; ` +
           `(3) node-pty 原生模块未为当前 Electron 重编译。原始错误: ${
             err instanceof Error ? err.message : String(err)
           }`,
-        { shellPath, cwd },
+        { shellPath: shell.executablePath, cwd },
       );
     }
 
@@ -220,12 +293,13 @@ export class SessionManager extends EventEmitter {
     const info: SessionInfo = {
       id: sessionId,
       pathId: input.pathId,
-      templateId: 'shell',
-      cwd,
+      templateId: template.id,
+      originalCwd: cwd,
+      currentCwd: cwd,
       cols: dims.cols,
       rows: dims.rows,
       pid: pty.pid,
-      displayName: inferDisplayName(shellPath),
+      displayName: pickDisplayName(template, shell),
       ownerWindowId: input.ownerWindowId || null,
       state: 'active',
       createdAt: Date.now(),
@@ -239,6 +313,11 @@ export class SessionManager extends EventEmitter {
       disposables,
       scrollback: Buffer.alloc(0),
       scrollbackLastSeq: -1,
+      parser: new Osc1337Parser(),
+      idleTimer: null,
+      cwdGraceTimer: null,
+      cwdPollTimer: null,
+      oscReceived: false,
     };
     this.sessions.set(sessionId, managed);
 
@@ -247,21 +326,18 @@ export class SessionManager extends EventEmitter {
       pty.onExit(({ exitCode, signal }) => this.handlePtyExit(managed, exitCode, signal)),
     );
 
+    // 启动 cwd 兜底:5 秒未收到 OSC 1337 就开始轮询
+    managed.cwdGraceTimer = setTimeout(() => {
+      managed.cwdGraceTimer = null;
+      if (managed.oscReceived) return; // 这期间正好收到了
+      this.startCwdPolling(managed);
+    }, CWD_GRACE_MS);
+
     // 把 session 挂到 path 上 (PathManager 自动触发分类流转 + emit)
     this.pathManager.attachSession(sessionId, input.pathId);
 
-    // 事件顺序关键 (避免 renderer 闪 EmptyPathState):
-    //   先 emit sessionCreated → renderer 拿到新 session (owner=myWindow) 并自动
-    //     selected 它 (reducer sessions/created 的逻辑)
-    //   再 emit ownerChanged 释放本窗口之前持有的旧 session
-    //   这样中间帧 selected 已是新 session,不会出现"selected 但 owner=null"
-    //   导致 displayable=null 的间隙。
+    // 事件顺序见 CP-2 的 createSession (避免 renderer 闪 EmptyPathState)
     this.emit('sessionCreated', { ...info });
-
-    // 单焦点 owner 不变量:一个窗口同时只能 owner 1 个 session。
-    // 现在释放本窗口之前持有的所有 session (除了刚创建的目标)。
-    // 注意:必须在 spawn 与 sessionCreated 成功后才释放 — 若 spawn 失败,
-    // 用户原先持有的 session 不应丢失。
     if (input.ownerWindowId) {
       this.releaseAllOwnedBy(input.ownerWindowId, { exceptSessionId: sessionId });
     }
@@ -269,12 +345,14 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * 关闭并销毁 session。CP-2 简化:直接 kill,不进墓地。
-   * 幂等:不存在的 sessionId 不报错。
+   * 关闭并销毁 session — 用户右键"关闭"或应用退出时调。
+   *
+   * 与 CP-2 不同:exited 状态的 session 也由此销毁 (软件定义书 8.3 ADR-008
+   * 砍墓地后的唯一销毁路径)。幂等:不存在的 sessionId 不报错。
    */
   closeSession(sessionId: string): void {
     const managed = this.sessions.get(sessionId);
-    if (!managed) return; // 幂等
+    if (!managed) return;
     this.destroySession(managed, 'user-closed');
   }
 
@@ -283,7 +361,8 @@ export class SessionManager extends EventEmitter {
    */
   shutdown(): void {
     for (const sid of [...this.sessions.keys()]) {
-      this.closeSession(sid);
+      const managed = this.sessions.get(sid);
+      if (managed) this.destroySession(managed, 'app-quit');
     }
   }
 
@@ -294,11 +373,10 @@ export class SessionManager extends EventEmitter {
   /**
    * 把 sessionId 的 owner 改为 windowId。
    *
-   * 单焦点 owner 不变量 (CP-2 勘误后): 一个窗口同时只能 owner 1 个 session。
-   * 接管时若 windowId 已经持有其他 session,先全部释放 (变 null),再切此
-   * session 给 windowId。
+   * 单焦点 owner 不变量:一个窗口同时只能 owner 1 个 session。
+   * 接管时若 windowId 已经持有其他 session,先全部释放再切此 session。
    *
-   * 跨窗口语义 (软件定义书 8.4): 若 session 当前 owner 是别的窗口,不
+   * 跨窗口语义 (软件定义书 8.4):若 session 当前 owner 是别的窗口,不
    * 强制抢占 — 抛 SessionAlreadyOwned。IPC 层应在抛错前先调
    * SESSION_FOCUS_OWNER 把对方窗口浮起。
    *
@@ -310,7 +388,7 @@ export class SessionManager extends EventEmitter {
       throw new SessionManagerError('SessionNotFound', `sessionId="${sessionId}"`);
     }
     const oldOwner = managed.info.ownerWindowId;
-    if (oldOwner === windowId) return; // 已是 owner,幂等
+    if (oldOwner === windowId) return;
     if (oldOwner !== null && oldOwner !== windowId) {
       throw new SessionManagerError(
         'SessionAlreadyOwned',
@@ -319,10 +397,6 @@ export class SessionManager extends EventEmitter {
         { currentOwner: oldOwner, requestedOwner: windowId },
       );
     }
-    // 进入此分支表示 oldOwner === null。
-    // 事件顺序关键 (与 createSession 同理):先 emit 目标 session 的 owner
-    // 设为 windowId,再释放本窗口之前持有的其他 session。这样 renderer
-    // 收到事件的中间帧不会出现"selected 但 owner=null"的间隙。
     managed.info.ownerWindowId = windowId;
     this.emit('sessionOwnerChanged', {
       sessionId,
@@ -332,14 +406,6 @@ export class SessionManager extends EventEmitter {
     this.releaseAllOwnedBy(windowId, { exceptSessionId: sessionId });
   }
 
-  /**
-   * 内部工具:把 windowId 当前持有的所有 session 的 owner 改为 null。
-   * 用于 createSession / claimOwner 维护"一窗口最多 1 owner"不变量,以及
-   * handleWindowClosed。
-   *
-   * @param options.exceptSessionId 跳过此 sessionId (用于"接管新 session
-   *   时不要把它自己也当作旧 owner 释放掉")。
-   */
   private releaseAllOwnedBy(
     windowId: string,
     options?: { exceptSessionId?: string },
@@ -397,22 +463,22 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * 把 base64 数据写到 PTY stdin。session 不存在时静默 (CP-1 修过的同样
-   * 关闭/HMR 竞态,详见 src/main/pty-controller 删前的注释)。
+   * 把 base64 数据写到 PTY stdin。session 不存在 / 已 exited 时静默
+   * (cp1 修过的同样关闭/HMR 竞态)。
    */
   sendInput(sessionId: string, base64Data: string): void {
     const managed = this.sessions.get(sessionId);
-    if (!managed) return; // 静默 (race with close)
+    if (!managed || !managed.pty) return; // 静默
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
     managed.pty.write(text);
   }
 
   /**
-   * 调整 PTY 终端尺寸。session 不存在时静默 (同样竞态考虑)。
+   * 调整 PTY 终端尺寸。session 不存在 / exited 时静默。
    */
   resize(sessionId: string, cols: number, rows: number): void {
     const managed = this.sessions.get(sessionId);
-    if (!managed) return;
+    if (!managed || !managed.pty) return;
     const dims = validateDimensions(cols, rows);
     managed.info.cols = dims.cols;
     managed.info.rows = dims.rows;
@@ -447,11 +513,11 @@ export class SessionManager extends EventEmitter {
   /**
    * 取 session 的 scrollback ring buffer 内容。
    *
-   * 返回 base64 编码 (供 IPC) + 当前 scrollbackLastSeq。Renderer 用 lastSeq
-   * 对后续 evt:session:output 去重 (seq > lastSeq 才 write,避免重复或丢失)。
+   * 返回 base64 编码 + 当前 scrollbackLastSeq。Renderer 用 lastSeq 对后续
+   * evt:session:output 去重 (seq > lastSeq 才 write)。
    *
    * session 不存在返回 { data: '', lastSeq: -1 } — 与 sendInput / resize
-   * 等"竞态时静默"的语义保持一致 (close 与 IPC 在不同事件循环帧时常并发)。
+   * 等"竞态时静默"的语义一致。
    */
   getScrollback(sessionId: string): { data: string; lastSeq: number } {
     const managed = this.sessions.get(sessionId);
@@ -463,16 +529,41 @@ export class SessionManager extends EventEmitter {
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // 内部
+  // 内部:PTY 数据处理
   // ──────────────────────────────────────────────────────────────────
 
   private handlePtyData(managed: ManagedSession, data: string): void {
-    const seq = managed.outputSeq++;
     const bytes = Buffer.from(data, 'utf8');
+    const parsed = managed.parser.parse(bytes);
 
-    // Ring buffer: 追加 → 超限尾部裁切。Buffer.concat 简单稳定;若每次
-    // 都 concat 大 buffer 引起性能问题,可改用 chunk 数组 + 长度记录,
-    // 但 PTY 通常每次几 KB 远小于 2MB 上限,实测无瓶颈。
+    // 处理 OSC 1337 事件
+    for (const ev of parsed.events) {
+      if (ev.kind === 'cwd') {
+        this.handleOsc1337Cwd(managed, ev.value);
+      }
+      // unknown 事件目前忽略 (V1.1 加 RemoteHost 等)
+    }
+
+    // 透传字节流入 scrollback + emit sessionOutput
+    if (parsed.passthrough.length > 0) {
+      this.appendScrollback(managed, parsed.passthrough);
+
+      const seq = managed.outputSeq++;
+      managed.scrollbackLastSeq = seq;
+
+      const payload: SessionOutputPayload = {
+        sessionId: managed.info.id,
+        data: parsed.passthrough.toString('base64'),
+        seq,
+      };
+      this.emit('sessionOutput', payload);
+
+      // 状态机:有输出 → active,重置 idle 计时器
+      this.markActive(managed);
+    }
+  }
+
+  private appendScrollback(managed: ManagedSession, bytes: Buffer): void {
     if (managed.scrollback.length === 0) {
       managed.scrollback = bytes;
     } else {
@@ -483,14 +574,6 @@ export class SessionManager extends EventEmitter {
         managed.scrollback.length - SCROLLBACK_LIMIT,
       );
     }
-    managed.scrollbackLastSeq = seq;
-
-    const payload: SessionOutputPayload = {
-      sessionId: managed.info.id,
-      data: bytes.toString('base64'),
-      seq,
-    };
-    this.emit('sessionOutput', payload);
   }
 
   private handlePtyExit(
@@ -499,14 +582,32 @@ export class SessionManager extends EventEmitter {
     signal: number | undefined,
   ): void {
     if (!this.sessions.has(managed.info.id)) return; // 已被 closeSession 清理过
+    if (managed.info.state === 'exited') return; // 防御性:不双发
+
+    // emit session-exited 事件 (用于通知 renderer 显示 exitCode 等)
     const payload: SessionExitedPayload = {
       sessionId: managed.info.id,
       exitCode,
       ...(typeof signal === 'number' ? { signal } : {}),
     };
     this.emit('sessionExited', payload);
-    // CP-2: 立即销毁;CP-3 进入墓地保留 5 分钟
-    this.destroySession(managed, 'pty-exited');
+
+    // 状态转移到 exited (ADR-008 砍墓地:不再立即销毁)
+    const oldState = managed.info.state;
+    managed.info.state = 'exited';
+    managed.info.exitCode = exitCode;
+    managed.info.exitedAt = Date.now();
+    // PTY 已死,清掉所有 active/idle/cwd 计时器,释放 PTY 句柄引用
+    this.clearTimers(managed);
+    managed.pty = null;
+
+    this.emitStateChanged(managed, {
+      state: managed.info.state,
+      exitCode: managed.info.exitCode,
+      exitedAt: managed.info.exitedAt,
+      pid: -1,
+    });
+    void oldState; // 留给将来加日志用
   }
 
   private destroySession(
@@ -514,9 +615,9 @@ export class SessionManager extends EventEmitter {
     reason: 'user-closed' | 'pty-exited' | 'app-quit',
   ): void {
     const sid = managed.info.id;
-    if (!this.sessions.has(sid)) return; // 已销毁过
+    if (!this.sessions.has(sid)) return;
 
-    // 释放 PTY 监听句柄
+    this.clearTimers(managed);
     for (const d of managed.disposables) {
       try {
         d.dispose();
@@ -524,18 +625,232 @@ export class SessionManager extends EventEmitter {
         // ignore
       }
     }
-    if (reason !== 'pty-exited') {
-      // pty-exited 时进程已死,不需要再 kill
+    if (managed.pty) {
       try {
         managed.pty.kill();
       } catch (err) {
-        console.warn(`[SessionManager] kill failed sid=${sid}: ${
-          err instanceof Error ? err.message : String(err)
-        }`);
+        console.warn(
+          `[SessionManager] kill failed sid=${sid}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
+      managed.pty = null;
     }
     this.sessions.delete(sid);
     this.pathManager.detachSession(sid);
     this.emit('sessionDestroyed', { sessionId: sid, reason });
   }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 内部:状态机 (active / idle)
+  // ──────────────────────────────────────────────────────────────────
+
+  private markActive(managed: ManagedSession): void {
+    if (managed.info.state === 'exited') return; // 不会从 exited 回来
+    if (managed.info.state !== 'active') {
+      managed.info.state = 'active';
+      this.emitStateChanged(managed, { state: 'active' });
+    }
+    this.scheduleIdleCheck(managed);
+  }
+
+  private scheduleIdleCheck(managed: ManagedSession): void {
+    if (managed.idleTimer) clearTimeout(managed.idleTimer);
+    const thresholdSec = this.settingsManager.get().advanced.activeIdleThresholdSeconds;
+    const ms = Math.max(100, thresholdSec * 1000);
+    managed.idleTimer = setTimeout(() => {
+      managed.idleTimer = null;
+      if (managed.info.state === 'active') {
+        managed.info.state = 'idle';
+        this.emitStateChanged(managed, { state: 'idle' });
+      }
+    }, ms);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 内部:OSC 1337 cwd 处理
+  // ──────────────────────────────────────────────────────────────────
+
+  private handleOsc1337Cwd(managed: ManagedSession, rawCwd: string): void {
+    // OSC 收到了 → 永久关闭 cwd 兜底 (软件定义书 5.1.8、ADR-003)
+    if (!managed.oscReceived) {
+      managed.oscReceived = true;
+      if (managed.cwdGraceTimer) {
+        clearTimeout(managed.cwdGraceTimer);
+        managed.cwdGraceTimer = null;
+      }
+      if (managed.cwdPollTimer) {
+        clearInterval(managed.cwdPollTimer);
+        managed.cwdPollTimer = null;
+      }
+    }
+    const next = normalizeCwd(rawCwd);
+    if (next === managed.info.currentCwd) return; // 无变化
+    managed.info.currentCwd = next;
+    this.emitStateChanged(managed, { currentCwd: next });
+  }
+
+  private startCwdPolling(managed: ManagedSession): void {
+    if (managed.cwdPollTimer) return; // 已在跑
+    managed.cwdPollTimer = setInterval(() => {
+      void this.tickCwdPoll(managed);
+    }, CWD_POLL_INTERVAL_MS);
+  }
+
+  private async tickCwdPoll(managed: ManagedSession): Promise<void> {
+    if (managed.oscReceived) {
+      // race:轮询启动后正好收到 OSC,清掉 (handleOsc1337Cwd 已清,这是双保险)
+      if (managed.cwdPollTimer) {
+        clearInterval(managed.cwdPollTimer);
+        managed.cwdPollTimer = null;
+      }
+      return;
+    }
+    if (!managed.pty) {
+      // PTY 已死,停轮询
+      if (managed.cwdPollTimer) {
+        clearInterval(managed.cwdPollTimer);
+        managed.cwdPollTimer = null;
+      }
+      return;
+    }
+    try {
+      const cwd = await this.platformAdapter.getProcessCwd(managed.pty.pid);
+      if (cwd && !managed.oscReceived) {
+        const next = normalizeCwd(cwd);
+        if (next !== managed.info.currentCwd) {
+          managed.info.currentCwd = next;
+          this.emitStateChanged(managed, { currentCwd: next });
+        }
+      }
+    } catch (err) {
+      // 兜底失败属正常 (V1 WindowsAdapter 一直返回 null),不刷屏
+      void err;
+    }
+  }
+
+  private clearTimers(managed: ManagedSession): void {
+    if (managed.idleTimer) {
+      clearTimeout(managed.idleTimer);
+      managed.idleTimer = null;
+    }
+    if (managed.cwdGraceTimer) {
+      clearTimeout(managed.cwdGraceTimer);
+      managed.cwdGraceTimer = null;
+    }
+    if (managed.cwdPollTimer) {
+      clearInterval(managed.cwdPollTimer);
+      managed.cwdPollTimer = null;
+    }
+  }
+
+  private emitStateChanged(
+    managed: ManagedSession,
+    changes: Partial<SessionInfo>,
+  ): void {
+    const payload: SessionStateChangedPayload = {
+      sessionId: managed.info.id,
+      changes,
+      full: { ...managed.info },
+    };
+    this.emit('sessionStateChanged', payload);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 内部:shell 检测缓存
+  // ──────────────────────────────────────────────────────────────────
+
+  private async getShells(): Promise<ShellInfo[]> {
+    if (this.cachedShells) return this.cachedShells;
+    this.cachedShells = await this.platformAdapter.detectShells();
+    return this.cachedShells;
+  }
+
+  /**
+   * 测试用:直接重置 detectShells 缓存。
+   */
+  resetShellCache(): void {
+    this.cachedShells = null;
+  }
+}
+
+/**
+ * 选 shell:settings.shell.defaultShellId 优先;否则数组第一个 (探测顺序
+ * 已是 pwsh > powershell > cmd > git-bash)。
+ */
+function pickShell(shells: ShellInfo[], settings: Settings): ShellInfo {
+  const preferred = settings.shell.defaultShellId;
+  if (preferred) {
+    const found = shells.find((s) => s.id === preferred);
+    if (found) return found;
+  }
+  return shells[0]!;
+}
+
+/**
+ * 推断 session 显示名:
+ * - 有命令模板 (claude-code 等) → 模板名
+ * - 纯 shell → shell 显示名 (PowerShell / Bash 等)
+ */
+function pickDisplayName(template: Template, shell: ShellInfo): string {
+  if (template.command) return template.name;
+  return inferDisplayName(shell.executablePath);
+}
+
+/**
+ * 把 OSC 1337 报告的 cwd 规范化:trim、~ 展开、转绝对。失败时原样返回。
+ */
+function normalizeCwd(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  // ~ 展开 (有的 shell hook 在 git-bash 下可能会发 ~/...)
+  let value = trimmed;
+  if (value.startsWith('~')) {
+    value = value.replace(/^~/, homedir());
+  }
+  try {
+    return resolvePath(value);
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
+ * 测试 / 非 Windows 用的 noop adapter。所有方法返回最小可用值。
+ *
+ * 注:这里"用"是说 SessionManager 在 Linux/macOS 下也可以构造 (主要是
+ * 为了让 session-manager.test.ts 在任何 OS 上跑得起来)。生产 Windows
+ * 路径不会走到这。
+ */
+function createNoopAdapter(): PlatformAdapter {
+  return {
+    async detectShells() {
+      return [
+        {
+          id: 'sh',
+          displayName: 'sh',
+          executablePath: process.env['SHELL'] ?? '/bin/sh',
+        },
+      ];
+    },
+    buildShellLaunchParams(_shell, _hookFilePath, _commandToRun) {
+      return { args: [], env: {} };
+    },
+    async registerFileManagerIntegration() {
+      throw new Error('noop');
+    },
+    async unregisterFileManagerIntegration() {
+      throw new Error('noop');
+    },
+    async getProcessCwd() {
+      return null;
+    },
+    async setAutoStart() {
+      throw new Error('noop');
+    },
+    async isAutoStartEnabled() {
+      return false;
+    },
+  };
 }
