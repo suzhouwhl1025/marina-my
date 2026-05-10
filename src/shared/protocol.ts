@@ -69,6 +69,14 @@ export const COMMAND_CHANNELS = {
   SETTINGS_RESET: 'cmd:settings:reset',
   SETTINGS_LIST_SHELLS: 'cmd:settings:list-shells',
   SETTINGS_GET_AUTO_START: 'cmd:settings:get-auto-start',
+  SETTINGS_EXPORT: 'cmd:settings:export',
+  SETTINGS_IMPORT: 'cmd:settings:import',
+
+  // Templates 域 (CP-4 chunk 4 起 CRUD 暴露给 renderer)
+  TEMPLATE_ADD: 'cmd:template:add',
+  TEMPLATE_UPDATE: 'cmd:template:update',
+  TEMPLATE_DELETE: 'cmd:template:delete',
+  TEMPLATE_SET_DEFAULT: 'cmd:template:set-default',
 
   // System 域
   SYSTEM_SHOW_IN_EXPLORER: 'cmd:system:show-in-explorer',
@@ -294,6 +302,86 @@ export interface GetSettingsResponse {
 
 export interface UpdateSettingsPayload {
   partial: DeepPartial<Settings>;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Templates 域
+// ──────────────────────────────────────────────────────────────────
+
+export interface AddTemplatePayload {
+  name: string;
+  icon: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  shellFirst: boolean;
+  postExitAction: 'close_session' | 'keep_shell' | 'hold';
+}
+
+export interface AddTemplateResponse {
+  template: Template;
+}
+
+export interface UpdateTemplatePayload {
+  id: string;
+  partial: Partial<{
+    name: string;
+    icon: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    shellFirst: boolean;
+    postExitAction: 'close_session' | 'keep_shell' | 'hold';
+  }>;
+}
+
+export interface UpdateTemplateResponse {
+  template: Template;
+}
+
+export interface DeleteTemplatePayload {
+  id: string;
+}
+
+export interface SetDefaultTemplatePayload {
+  id: string;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Settings export / import
+// ──────────────────────────────────────────────────────────────────
+
+/**
+ * 导出/导入用的归档 JSON schema (CP-4 chunk 4)。
+ *
+ * V1 用单 JSON 文件而非 zip:
+ * - 4 类配置(settings/bookmarks/recent/templates)合体到一个 JSON
+ * - 不含 logs / scrollback / 进程状态
+ * - format 字段 + version 字段方便未来迁移
+ *
+ * 文档 6.6.2 描述为 zip,V1 折衷为 JSON 以避免引入 zip 库依赖
+ * (AGENTS.md 1.2 边界 2)。未来加 archiver 包可平滑升级。
+ */
+export interface SettingsArchiveV1 {
+  format: 'easyterm-archive';
+  version: 1;
+  exportedAt: number;
+  exportedFrom: string;
+  settings: Settings;
+  bookmarks: { paths: Bookmark[] };
+  recent: { paths: Array<{ path: string; lastUsedAt: number; useCount: number }> };
+  templates: { defaultTemplateId: string; templates: Template[] };
+}
+
+export interface ExportSettingsResponse {
+  /** 用户取消 → null */
+  filePath: string | null;
+}
+
+export interface ImportSettingsResponse {
+  /** 用户取消 → 'cancelled' / 错误 → 'error' / 成功 → 'imported' */
+  status: 'imported' | 'cancelled' | 'error';
+  errorMessage?: string;
 }
 
 export interface ShellListItem {

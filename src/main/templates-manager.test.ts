@@ -180,3 +180,115 @@ describe('TemplatesManager — list / get', () => {
     expect(mgr.get('nope')).toBeNull();
   });
 });
+
+describe('TemplatesManager — add / update / delete (CP-4)', () => {
+  function baseInput() {
+    return {
+      name: 'My Custom',
+      icon: '🔧',
+      command: 'echo',
+      args: ['hello'],
+      env: { FOO: 'bar' },
+      shellFirst: true,
+      postExitAction: 'keep_shell' as const,
+    };
+  }
+
+  it('add 新建自定义模板,自动分配 UUID,isBuiltin=false', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    const t = mgr.add(baseInput());
+    expect(t.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(t.isBuiltin).toBe(false);
+    expect(t.name).toBe('My Custom');
+    expect(mgr.list().some((x) => x.id === t.id)).toBe(true);
+  });
+
+  it('add emit templatesUpdated', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    const listener = vi.fn();
+    mgr.on('templatesUpdated', listener);
+    mgr.add(baseInput());
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('add 同 id 重复 → InvalidTemplate', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    mgr.add({ ...baseInput(), id: 'fixed-id' } as never);
+    expect(() =>
+      mgr.add({ ...baseInput(), id: 'fixed-id' } as never),
+    ).toThrowError(/InvalidTemplate.*已存在/);
+  });
+
+  it('add 校验 name 非空', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() => mgr.add({ ...baseInput(), name: '' })).toThrowError(
+      /InvalidTemplate.*name/,
+    );
+  });
+
+  it('add 校验 postExitAction 枚举', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() =>
+      mgr.add({ ...baseInput(), postExitAction: 'invalid' as never }),
+    ).toThrowError(/InvalidTemplate.*postExitAction/);
+  });
+
+  it('update 修改 name + 强制保留 isBuiltin', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    const updated = mgr.update('shell', { name: 'Renamed' });
+    expect(updated.name).toBe('Renamed');
+    expect(updated.isBuiltin).toBe(true); // shell 是内置,不可降级
+  });
+
+  it('update 不存在 id → TemplateNotFound', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() => mgr.update('nope', { name: 'x' })).toThrowError(
+      /TemplateNotFound/,
+    );
+  });
+
+  it('update 校验合并后字段', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() => mgr.update('shell', { name: '' })).toThrowError(
+      /InvalidTemplate/,
+    );
+  });
+
+  it('delete 自定义模板', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    const t = mgr.add(baseInput());
+    mgr.delete(t.id);
+    expect(mgr.list().some((x) => x.id === t.id)).toBe(false);
+  });
+
+  it('delete 内置模板 → CannotDeleteBuiltin', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() => mgr.delete('shell')).toThrowError(/CannotDeleteBuiltin/);
+  });
+
+  it('delete 当前默认模板 → 自动回退到 shell', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    const t = mgr.add(baseInput());
+    mgr.setDefault(t.id);
+    expect(mgr.getDefaultTemplateId()).toBe(t.id);
+    mgr.delete(t.id);
+    expect(mgr.getDefaultTemplateId()).toBe('shell');
+  });
+
+  it('delete 不存在 id → TemplateNotFound', async () => {
+    const mgr = new TemplatesManager(makeMockStore());
+    await mgr.initialize();
+    expect(() => mgr.delete('nope')).toThrowError(/TemplateNotFound/);
+  });
+});

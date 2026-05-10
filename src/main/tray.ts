@@ -23,8 +23,10 @@
  *   软件定义书 7.4.3)
  * - 不要直接调 BrowserWindow API (通过 WindowManager)
  */
-import { app, Menu, nativeImage, Tray, type NativeImage } from 'electron';
+import { app, dialog, Menu, nativeImage, Tray, type NativeImage } from 'electron';
 import type { WindowManager } from './window-manager';
+import type { SessionManager } from './session-manager';
+import type { SettingsManager } from './settings-manager';
 import { setQuitting } from './index';
 
 /**
@@ -64,7 +66,11 @@ function generatePlaceholderTrayIcon(): NativeImage {
 export class TrayManager {
   private tray: Tray | null = null;
 
-  constructor(private readonly windowManager: WindowManager) {}
+  constructor(
+    private readonly windowManager: WindowManager,
+    private readonly sessionManager?: SessionManager,
+    private readonly settingsManager?: SettingsManager,
+  ) {}
 
   /**
    * 初始化托盘。必须在 app.whenReady() 之后调用。
@@ -153,11 +159,35 @@ export class TrayManager {
   /**
    * 完全退出应用 (软件定义书 7.4.3)。
    *
-   * CP-1 简化:无 session 概念,直接走 app.quit()。
-   * CP-3 起接入 SessionManager 后,会先检查 confirmOnQuit 设置 +
-   * 是否有 session 在跑,弹对话框。
+   * CP-4 起完整版:
+   * - settings.behavior.confirmOnQuit=true 且有 session 在跑(state≠exited)
+   *   → 弹 dialog.showMessageBox 二次确认
+   * - 用户点"取消" → 不退出
+   * - 用户点"退出" → setQuitting + app.quit (will-quit 会负责 SIGTERM
+   *   + 等 5 秒强制 kill,见 软件定义书 7.4.3)
+   *
+   * 关闭单窗口绝对不调到这里 (软件定义书 7.4.1, AGENTS.md 红线)。
    */
-  private quitApp(): void {
+  private async quitApp(): Promise<void> {
+    const settings = this.settingsManager?.get();
+    const confirmOnQuit = settings?.behavior?.confirmOnQuit ?? true;
+    const sessions = this.sessionManager?.list() ?? [];
+    const liveCount = sessions.filter((s) => s.state !== 'exited').length;
+
+    if (confirmOnQuit && liveCount > 0) {
+      const owner = this.windowManager.getMostRecentlyActive();
+      const result = await dialog.showMessageBox(owner ?? undefined as never, {
+        type: 'warning',
+        title: '完全退出 EasyTerm?',
+        message: `还有 ${liveCount} 个终端在运行,完全退出会关掉它们。`,
+        detail: '如果只想隐藏窗口,请关闭窗口而不是"完全退出"。',
+        buttons: ['取消', '完全退出'],
+        defaultId: 0,
+        cancelId: 0,
+      });
+      if (result.response !== 1) return;
+    }
+
     setQuitting();
     this.destroy();
     app.quit();

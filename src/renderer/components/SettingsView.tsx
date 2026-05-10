@@ -28,10 +28,21 @@ import {
   type ChangeEvent,
   type ReactNode,
 } from 'react';
-import { COMMAND_CHANNELS, type ListShellsResponse } from '@shared/protocol';
+import {
+  COMMAND_CHANNELS,
+  type AddTemplatePayload,
+  type AddTemplateResponse,
+  type ImportSettingsResponse,
+  type ListShellsResponse,
+  type ExportSettingsResponse,
+  type UpdateTemplatePayload,
+  type UpdateTemplateResponse,
+} from '@shared/protocol';
 import type {
   NewTerminalShellPolicy,
+  PostExitAction,
   StartupBehavior,
+  Template,
   TerminalRightClick,
   ThemeId,
 } from '@shared/types';
@@ -333,6 +344,10 @@ function ShellPanel({
   const [shells, setShells] = useState<
     Array<{ id: string; displayName: string; executablePath: string }>
   >([]);
+  const [templateMode, setTemplateMode] = useState<
+    | { kind: 'list' }
+    | { kind: 'edit'; templateId: string | null /* null = 新建 */ }
+  >({ kind: 'list' });
 
   useEffect(() => {
     let cancelled = false;
@@ -352,6 +367,16 @@ function ShellPanel({
       cancelled = true;
     };
   }, [setError]);
+
+  if (templateMode.kind === 'edit') {
+    return (
+      <TemplateEditor
+        templateId={templateMode.templateId}
+        onClose={() => setTemplateMode({ kind: 'list' })}
+        setError={setError}
+      />
+    );
+  }
 
   return (
     <section className="settings-panel">
@@ -423,9 +448,367 @@ function ShellPanel({
         </div>
       </SettingRow>
 
-      <SettingRow label="启动模板管理" hint="增删改自定义模板">
-        <span className="settings-placeholder">⏳ chunk 4 接入</span>
+      <SettingRow label="启动模板" hint="新建终端时可选的模板;内置不可删,可改名">
+        <TemplateList
+          onEdit={(id) => setTemplateMode({ kind: 'edit', templateId: id })}
+          onCreate={() => setTemplateMode({ kind: 'edit', templateId: null })}
+          setError={setError}
+        />
       </SettingRow>
+    </section>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 启动模板列表 (内嵌在 ShellPanel 中)
+// ──────────────────────────────────────────────────────────────────
+
+function TemplateList({
+  onEdit,
+  onCreate,
+  setError,
+}: {
+  onEdit: (id: string) => void;
+  onCreate: () => void;
+  setError: (msg: string | null) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const templates = state.templates;
+  const defaultId = state.defaultTemplateId;
+
+  const handleSetDefault = (id: string): void => {
+    setError(null);
+    window.api
+      .invoke(COMMAND_CHANNELS.TEMPLATE_SET_DEFAULT, { id })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  const handleDelete = (id: string): void => {
+    if (!confirm('确认删除这个自定义模板?该操作不可撤销。')) return;
+    setError(null);
+    window.api
+      .invoke(COMMAND_CHANNELS.TEMPLATE_DELETE, { id })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  return (
+    <div className="template-list">
+      {templates.map((t) => (
+        <div key={t.id} className="template-list-item">
+          <span className="template-list-icon">{t.icon}</span>
+          <span className="template-list-name">{t.name}</span>
+          {t.isBuiltin && <span className="template-list-tag">内置</span>}
+          {t.id === defaultId && <span className="template-list-tag default">默认</span>}
+          <span className="template-list-cmd" title={t.command || '(纯 shell)'}>
+            {t.command || '(纯 shell)'}
+          </span>
+          <div className="template-list-actions">
+            {t.id !== defaultId && (
+              <button
+                type="button"
+                className="settings-button"
+                onClick={() => handleSetDefault(t.id)}
+              >
+                设为默认
+              </button>
+            )}
+            <button
+              type="button"
+              className="settings-button"
+              onClick={() => onEdit(t.id)}
+            >
+              编辑
+            </button>
+            {!t.isBuiltin && (
+              <button
+                type="button"
+                className="settings-button danger"
+                onClick={() => handleDelete(t.id)}
+              >
+                删除
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="settings-button"
+        style={{ marginTop: 8, alignSelf: 'flex-start' }}
+        onClick={onCreate}
+      >
+        + 新建自定义模板
+      </button>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 启动模板编辑器
+// ──────────────────────────────────────────────────────────────────
+
+function TemplateEditor({
+  templateId,
+  onClose,
+  setError,
+}: {
+  templateId: string | null;
+  onClose: () => void;
+  setError: (msg: string | null) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const isCreate = templateId === null;
+  const existing = templateId ? state.templates.find((t) => t.id === templateId) : null;
+
+  const [draft, setDraft] = useState<Template>(() => {
+    if (existing) {
+      return {
+        ...existing,
+        args: [...existing.args],
+        env: { ...existing.env },
+      };
+    }
+    return {
+      id: '',
+      name: '',
+      icon: '🔧',
+      isBuiltin: false,
+      command: '',
+      args: [],
+      env: {},
+      shellFirst: true,
+      postExitAction: 'keep_shell' as PostExitAction,
+    };
+  });
+
+  const [argsText, setArgsText] = useState<string>(() => draft.args.join(' '));
+  const [envText, setEnvText] = useState<string>(() =>
+    Object.entries(draft.env)
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n'),
+  );
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async (): Promise<void> => {
+    setError(null);
+    setSaving(true);
+    try {
+      const parsedArgs = argsText.trim() ? argsText.trim().split(/\s+/) : [];
+      const parsedEnv: Record<string, string> = {};
+      for (const line of envText.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx <= 0) {
+          throw new Error(`环境变量行格式错: "${line}" 应为 KEY=VALUE`);
+        }
+        const key = trimmed.slice(0, eqIdx).trim();
+        const value = trimmed.slice(eqIdx + 1);
+        if (!key) throw new Error(`环境变量名不能为空: "${line}"`);
+        parsedEnv[key] = value;
+      }
+
+      if (isCreate) {
+        const payload: AddTemplatePayload = {
+          name: draft.name,
+          icon: draft.icon,
+          command: draft.command,
+          args: parsedArgs,
+          env: parsedEnv,
+          shellFirst: draft.shellFirst,
+          postExitAction: draft.postExitAction,
+        };
+        await window.api.invoke<AddTemplatePayload, AddTemplateResponse>(
+          COMMAND_CHANNELS.TEMPLATE_ADD,
+          payload,
+        );
+      } else {
+        const payload: UpdateTemplatePayload = {
+          id: draft.id,
+          partial: {
+            name: draft.name,
+            icon: draft.icon,
+            command: draft.command,
+            args: parsedArgs,
+            env: parsedEnv,
+            shellFirst: draft.shellFirst,
+            postExitAction: draft.postExitAction,
+          },
+        };
+        await window.api.invoke<UpdateTemplatePayload, UpdateTemplateResponse>(
+          COMMAND_CHANNELS.TEMPLATE_UPDATE,
+          payload,
+        );
+      }
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="settings-panel">
+      <h2 className="settings-panel-title">
+        <button
+          type="button"
+          className="settings-button"
+          style={{ marginRight: 8 }}
+          onClick={onClose}
+        >
+          &lt; 返回
+        </button>
+        {isCreate ? '新建模板' : `编辑模板:${draft.name}`}
+        {draft.isBuiltin && (
+          <span className="template-list-tag" style={{ marginLeft: 8 }}>
+            内置(可改 name/icon/command/args/env,不可删)
+          </span>
+        )}
+      </h2>
+
+      <SettingRow label="名称">
+        <input
+          type="text"
+          className="settings-input"
+          value={draft.name}
+          onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+          placeholder="例如:My Claude"
+        />
+      </SettingRow>
+
+      <SettingRow label="图标 (emoji)">
+        <input
+          type="text"
+          className="settings-input"
+          value={draft.icon}
+          onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
+          placeholder="🔧"
+          maxLength={4}
+          style={{ minWidth: 60 }}
+        />
+      </SettingRow>
+
+      <SettingRow label="命令" hint="留空表示启动纯 shell;不要写 shell 路径,EasyTerm 会自动注入 shell">
+        <input
+          type="text"
+          className="settings-input"
+          value={draft.command}
+          onChange={(e) => setDraft({ ...draft, command: e.target.value })}
+          placeholder="例如:claude / codex / 留空"
+        />
+      </SettingRow>
+
+      <SettingRow label="参数" hint="空格分隔(简单 shell quoting,有空格的参数请避免)">
+        <input
+          type="text"
+          className="settings-input"
+          value={argsText}
+          onChange={(e) => setArgsText(e.target.value)}
+          placeholder="例如:--foo bar --baz"
+        />
+      </SettingRow>
+
+      <SettingRow label="环境变量" hint="每行一个 KEY=VALUE">
+        <textarea
+          className="settings-input"
+          value={envText}
+          onChange={(e) => setEnvText(e.target.value)}
+          placeholder="ANTHROPIC_API_KEY=sk-..."
+          rows={4}
+          style={{ minWidth: 320, fontFamily: 'var(--terminal-font-family, monospace)' }}
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="启动方式"
+        hint='"先启动 shell"让命令退出后用户能继续看到 shell 提示符;"直接运行命令"启动更快'
+      >
+        <div className="settings-radio-group">
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="shell-first"
+              checked={draft.shellFirst}
+              onChange={() => setDraft({ ...draft, shellFirst: true })}
+            />
+            先启动 shell 再运行命令
+          </label>
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="shell-first"
+              checked={!draft.shellFirst}
+              onChange={() => setDraft({ ...draft, shellFirst: false })}
+            />
+            直接运行命令
+          </label>
+        </div>
+      </SettingRow>
+
+      <SettingRow label="命令退出后">
+        <div className="settings-radio-group">
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="post-exit"
+              checked={draft.postExitAction === 'keep_shell'}
+              onChange={() =>
+                setDraft({ ...draft, postExitAction: 'keep_shell' as PostExitAction })
+              }
+            />
+            留在 shell(若启动方式为先 shell)
+          </label>
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="post-exit"
+              checked={draft.postExitAction === 'close_session'}
+              onChange={() =>
+                setDraft({
+                  ...draft,
+                  postExitAction: 'close_session' as PostExitAction,
+                })
+              }
+            />
+            关闭 session
+          </label>
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="post-exit"
+              checked={draft.postExitAction === 'hold'}
+              onChange={() =>
+                setDraft({ ...draft, postExitAction: 'hold' as PostExitAction })
+              }
+            />
+            保留显示,等待用户手动关闭
+          </label>
+        </div>
+      </SettingRow>
+
+      <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          className="settings-button"
+          onClick={() => void handleSave()}
+          disabled={saving || !draft.name.trim()}
+          style={{
+            background: 'var(--iris, #f0f)',
+            color: 'var(--base, #f0f)',
+            borderColor: 'var(--iris, #f0f)',
+          }}
+        >
+          {saving ? '保存中…' : isCreate ? '创建' : '保存'}
+        </button>
+        <button type="button" className="settings-button" onClick={onClose}>
+          取消
+        </button>
+      </div>
     </section>
   );
 }
@@ -603,6 +986,9 @@ function DataPanel({
 }: {
   setError: (msg: string | null) => void;
 }): JSX.Element {
+  const [busy, setBusy] = useState<'export' | 'import' | null>(null);
+  const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+
   const handleOpenDataDir = (): void => {
     setError(null);
     window.api
@@ -610,6 +996,42 @@ function DataPanel({
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
+  };
+
+  const handleExport = async (): Promise<void> => {
+    setError(null);
+    setLastExportPath(null);
+    setBusy('export');
+    try {
+      const res = await window.api.invoke<unknown, ExportSettingsResponse>(
+        COMMAND_CHANNELS.SETTINGS_EXPORT,
+        {},
+      );
+      if (res.filePath) setLastExportPath(res.filePath);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleImport = async (): Promise<void> => {
+    setError(null);
+    setBusy('import');
+    try {
+      const res = await window.api.invoke<unknown, ImportSettingsResponse>(
+        COMMAND_CHANNELS.SETTINGS_IMPORT,
+        {},
+      );
+      if (res.status === 'error') {
+        setError(`导入失败:${res.errorMessage ?? '未知错误'}`);
+      }
+      // 'imported' / 'cancelled' 不需提示;'imported' 之后 main 会立即 relaunch
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
   };
 
   return (
@@ -625,12 +1047,39 @@ function DataPanel({
         </div>
       </SettingRow>
 
-      <SettingRow label="导出设置" hint="把全部 JSON 配置导出为 zip 文件">
-        <span className="settings-placeholder">⏳ chunk 4 接入</span>
+      <SettingRow
+        label="导出设置"
+        hint="把全部配置(收藏 / 最近 / 模板 / 设置)导出为 JSON 文件"
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <button
+            type="button"
+            className="settings-button"
+            disabled={busy !== null}
+            onClick={() => void handleExport()}
+          >
+            {busy === 'export' ? '导出中…' : '导出…'}
+          </button>
+          {lastExportPath && (
+            <span className="settings-info-text" style={{ fontSize: 11 }}>
+              已导出到: {lastExportPath}
+            </span>
+          )}
+        </div>
       </SettingRow>
 
-      <SettingRow label="导入设置" hint="选择 zip 文件导入,会询问是否覆盖">
-        <span className="settings-placeholder">⏳ chunk 4 接入</span>
+      <SettingRow
+        label="导入设置"
+        hint="选择导出文件,二次确认后整体替换并重启应用"
+      >
+        <button
+          type="button"
+          className="settings-button"
+          disabled={busy !== null}
+          onClick={() => void handleImport()}
+        >
+          {busy === 'import' ? '导入中…' : '导入…'}
+        </button>
       </SettingRow>
     </section>
   );

@@ -44,14 +44,23 @@ import {
   type EventEnvelope,
   type FocusSessionOwnerPayload,
   type FocusWindowPayload,
+  type AddTemplatePayload,
+  type AddTemplateResponse,
+  type DeleteTemplatePayload,
+  type ExportSettingsResponse,
   type GetAutoStartResponse,
   type GetProtocolVersionResponse,
   type GetScrollbackPayload,
   type GetScrollbackResponse,
   type GetSettingsResponse,
   type GetSnapshotPayload,
+  type ImportSettingsResponse,
   type ListShellsResponse,
   type OpenExternalPayload,
+  type SetDefaultTemplatePayload,
+  type SettingsArchiveV1,
+  type UpdateTemplatePayload,
+  type UpdateTemplateResponse,
   type GetSnapshotResponse,
   type PathTreeUpdatedPayload,
   type PickFolderPayload,
@@ -489,6 +498,225 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       await shell.openExternal(url);
     },
   );
+
+  // Templates CRUD (CP-4 chunk 4)
+  ipcMain.handle(
+    COMMAND_CHANNELS.TEMPLATE_ADD,
+    (_e, envelope: CommandEnvelope<AddTemplatePayload>): AddTemplateResponse => {
+      const t = templatesManager.add(envelope.payload);
+      return { template: t };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.TEMPLATE_UPDATE,
+    (
+      _e,
+      envelope: CommandEnvelope<UpdateTemplatePayload>,
+    ): UpdateTemplateResponse => {
+      const t = templatesManager.update(envelope.payload.id, envelope.payload.partial);
+      return { template: t };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.TEMPLATE_DELETE,
+    (_e, envelope: CommandEnvelope<DeleteTemplatePayload>): void => {
+      templatesManager.delete(envelope.payload.id);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.TEMPLATE_SET_DEFAULT,
+    (_e, envelope: CommandEnvelope<SetDefaultTemplatePayload>): void => {
+      templatesManager.setDefault(envelope.payload.id);
+    },
+  );
+
+  // Settings export / import (CP-4 chunk 4)
+  //
+  // V1 折衷:导出/导入用单 JSON 文件而非 zip,避免引入 zip 库依赖。
+  // 文档 6.6.2 描述为 zip,未来加 archiver 包可平滑升级。
+  ipcMain.handle(
+    COMMAND_CHANNELS.SETTINGS_EXPORT,
+    async (
+      _e,
+      _envelope: CommandEnvelope<undefined>,
+    ): Promise<ExportSettingsResponse> => {
+      const fromWindow = BrowserWindow.fromWebContents(_e.sender);
+      const result = await dialog.showSaveDialog(
+        fromWindow ?? BrowserWindow.getFocusedWindow()!,
+        {
+          title: '导出 EasyTerm 配置',
+          defaultPath: `easyterm-config-${formatDateForFilename(new Date())}.json`,
+          filters: [{ name: 'EasyTerm Archive (JSON)', extensions: ['json'] }],
+        },
+      );
+      if (result.canceled || !result.filePath) {
+        return { filePath: null };
+      }
+      const archive = await buildArchive(deps);
+      await fs.writeFile(result.filePath, JSON.stringify(archive, null, 2), 'utf-8');
+      return { filePath: result.filePath };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SETTINGS_IMPORT,
+    async (
+      _e,
+      _envelope: CommandEnvelope<undefined>,
+    ): Promise<ImportSettingsResponse> => {
+      const fromWindow = BrowserWindow.fromWebContents(_e.sender);
+      const result = await dialog.showOpenDialog(
+        fromWindow ?? BrowserWindow.getFocusedWindow()!,
+        {
+          title: '导入 EasyTerm 配置',
+          properties: ['openFile'],
+          filters: [{ name: 'EasyTerm Archive (JSON)', extensions: ['json'] }],
+        },
+      );
+      if (result.canceled || result.filePaths.length === 0) {
+        return { status: 'cancelled' };
+      }
+      const filePath = result.filePaths[0]!;
+      let archive: SettingsArchiveV1;
+      try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        archive = JSON.parse(raw) as SettingsArchiveV1;
+        validateArchive(archive);
+      } catch (err) {
+        return {
+          status: 'error',
+          errorMessage: err instanceof Error ? err.message : String(err),
+        };
+      }
+      // 二次确认 — 清楚告知用户"会重启应用,运行中的终端会被关"。
+      const confirmRes = await dialog.showMessageBox(
+        fromWindow ?? BrowserWindow.getFocusedWindow()!,
+        {
+          type: 'warning',
+          title: '确认导入',
+          message: '导入将完全覆盖现有配置(收藏 / 最近 / 模板 / 设置)。',
+          detail: '应用会重启,运行中的所有终端会被关闭。是否继续?',
+          buttons: ['取消', '继续导入并重启'],
+          defaultId: 0,
+          cancelId: 0,
+        },
+      );
+      if (confirmRes.response !== 1) {
+        return { status: 'cancelled' };
+      }
+      try {
+        await applyArchive(archive);
+      } catch (err) {
+        return {
+          status: 'error',
+          errorMessage: err instanceof Error ? err.message : String(err),
+        };
+      }
+      // 重启 — 内置 sessionManager 此时还没 shutdown,但 will-quit 会处理
+      app.relaunch();
+      setQuitting();
+      app.quit();
+      return { status: 'imported' };
+    },
+  );
+}
+
+function formatDateForFilename(d: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}` +
+    `${pad(d.getMonth() + 1)}` +
+    `${pad(d.getDate())}-` +
+    `${pad(d.getHours())}` +
+    `${pad(d.getMinutes())}`
+  );
+}
+
+async function buildArchive(deps: IpcLayerDeps): Promise<SettingsArchiveV1> {
+  const dataDir = app.getPath('userData');
+  const readJson = async <T>(filename: string, fallback: T): Promise<T> => {
+    try {
+      const raw = await fs.readFile(joinPath(dataDir, filename), 'utf-8');
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
+  };
+  // 强制先 flush,以保证读盘时拿到最新写入
+  await Promise.all([
+    deps.settingsManager.flush(),
+    deps.pathManager.flush(),
+    deps.templatesManager.flush(),
+  ]);
+  const settings = deps.settingsManager.get();
+  const bookmarks = await readJson<{ paths: unknown[] }>('bookmarks.json', { paths: [] });
+  const recent = await readJson<{ paths: unknown[] }>('recent.json', { paths: [] });
+  const templates = {
+    defaultTemplateId: deps.templatesManager.getDefaultTemplateId(),
+    templates: deps.templatesManager.list(),
+  };
+  return {
+    format: 'easyterm-archive',
+    version: 1,
+    exportedAt: Date.now(),
+    exportedFrom: app.getVersion(),
+    settings,
+    // 类型断言:JSON 上读出来已经是合法 schema (持久化文件不通过 IPC 不需要严格 schema 校验)
+    bookmarks: bookmarks as SettingsArchiveV1['bookmarks'],
+    recent: recent as SettingsArchiveV1['recent'],
+    templates,
+  };
+}
+
+function validateArchive(input: unknown): asserts input is SettingsArchiveV1 {
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    (input as SettingsArchiveV1).format !== 'easyterm-archive' ||
+    (input as SettingsArchiveV1).version !== 1
+  ) {
+    throw new Error(
+      '不是合法的 EasyTerm 归档:format/version 不匹配 (期望 easyterm-archive v1)',
+    );
+  }
+  const i = input as SettingsArchiveV1;
+  if (!i.settings || !i.bookmarks?.paths || !i.recent?.paths || !i.templates?.templates) {
+    throw new Error('归档缺少必需字段 (settings / bookmarks / recent / templates)');
+  }
+}
+
+/**
+ * 把归档的内容写到 userData 下的 4 个 JSON 文件。
+ * 写完后,调用方应该 app.relaunch() + app.quit() 让全部 manager 重新加载。
+ */
+async function applyArchive(archive: SettingsArchiveV1): Promise<void> {
+  const dataDir = app.getPath('userData');
+  const writes: Array<Promise<void>> = [
+    fs.writeFile(
+      joinPath(dataDir, 'settings.json'),
+      JSON.stringify(archive.settings, null, 2),
+      'utf-8',
+    ),
+    fs.writeFile(
+      joinPath(dataDir, 'bookmarks.json'),
+      JSON.stringify({ version: 1, ...archive.bookmarks }, null, 2),
+      'utf-8',
+    ),
+    fs.writeFile(
+      joinPath(dataDir, 'recent.json'),
+      JSON.stringify({ version: 1, ...archive.recent }, null, 2),
+      'utf-8',
+    ),
+    fs.writeFile(
+      joinPath(dataDir, 'templates.json'),
+      JSON.stringify({ version: 1, ...archive.templates }, null, 2),
+      'utf-8',
+    ),
+  ];
+  await Promise.all(writes);
 }
 
 // ──────────────────────────────────────────────────────────────────

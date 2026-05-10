@@ -72,7 +72,7 @@ function bootstrap(): void {
     templatesManager,
     settingsManager,
   );
-  const trayManager = new TrayManager(windowManager);
+  const trayManager = new TrayManager(windowManager, sessionManager, settingsManager);
 
   // second-instance:在已运行实例新开窗口
   app.on('second-instance', () => {

@@ -16,6 +16,7 @@
  * @AGENTS.md 5.3 必测: 持久化往返、损坏恢复、版本迁移、内置模板补齐。
  */
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import type { Template, TemplatesFile } from '@shared/types';
 import type { JsonStore } from './persistence';
 
@@ -183,6 +184,100 @@ export class TemplatesManager extends EventEmitter {
   }
 
   /**
+   * 新增自定义模板。返回新模板的深拷贝。
+   *
+   * @throws InvalidTemplate name/icon 缺失或格式错
+   */
+  add(input: Omit<Template, 'id' | 'isBuiltin'> & { id?: string }): Template {
+    validateTemplateInput(input);
+    const newId = input.id?.trim() || generateUuid();
+    if (this.templates.find((t) => t.id === newId)) {
+      throw new TemplatesManagerError(
+        'InvalidTemplate',
+        `id="${newId}" 已存在,无法新增`,
+      );
+    }
+    const t: Template = {
+      id: newId,
+      name: input.name,
+      icon: input.icon,
+      isBuiltin: false,
+      command: input.command,
+      args: [...input.args],
+      env: { ...input.env },
+      shellFirst: input.shellFirst,
+      postExitAction: input.postExitAction,
+    };
+    this.templates.push(t);
+    this.persist();
+    this.emitUpdated();
+    return cloneTemplate(t);
+  }
+
+  /**
+   * 更新模板。内置模板允许改 name / icon / command / args / env / shellFirst /
+   * postExitAction (但 isBuiltin / id 不可改);自定义模板字段全部可改。
+   *
+   * @throws TemplateNotFound id 不存在
+   * @throws InvalidTemplate 字段值非法
+   */
+  update(
+    id: string,
+    partial: Partial<Omit<Template, 'id' | 'isBuiltin'>>,
+  ): Template {
+    const idx = this.templates.findIndex((t) => t.id === id);
+    if (idx === -1) {
+      throw new TemplatesManagerError(
+        'TemplateNotFound',
+        `id="${id}" 不存在,无法更新`,
+      );
+    }
+    const current = this.templates[idx]!;
+    const merged: Template = {
+      ...current,
+      ...partial,
+      // 强制保留 id / isBuiltin
+      id: current.id,
+      isBuiltin: current.isBuiltin,
+      // 数组 / 对象做浅拷贝防止外部 mutate 内部状态
+      args: partial.args ? [...partial.args] : [...current.args],
+      env: partial.env ? { ...partial.env } : { ...current.env },
+    };
+    validateTemplateInput(merged);
+    this.templates[idx] = merged;
+    this.persist();
+    this.emitUpdated();
+    return cloneTemplate(merged);
+  }
+
+  /**
+   * 删除自定义模板。内置模板不可删,throw CannotDeleteBuiltin。
+   * 删除时若它是 defaultTemplateId,自动回退到 'shell'。
+   */
+  delete(id: string): void {
+    const idx = this.templates.findIndex((t) => t.id === id);
+    if (idx === -1) {
+      throw new TemplatesManagerError(
+        'TemplateNotFound',
+        `id="${id}" 不存在,无法删除`,
+      );
+    }
+    const t = this.templates[idx]!;
+    if (t.isBuiltin) {
+      throw new TemplatesManagerError(
+        'CannotDeleteBuiltin',
+        `id="${id}" 是内置模板,不可删除`,
+      );
+    }
+    this.templates.splice(idx, 1);
+    if (this.defaultTemplateId === id) {
+      this.defaultTemplateId = DEFAULT_TEMPLATE_ID;
+    }
+    this.persist();
+    this.emitUpdated();
+  }
+
+  /**
    * 应用退出前 flush。
    */
   async flush(): Promise<void> {
@@ -281,4 +376,71 @@ function cloneTemplate(t: Template): Template {
     args: [...t.args],
     env: { ...t.env },
   };
+}
+
+/**
+ * 校验 template 输入。校验失败抛 InvalidTemplate。
+ * 用于 add / update,对内置 / 自定义都生效 (内置 update 时也要校验)。
+ */
+function validateTemplateInput(t: {
+  name: string;
+  icon: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  shellFirst: boolean;
+  postExitAction: string;
+}): void {
+  if (typeof t.name !== 'string' || !t.name.trim()) {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `name 必须是非空字符串,实际: ${JSON.stringify(t.name)}`,
+    );
+  }
+  if (typeof t.icon !== 'string') {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `icon 必须是字符串,实际: ${typeof t.icon}`,
+    );
+  }
+  if (typeof t.command !== 'string') {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `command 必须是字符串(空字符串表示纯 shell),实际: ${typeof t.command}`,
+    );
+  }
+  if (!Array.isArray(t.args) || t.args.some((a) => typeof a !== 'string')) {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `args 必须是字符串数组`,
+    );
+  }
+  if (
+    typeof t.env !== 'object' ||
+    t.env === null ||
+    Array.isArray(t.env) ||
+    Object.values(t.env).some((v) => typeof v !== 'string')
+  ) {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `env 必须是 string→string 的对象`,
+    );
+  }
+  if (typeof t.shellFirst !== 'boolean') {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `shellFirst 必须是布尔`,
+    );
+  }
+  if (!['close_session', 'keep_shell', 'hold'].includes(t.postExitAction)) {
+    throw new TemplatesManagerError(
+      'InvalidTemplate',
+      `postExitAction 必须是 close_session / keep_shell / hold 之一,实际: ${t.postExitAction}`,
+    );
+  }
+}
+
+function generateUuid(): string {
+  // 内置 crypto.randomUUID,不依赖 npm uuid 包
+  return randomUUID();
 }
