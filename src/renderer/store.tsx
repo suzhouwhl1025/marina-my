@@ -72,6 +72,21 @@ export interface AppState {
   expandedPathIds: Set<string>;
   /** 是否在设置视图 (CP-2 暂不实现设置 UI,字段保留供 CP-4) */
   inSettingsView: boolean;
+  /**
+   * 主区终端容器的最新尺寸估算 (cols/rows)。
+   *
+   * 用于 SESSION_CREATE 调用时传给 main 端 spawn PTY。
+   * 关键作用 (CP-2 勘误):避免 spawn-then-resize 的 ConPTY 重画 quirk
+   * 导致 PowerShell 启动横幅多次重复出现在 ring buffer 里。
+   *
+   * 来源:
+   * 1. MainPane 的 ResizeObserver 用 main-pane 容器尺寸 + 字号粗估
+   * 2. TerminalView 第一次 fit 后用 xterm.js 的真实 fit 结果覆盖 (更精确)
+   *
+   * 默认值 120×30 是一个常见终端尺寸,首次启动时若 ResizeObserver 还
+   * 没跑够,用它当 fallback。
+   */
+  lastTerminalDims: { cols: number; rows: number };
 }
 
 const EMPTY_TREE: PathTree = { bookmarks: [], temporary: [], recent: [] };
@@ -96,7 +111,8 @@ export type AppAction =
   | { type: 'view/expand-path'; pathId: string }
   | { type: 'view/enter-settings' }
   | { type: 'view/exit-settings' }
-  | { type: 'view/focus-requested'; selectSessionId?: string };
+  | { type: 'view/focus-requested'; selectSessionId?: string }
+  | { type: 'view/update-terminal-dims'; dims: { cols: number; rows: number } };
 
 // ──────────────────────────────────────────────────────────────────
 // Reducer
@@ -130,12 +146,27 @@ function reducer(state: AppState, action: AppAction): AppState {
     case 'sessions/created': {
       const sessions = new Map(state.sessions);
       sessions.set(action.session.id, action.session);
+      // 新创建且属于本窗口 (双击 path / + 按钮 / 模板按钮 等场景):
+      // 立即把它设为 selected。这样后续的 evt:session:owner-changed
+      // (释放本窗口旧 owner) 到达时,selectedSessionId 已是新 session,
+      // displayable 不会闪到 EmptyPathState (用户勘误后续 #1 闪 + 现象)。
+      if (action.session.ownerWindowId === state.myWindowId) {
+        return {
+          ...state,
+          sessions,
+          selectedSessionId: action.session.id,
+          // 同时确保 selectedPathId 是新 session 的 path
+          selectedPathId: action.session.pathId || state.selectedPathId,
+        };
+      }
       return { ...state, sessions };
     }
 
     case 'sessions/owner-changed': {
       const existing = state.sessions.get(action.sessionId);
       if (!existing) return state;
+      // 同值短路:避免乐观更新后 main broadcast 同样的值再次触发渲染
+      if (existing.ownerWindowId === action.ownerWindowId) return state;
       const updated: SessionInfo = {
         ...existing,
         ownerWindowId: action.ownerWindowId,
@@ -179,12 +210,22 @@ function reducer(state: AppState, action: AppAction): AppState {
       // 选中 path 时自动展开它
       const expanded = new Set(state.expandedPathIds);
       if (action.pathId) expanded.add(action.pathId);
-      // 选中 path 时若它有 session,自动选中第一个;否则取消 session 选中
+
+      // CP-2 勘误后:"持有 = 显示"语义。切 path 时只能自动选中本窗口
+      // 已 owner 的 session;不能选 orphan / 他人持有的,因为那需要 invoke
+      // claim / focus-owner (副作用,不能在 reducer 里做)。用户必须显式
+      // 点击 tab 才会切换 owner。
+      // 如果该 path 下没有本窗口持有的 session → selectedSessionId=null
+      // → MainPane 显示 EmptyPathState (新建终端页面)。
       let selectedSessionId: string | null = state.selectedSessionId;
       if (action.pathId !== state.selectedPathId) {
         const node = findPathNode(state.pathTree, action.pathId ?? '');
-        const firstSid = node?.sessionIds[0];
-        selectedSessionId = firstSid ?? null;
+        const myOwnedSid =
+          node?.sessionIds.find((sid) => {
+            const s = state.sessions.get(sid);
+            return s?.ownerWindowId === state.myWindowId;
+          }) ?? null;
+        selectedSessionId = myOwnedSid;
       }
       return {
         ...state,
@@ -231,6 +272,18 @@ function reducer(state: AppState, action: AppAction): AppState {
       }
       return state;
 
+    case 'view/update-terminal-dims': {
+      const { cols, rows } = action.dims;
+      // 简单去抖:相同尺寸不更新 (避免无意义重渲染)
+      if (
+        state.lastTerminalDims.cols === cols &&
+        state.lastTerminalDims.rows === rows
+      ) {
+        return state;
+      }
+      return { ...state, lastTerminalDims: { cols, rows } };
+    }
+
     default:
       return state;
   }
@@ -274,6 +327,7 @@ export function makeDefaultState(myWindowId: string, myWindowNumber: number): Ap
     selectedSessionId: null,
     expandedPathIds: new Set(),
     inSettingsView: false,
+    lastTerminalDims: { cols: 120, rows: 30 },
   };
 }
 
@@ -452,4 +506,28 @@ export function getSessionsInSelectedPath(state: AppState): SessionInfo[] {
 export function getSelectedSession(state: AppState): SessionInfo | null {
   if (!state.selectedSessionId) return null;
   return state.sessions.get(state.selectedSessionId) ?? null;
+}
+
+/**
+ * 帮助函数:返回"本窗口当前正在显示"的 session — 即 selected 且 owner
+ * 是 myWindow 的那一个。否则 null。
+ *
+ * CP-2 勘误后的"持有=显示"语义:TerminalView 仅在此函数返回非 null 时
+ * 被挂载;返回 null 时 MainPane 应渲染 EmptyPathState。
+ */
+export function getDisplayableSession(state: AppState): SessionInfo | null {
+  const s = getSelectedSession(state);
+  if (!s) return null;
+  return s.ownerWindowId === state.myWindowId ? s : null;
+}
+
+/**
+ * 帮助函数:返回当前窗口正在持有的 session id。新模型下至多 1 个,
+ * 没有则返回 null。乐观接管时用于"先释放旧的"和"失败回滚"。
+ */
+export function findMyOwnedSessionId(state: AppState): string | null {
+  for (const s of state.sessions.values()) {
+    if (s.ownerWindowId === state.myWindowId) return s.id;
+  }
+  return null;
 }

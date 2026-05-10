@@ -239,6 +239,21 @@ describe('SettingsManager — update', () => {
     expect(store.setHistory).toHaveLength(0);
   });
 
+  it.each([
+    'rose-pine',
+    'rose-pine-dawn',
+    'rose-pine-moon',
+    'cutie',
+    'business',
+    'ubuntu',
+    'windows-terminal',
+  ] as const)('合法主题 %s 通过校验', async (theme) => {
+    const { mgr } = makeManager();
+    await mgr.initialize();
+    expect(() => mgr.update({ appearance: { theme } })).not.toThrow();
+    expect(mgr.get().appearance.theme).toBe(theme);
+  });
+
   it('多个字段同时更新 → changedKeys 都列', async () => {
     const { mgr } = makeManager();
     await mgr.initialize();

@@ -70,6 +70,8 @@ const VALID_THEMES: ThemeId[] = [
   'rose-pine-moon',
   'cutie',
   'business',
+  'ubuntu',
+  'windows-terminal',
 ];
 
 /**

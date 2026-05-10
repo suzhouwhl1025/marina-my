@@ -52,7 +52,9 @@ export type ThemeId =
   | 'rose-pine-dawn'
   | 'rose-pine-moon'
   | 'cutie'
-  | 'business';
+  | 'business'
+  | 'ubuntu'
+  | 'windows-terminal';
 
 /**
  * 终端右键行为 (软件定义书 6.6.2 行为)。

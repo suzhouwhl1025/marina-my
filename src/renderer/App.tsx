@@ -6,10 +6,21 @@
  * @对应文档章节: 软件定义书.md 6.1 (整体布局);ipc-protocol.md 第 4 章 handshake
  */
 import { useEffect, useState } from 'react';
-import { PROTOCOL_VERSION } from '@shared/protocol';
+import { COMMAND_CHANNELS, PROTOCOL_VERSION } from '@shared/protocol';
+import type { ThemeId } from '@shared/types';
 import { AppStateProvider, useAppState, useIpcSync } from './store';
 import { Sidebar } from './components/Sidebar';
 import { MainPane } from './components/MainPane';
+
+const THEME_CYCLE: ThemeId[] = [
+  'rose-pine',
+  'rose-pine-dawn',
+  'rose-pine-moon',
+  'cutie',
+  'business',
+  'ubuntu',
+  'windows-terminal',
+];
 
 type HandshakeState =
   | { status: 'pending' }
@@ -105,11 +116,31 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
     return <FullPagePlaceholder title="EasyTerm" subtitle="加载状态…" />;
   }
 
+  const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
+
+  const cycleTheme = (): void => {
+    const idx = THEME_CYCLE.indexOf(currentTheme);
+    const next = THEME_CYCLE[(idx + 1) % THEME_CYCLE.length]!;
+    window.api
+      .invoke(COMMAND_CHANNELS.SETTINGS_UPDATE, {
+        partial: { appearance: { theme: next } },
+      })
+      .catch((err) => console.error('[App] theme cycle failed', err));
+  };
+
   return (
-    <div className="app-root with-shell">
+    <div className="app-root with-shell" data-theme={currentTheme}>
       <header className="app-header">
         <span className="app-title">EasyTerm</span>
         <span className="app-window-badge">Window {state.myWindowNumber || '?'}</span>
+        <button
+          type="button"
+          className="theme-cycle-btn"
+          onClick={cycleTheme}
+          title="切换主题 (CP-2 演示跨窗口同步;颜色实际应用在 CP-4 接入)"
+        >
+          🎨 {currentTheme}
+        </button>
         <span className="app-version">v{buildVersion}</span>
       </header>
       <div className="app-body">

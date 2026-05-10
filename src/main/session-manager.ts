@@ -34,6 +34,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
+import { basename } from 'node:path';
 import { spawn as defaultSpawnPty, type IPty, type IDisposable } from 'node-pty';
 import type {
   SessionExitedPayload,
@@ -45,6 +46,14 @@ import type { PathManager } from './path-manager';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
 
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
+
+/**
+ * Scrollback ring buffer 上限 (软件定义书 5.1.4 / SessionRuntimeShape 注释)。
+ * 超过则尾部裁切 — 保留最新 SCROLLBACK_LIMIT 字节,旧字节丢弃。
+ * 2MB 是为大量 ANSI 转义包装的纯文本输出留余量,远小于 PTY 原始输出
+ * 速率上限,实际运行中很少触顶。
+ */
+export const SCROLLBACK_LIMIT = 2 * 1024 * 1024;
 
 /**
  * spawn 工厂,与 node-pty 的 spawn 兼容。测试中用 mock 替换。
@@ -69,13 +78,56 @@ export function getDefaultShell(): string {
   return process.env['SHELL'] ?? '/bin/sh';
 }
 
+/**
+ * 由 shell 可执行路径推断 session 的默认 displayName。
+ *
+ * 用 basename + 小写比对常见 shell。命中 → 返回规范化大小写的 shell 名;
+ * 未命中 → 返回去 .exe 后的 basename (用户自定义 shell 时也有合理回退)。
+ *
+ * 暴露此函数主要便于单测验证 (避免 mock node-pty 全套)。
+ */
+export function inferDisplayName(shellPath: string): string {
+  const base = basename(shellPath).toLowerCase();
+  // 把 .exe 等扩展名去掉再比对
+  const stem = base.replace(/\.[^.]+$/, '');
+  switch (stem) {
+    case 'powershell':
+    case 'pwsh':
+      return 'PowerShell';
+    case 'bash':
+      return 'Bash';
+    case 'cmd':
+      return 'cmd';
+    case 'zsh':
+      return 'Zsh';
+    case 'fish':
+      return 'fish';
+    case 'sh':
+      return 'sh';
+    default:
+      return stem || 'Shell';
+  }
+}
+
 interface ManagedSession {
   info: SessionInfo;
   pty: IPty;
-  /** evt:session:output 单调序号 */
+  /** evt:session:output 单调序号,从 0 开始,每次 emit 后 ++ */
   outputSeq: number;
   /** PTY 监听句柄,destroy 时释放 */
   disposables: IDisposable[];
+  /**
+   * Ring buffer:存所有 PTY 输出的原始 UTF-8 字节流。
+   * 软件定义书 5.1.4 + 8.4 (跨窗口接管时新 owner 拉历史回放)。
+   *
+   * 不论 session 是否有 owner 都缓冲 — 这样:
+   *  (1) 切 tab 后 release → 切回时 claim,能通过 getScrollback 重放历史
+   *  (2) 关窗后 owner 变 null → 别的窗口接管也能看到历史
+   * 为节省内存只保留最末 SCROLLBACK_LIMIT 字节 (老内容丢弃)。
+   */
+  scrollback: Buffer;
+  /** scrollback 中最末一条 PTY data 对应的 outputSeq。-1 表示尚未有输出。 */
+  scrollbackLastSeq: number;
 }
 
 export interface CreateSessionInput {
@@ -173,14 +225,21 @@ export class SessionManager extends EventEmitter {
       cols: dims.cols,
       rows: dims.rows,
       pid: pty.pid,
-      displayName: 'Shell',
-      ownerWindowId: input.ownerWindowId,
+      displayName: inferDisplayName(shellPath),
+      ownerWindowId: input.ownerWindowId || null,
       state: 'active',
       createdAt: Date.now(),
     };
 
     const disposables: IDisposable[] = [];
-    const managed: ManagedSession = { info, pty, outputSeq: 0, disposables };
+    const managed: ManagedSession = {
+      info,
+      pty,
+      outputSeq: 0,
+      disposables,
+      scrollback: Buffer.alloc(0),
+      scrollbackLastSeq: -1,
+    };
     this.sessions.set(sessionId, managed);
 
     disposables.push(
@@ -190,7 +249,22 @@ export class SessionManager extends EventEmitter {
 
     // 把 session 挂到 path 上 (PathManager 自动触发分类流转 + emit)
     this.pathManager.attachSession(sessionId, input.pathId);
+
+    // 事件顺序关键 (避免 renderer 闪 EmptyPathState):
+    //   先 emit sessionCreated → renderer 拿到新 session (owner=myWindow) 并自动
+    //     selected 它 (reducer sessions/created 的逻辑)
+    //   再 emit ownerChanged 释放本窗口之前持有的旧 session
+    //   这样中间帧 selected 已是新 session,不会出现"selected 但 owner=null"
+    //   导致 displayable=null 的间隙。
     this.emit('sessionCreated', { ...info });
+
+    // 单焦点 owner 不变量:一个窗口同时只能 owner 1 个 session。
+    // 现在释放本窗口之前持有的所有 session (除了刚创建的目标)。
+    // 注意:必须在 spawn 与 sessionCreated 成功后才释放 — 若 spawn 失败,
+    // 用户原先持有的 session 不应丢失。
+    if (input.ownerWindowId) {
+      this.releaseAllOwnedBy(input.ownerWindowId, { exceptSessionId: sessionId });
+    }
     return { ...info };
   }
 
@@ -219,11 +293,16 @@ export class SessionManager extends EventEmitter {
 
   /**
    * 把 sessionId 的 owner 改为 windowId。
-   * 若已有 owner 是其他窗口,会强制接管 (CP-2 简化;严格"先释放后接管"
-   * 模式由 ipc-protocol claim/release 的语义在 IPC 层执行,SessionManager
-   * 接受任意切换)。
    *
-   * @throws SessionManagerError SessionNotFound
+   * 单焦点 owner 不变量 (CP-2 勘误后): 一个窗口同时只能 owner 1 个 session。
+   * 接管时若 windowId 已经持有其他 session,先全部释放 (变 null),再切此
+   * session 给 windowId。
+   *
+   * 跨窗口语义 (软件定义书 8.4): 若 session 当前 owner 是别的窗口,不
+   * 强制抢占 — 抛 SessionAlreadyOwned。IPC 层应在抛错前先调
+   * SESSION_FOCUS_OWNER 把对方窗口浮起。
+   *
+   * @throws SessionManagerError SessionNotFound / SessionAlreadyOwned
    */
   claimOwner(sessionId: string, windowId: string): void {
     const managed = this.sessions.get(sessionId);
@@ -231,13 +310,54 @@ export class SessionManager extends EventEmitter {
       throw new SessionManagerError('SessionNotFound', `sessionId="${sessionId}"`);
     }
     const oldOwner = managed.info.ownerWindowId;
-    if (oldOwner === windowId) return; // 已是 owner
+    if (oldOwner === windowId) return; // 已是 owner,幂等
+    if (oldOwner !== null && oldOwner !== windowId) {
+      throw new SessionManagerError(
+        'SessionAlreadyOwned',
+        `sessionId="${sessionId}" 当前由 windowId="${oldOwner}" 持有,` +
+          `不允许从 windowId="${windowId}" 强制抢占。请改为聚焦持有方窗口。`,
+        { currentOwner: oldOwner, requestedOwner: windowId },
+      );
+    }
+    // 进入此分支表示 oldOwner === null。
+    // 事件顺序关键 (与 createSession 同理):先 emit 目标 session 的 owner
+    // 设为 windowId,再释放本窗口之前持有的其他 session。这样 renderer
+    // 收到事件的中间帧不会出现"selected 但 owner=null"的间隙。
     managed.info.ownerWindowId = windowId;
     this.emit('sessionOwnerChanged', {
       sessionId,
       oldOwnerWindowId: oldOwner,
       newOwnerWindowId: windowId,
     });
+    this.releaseAllOwnedBy(windowId, { exceptSessionId: sessionId });
+  }
+
+  /**
+   * 内部工具:把 windowId 当前持有的所有 session 的 owner 改为 null。
+   * 用于 createSession / claimOwner 维护"一窗口最多 1 owner"不变量,以及
+   * handleWindowClosed。
+   *
+   * @param options.exceptSessionId 跳过此 sessionId (用于"接管新 session
+   *   时不要把它自己也当作旧 owner 释放掉")。
+   */
+  private releaseAllOwnedBy(
+    windowId: string,
+    options?: { exceptSessionId?: string },
+  ): void {
+    const except = options?.exceptSessionId;
+    for (const managed of this.sessions.values()) {
+      if (
+        managed.info.ownerWindowId === windowId &&
+        managed.info.id !== except
+      ) {
+        managed.info.ownerWindowId = null;
+        this.emit('sessionOwnerChanged', {
+          sessionId: managed.info.id,
+          oldOwnerWindowId: windowId,
+          newOwnerWindowId: null,
+        });
+      }
+    }
   }
 
   /**
@@ -269,16 +389,7 @@ export class SessionManager extends EventEmitter {
    * **不杀 PTY** (软件定义书 9.3:关闭窗口完全不影响 session)。
    */
   handleWindowClosed(windowId: string): void {
-    for (const managed of this.sessions.values()) {
-      if (managed.info.ownerWindowId === windowId) {
-        managed.info.ownerWindowId = null;
-        this.emit('sessionOwnerChanged', {
-          sessionId: managed.info.id,
-          oldOwnerWindowId: windowId,
-          newOwnerWindowId: null,
-        });
-      }
-    }
+    this.releaseAllOwnedBy(windowId);
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -333,15 +444,51 @@ export class SessionManager extends EventEmitter {
     return this.sessions.size;
   }
 
+  /**
+   * 取 session 的 scrollback ring buffer 内容。
+   *
+   * 返回 base64 编码 (供 IPC) + 当前 scrollbackLastSeq。Renderer 用 lastSeq
+   * 对后续 evt:session:output 去重 (seq > lastSeq 才 write,避免重复或丢失)。
+   *
+   * session 不存在返回 { data: '', lastSeq: -1 } — 与 sendInput / resize
+   * 等"竞态时静默"的语义保持一致 (close 与 IPC 在不同事件循环帧时常并发)。
+   */
+  getScrollback(sessionId: string): { data: string; lastSeq: number } {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return { data: '', lastSeq: -1 };
+    return {
+      data: managed.scrollback.toString('base64'),
+      lastSeq: managed.scrollbackLastSeq,
+    };
+  }
+
   // ──────────────────────────────────────────────────────────────────
   // 内部
   // ──────────────────────────────────────────────────────────────────
 
   private handlePtyData(managed: ManagedSession, data: string): void {
+    const seq = managed.outputSeq++;
+    const bytes = Buffer.from(data, 'utf8');
+
+    // Ring buffer: 追加 → 超限尾部裁切。Buffer.concat 简单稳定;若每次
+    // 都 concat 大 buffer 引起性能问题,可改用 chunk 数组 + 长度记录,
+    // 但 PTY 通常每次几 KB 远小于 2MB 上限,实测无瓶颈。
+    if (managed.scrollback.length === 0) {
+      managed.scrollback = bytes;
+    } else {
+      managed.scrollback = Buffer.concat([managed.scrollback, bytes]);
+    }
+    if (managed.scrollback.length > SCROLLBACK_LIMIT) {
+      managed.scrollback = managed.scrollback.subarray(
+        managed.scrollback.length - SCROLLBACK_LIMIT,
+      );
+    }
+    managed.scrollbackLastSeq = seq;
+
     const payload: SessionOutputPayload = {
       sessionId: managed.info.id,
-      data: Buffer.from(data, 'utf8').toString('base64'),
-      seq: managed.outputSeq++,
+      data: bytes.toString('base64'),
+      seq,
     };
     this.emit('sessionOutput', payload);
   }

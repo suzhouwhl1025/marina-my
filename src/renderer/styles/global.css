@@ -1,16 +1,39 @@
 /*
  * global.css — 全局样式 + 主题 CSS variables + 主布局。
  *
- * 主题系统设计 (软件定义书 5.1.9):
- *   - 5 套主题,通过 [data-theme="..."] 切换 :root 的 CSS variables
+ * 主题系统设计 (软件定义书 5.1.9 + CP-2 勘误):
+ *   - 7 套主题,通过 [data-theme="..."] 完整覆盖 14 个语义变量
  *   - 所有 var() 调用必须带 #f0f fallback (CP-4 接 stylelint 静态校验)
+ *   - xterm 终端的颜色主题在 TerminalView.tsx 的 XTERM_THEMES 同步维护
  *
- * CP-2 阶段:Rose Pine 默认 + 完整 app shell + sidebar + main-pane + terminal。
- * CP-4 阶段拆出独立 themes 文件并接主题切换。
+ * 14 个语义变量:
+ *   --base           底层背景 (app shell / 主区背景)
+ *   --surface        次级背景 (header / sidebar / tab-bar)
+ *   --overlay        分隔色 (border / overlay panel)
+ *   --highlight-low  hover 浅色
+ *   --highlight-med  selected / 强 hover
+ *   --highlight-high 滚动条 thumb hover
+ *   --muted          次要文字 (count / placeholder)
+ *   --subtle         次次要文字 (subtitle / hint)
+ *   --text           主文字
+ *   --love           错误 / close 强调 (红)
+ *   --gold           计数 / orphan 标记 (黄/橙)
+ *   --rose           次强调 (粉)
+ *   --pine           成功 / active 状态 (青绿)
+ *   --foam           链接 / 信息 (青)
+ *   --iris           主题色 / 选中 / 强调 (紫)
  */
 
 :root {
-  /* Rose Pine 默认主题 */
+  --ui-font-family:
+    'LXGW WenKai', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --terminal-font-family:
+    'Cascadia Mono', 'JetBrains Mono', Consolas, 'LXGW WenKai Mono', monospace;
+}
+
+/* Rose Pine — 默认 (尚未 data-theme 设置时也用此) */
+:root,
+[data-theme='rose-pine'] {
   --base: #191724;
   --surface: #1f1d2e;
   --overlay: #26233a;
@@ -26,11 +49,120 @@
   --pine: #31748f;
   --foam: #9ccfd8;
   --iris: #c4a7e7;
+}
 
-  --ui-font-family:
-    'LXGW WenKai', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
-  --terminal-font-family:
-    'Cascadia Mono', 'JetBrains Mono', Consolas, 'LXGW WenKai Mono', monospace;
+/* Rose Pine Dawn — 浅色 */
+[data-theme='rose-pine-dawn'] {
+  --base: #faf4ed;
+  --surface: #fffaf3;
+  --overlay: #f2e9e1;
+  --highlight-low: #f4ede4;
+  --highlight-med: #dfdad9;
+  --highlight-high: #cecacd;
+  --muted: #9893a5;
+  --subtle: #797593;
+  --text: #575279;
+  --love: #b4637a;
+  --gold: #ea9d34;
+  --rose: #d7827e;
+  --pine: #286983;
+  --foam: #56949f;
+  --iris: #907aa9;
+}
+
+/* Rose Pine Moon — 中度深紫 */
+[data-theme='rose-pine-moon'] {
+  --base: #232136;
+  --surface: #2a273f;
+  --overlay: #393552;
+  --highlight-low: #2a283e;
+  --highlight-med: #44415a;
+  --highlight-high: #56526e;
+  --muted: #6e6a86;
+  --subtle: #908caa;
+  --text: #e0def4;
+  --love: #eb6f92;
+  --gold: #f6c177;
+  --rose: #ea9a97;
+  --pine: #3e8fb0;
+  --foam: #9ccfd8;
+  --iris: #c4a7e7;
+}
+
+/* Cutie — 粉紫高对比 */
+[data-theme='cutie'] {
+  --base: #231a30;
+  --surface: #2c2240;
+  --overlay: #3a2c4a;
+  --highlight-low: #322545;
+  --highlight-med: #4d3a5b;
+  --highlight-high: #614c70;
+  --muted: #7a6488;
+  --subtle: #b39ec5;
+  --text: #f7e6f5;
+  --love: #ff6ea1;
+  --gold: #ffd479;
+  --rose: #f7a8d8;
+  --pine: #a3e8c2;
+  --foam: #a8e6f0;
+  --iris: #d4a3ff;
+}
+
+/* Business — 商务蓝灰 (Nord 风) */
+[data-theme='business'] {
+  --base: #1d2733;
+  --surface: #232e3c;
+  --overlay: #2e3b4a;
+  --highlight-low: #283543;
+  --highlight-med: #3b4252;
+  --highlight-high: #4c566a;
+  --muted: #6c7a8c;
+  --subtle: #9aa6b7;
+  --text: #d8dee9;
+  --love: #bf616a;
+  --gold: #ebcb8b;
+  --rose: #d08770;
+  --pine: #a3be8c;
+  --foam: #88c0d0;
+  --iris: #81a1c1;
+}
+
+/* Ubuntu — 经典棕紫 + 橙强调 */
+[data-theme='ubuntu'] {
+  --base: #300a24;
+  --surface: #3d1130;
+  --overlay: #4a163b;
+  --highlight-low: #3a1130;
+  --highlight-med: #5e2750;
+  --highlight-high: #77376b;
+  --muted: #876783;
+  --subtle: #b89bb1;
+  --text: #eeeeec;
+  --love: #ef2929;
+  --gold: #fce94f;
+  --rose: #ad7fa8;
+  --pine: #8ae234;
+  --foam: #34e2e2;
+  --iris: #dd4814;
+}
+
+/* Windows Terminal — Campbell 配色 */
+[data-theme='windows-terminal'] {
+  --base: #0c0c0c;
+  --surface: #1e1e1e;
+  --overlay: #2d2d2d;
+  --highlight-low: #1a1a1a;
+  --highlight-med: #3a3d41;
+  --highlight-high: #505357;
+  --muted: #767676;
+  --subtle: #a0a0a0;
+  --text: #cccccc;
+  --love: #e74856;
+  --gold: #f9f1a5;
+  --rose: #b4009e;
+  --pine: #16c60c;
+  --foam: #61d6d6;
+  --iris: #3b78ff;
 }
 
 * {
@@ -102,6 +234,22 @@ button:disabled {
   border-radius: 4px;
   font-family: var(--terminal-font-family, monospace);
   font-size: 11px;
+}
+
+.theme-cycle-btn {
+  background: transparent;
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--foam, #f0f);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--terminal-font-family, monospace);
+  cursor: pointer;
+}
+
+.theme-cycle-btn:hover {
+  background-color: var(--highlight-low, #f0f);
+  border-color: var(--iris, #f0f);
 }
 
 .app-version {
@@ -589,33 +737,51 @@ button:disabled {
   background-color: transparent !important;
 }
 
-.terminal-not-owner {
-  flex: 1 1 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 24px;
-  text-align: center;
-  color: var(--subtle, #f0f);
+/* xterm 内部滚动条跟随当前主题 (CP-2 勘误:之前用 Chrome 默认白色滚动条) */
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
 }
 
-.terminal-not-owner strong {
-  color: var(--gold, #f0f);
+.terminal-host .xterm-viewport::-webkit-scrollbar-track {
+  background-color: var(--surface, #f0f);
 }
 
-.terminal-claim-btn {
-  background-color: var(--iris, #f0f);
-  color: var(--base, #f0f);
-  border: none;
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: var(--highlight-med, #f0f);
+  border-radius: 6px;
+  border: 2px solid var(--surface, #f0f);
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background-color: var(--highlight-high, #f0f);
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar-corner {
+  background-color: var(--surface, #f0f);
+}
+
+/* 通用容器滚动条 (sidebar 等) */
+.sidebar-bookmarks-dropzone::-webkit-scrollbar,
+.tab-bar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.sidebar-bookmarks-dropzone::-webkit-scrollbar-track,
+.tab-bar::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+.sidebar-bookmarks-dropzone::-webkit-scrollbar-thumb,
+.tab-bar::-webkit-scrollbar-thumb {
+  background-color: var(--highlight-med, #f0f);
   border-radius: 4px;
-  padding: 8px 16px;
-  font-size: 13px;
 }
 
-.terminal-claim-btn:hover {
-  background-color: var(--foam, #f0f);
+.sidebar-bookmarks-dropzone::-webkit-scrollbar-thumb:hover,
+.tab-bar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--highlight-high, #f0f);
 }
 
 /* ── Bootstrap / 错误占位 ── */

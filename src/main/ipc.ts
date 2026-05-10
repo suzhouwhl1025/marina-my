@@ -44,6 +44,8 @@ import {
   type FocusSessionOwnerPayload,
   type FocusWindowPayload,
   type GetProtocolVersionResponse,
+  type GetScrollbackPayload,
+  type GetScrollbackResponse,
   type GetSettingsResponse,
   type GetSnapshotPayload,
   type GetSnapshotResponse,
@@ -249,8 +251,21 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       envelope: CommandEnvelope<ClaimSessionPayload>,
     ): ClaimSessionResponse => {
       sessionManager.claimOwner(envelope.payload.sessionId, envelope.windowId);
-      // CP-2 无 scrollback;CP-3 接入后从 ring buffer 拉
-      return { scrollback: '' };
+      // CP-2 勘误后:scrollback ring buffer 已实现。带回历史以保协议自洽,
+      // 但 renderer 通常用 cmd:session:get-scrollback 单独拉,以避免 claim
+      // 动作和 history-replay 时序耦合 (TerminalView 重新挂载场景非 claim 触发)
+      const sb = sessionManager.getScrollback(envelope.payload.sessionId);
+      return { scrollback: sb.data, lastSeq: sb.lastSeq };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SESSION_GET_SCROLLBACK,
+    (
+      _e,
+      envelope: CommandEnvelope<GetScrollbackPayload>,
+    ): GetScrollbackResponse => {
+      return sessionManager.getScrollback(envelope.payload.sessionId);
     },
   );
 

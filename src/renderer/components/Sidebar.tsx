@@ -23,7 +23,7 @@ import {
   type CreateSessionResponse,
 } from '@shared/protocol';
 import type { PathNode, SessionInfo } from '@shared/types';
-import { useAppDispatch, useAppState } from '../store';
+import { findMyOwnedSessionId, useAppDispatch, useAppState } from '../store';
 
 const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
   active: 'var(--pine, #f0f)',
@@ -203,11 +203,20 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
   const handleDoubleClick = async (): Promise<void> => {
     // 双击 = 在该 path 下用默认模板新建 session
     try {
-      await window.api.invoke<unknown, CreateSessionResponse>(
+      const dims = state.lastTerminalDims;
+      const res = await window.api.invoke<unknown, CreateSessionResponse>(
         COMMAND_CHANNELS.SESSION_CREATE,
-        { pathId: node.path, templateId: 'shell', cols: 80, rows: 24 },
+        {
+          pathId: node.path,
+          templateId: 'shell',
+          cols: dims.cols,
+          rows: dims.rows,
+        },
       );
+      // 先切 path (会自动选 my-owned firstSid,但新创建的可能不是 firstSid),
+      // 再显式 select 新创建的 session。两次 dispatch 在 React 18 自动 batch。
       dispatch({ type: 'view/select-path', pathId: node.id });
+      dispatch({ type: 'view/select-session', sessionId: res.session.id });
     } catch (err) {
       console.error('[Sidebar] doubleclick create-session failed', err);
     }
@@ -258,34 +267,59 @@ function SessionItem({ session }: { session: SessionInfo }): JSX.Element {
     session.ownerWindowId !== null && session.ownerWindowId !== state.myWindowId;
   const selected = state.selectedSessionId === session.id;
 
-  const handleClick = async (): Promise<void> => {
-    // 本窗口持有 → 切到该 session
+  const handleClick = (): void => {
+    // 本窗口已是 owner → 仅切 view
     if (isMine) {
       dispatch({ type: 'view/select-path', pathId: session.pathId });
       dispatch({ type: 'view/select-session', sessionId: session.id });
       return;
     }
-    // 其他窗口持有 → 聚焦那个窗口
+    // 其他窗口持有 → 聚焦那个窗口,所有权不变 (软件定义书 8.4)
     if (ownedByOther) {
-      try {
-        await window.api.invoke(COMMAND_CHANNELS.SESSION_FOCUS_OWNER, {
+      window.api
+        .invoke(COMMAND_CHANNELS.SESSION_FOCUS_OWNER, {
           sessionId: session.id,
-        });
-      } catch (err) {
-        console.error('[Sidebar] focus-owner failed', err);
-      }
+        })
+        .catch((err) => console.error('[Sidebar] focus-owner failed', err));
       return;
     }
-    // 无主 → 接管
-    try {
-      await window.api.invoke(COMMAND_CHANNELS.SESSION_CLAIM, {
-        sessionId: session.id,
+    // 无主 → 乐观接管 (与 Tab.handleClick orphan 分支同协议:本地立即
+    // 改 owner + select,消除 EmptyPathState 闪烁;失败回滚)
+    const myWindowId = state.myWindowId;
+    const prevOwnedId = findMyOwnedSessionId(state);
+    if (prevOwnedId && prevOwnedId !== session.id) {
+      dispatch({
+        type: 'sessions/owner-changed',
+        sessionId: prevOwnedId,
+        ownerWindowId: null,
       });
-      dispatch({ type: 'view/select-path', pathId: session.pathId });
-      dispatch({ type: 'view/select-session', sessionId: session.id });
-    } catch (err) {
-      console.error('[Sidebar] claim failed', err);
     }
+    dispatch({
+      type: 'sessions/owner-changed',
+      sessionId: session.id,
+      ownerWindowId: myWindowId,
+    });
+    dispatch({ type: 'view/select-path', pathId: session.pathId });
+    dispatch({ type: 'view/select-session', sessionId: session.id });
+
+    window.api
+      .invoke(COMMAND_CHANNELS.SESSION_CLAIM, { sessionId: session.id })
+      .catch((err) => {
+        console.error('[Sidebar] claim failed, rolling back', err);
+        dispatch({
+          type: 'sessions/owner-changed',
+          sessionId: session.id,
+          ownerWindowId: null,
+        });
+        if (prevOwnedId && prevOwnedId !== session.id) {
+          dispatch({
+            type: 'sessions/owner-changed',
+            sessionId: prevOwnedId,
+            ownerWindowId: myWindowId,
+          });
+        }
+        dispatch({ type: 'view/select-session', sessionId: prevOwnedId });
+      });
   };
 
   return (

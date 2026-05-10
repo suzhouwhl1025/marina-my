@@ -52,6 +52,7 @@ export const COMMAND_CHANNELS = {
   SESSION_FOCUS_OWNER: 'cmd:session:focus-owner',
   SESSION_SEND_INPUT: 'cmd:session:send-input',
   SESSION_RESIZE: 'cmd:session:resize',
+  SESSION_GET_SCROLLBACK: 'cmd:session:get-scrollback',
 
   // Bookmark / Path 域
   BOOKMARK_ADD: 'cmd:bookmark:add',
@@ -191,9 +192,24 @@ export interface ClaimSessionPayload {
 }
 
 export interface ClaimSessionResponse {
-  /** CP-3 接入 scrollback ring buffer 后,新 owner 通过此返回值拉历史。
-   *  CP-2 暂时为空字符串。 */
+  /** Base64 编码的 scrollback 历史 (CP-2 修订:已实现 ring buffer)。
+   *  Renderer 通常通过 cmd:session:get-scrollback 单独拉取以避免与 claim
+   *  动作时序耦合,此返回值仍带数据保留协议自洽。 */
   scrollback: string;
+  /** 与 scrollback 同时刻的 lastSeq,用于 renderer 去重。 */
+  lastSeq: number;
+}
+
+export interface GetScrollbackPayload {
+  sessionId: string;
+}
+
+export interface GetScrollbackResponse {
+  /** Base64 编码的整段 scrollback ring buffer 内容 (UTF-8 字节流) */
+  data: string;
+  /** 取此 scrollback 时刻 PTY 已 emit 的最后一条 output 的 seq;
+   *  渲染端用 seq > lastSeq 去重 evt:session:output。 */
+  lastSeq: number;
 }
 
 export interface ReleaseSessionPayload {

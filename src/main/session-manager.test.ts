@@ -238,15 +238,13 @@ describe('SessionManager — closeSession', () => {
 });
 
 describe('SessionManager — owner 切换', () => {
-  it('claimOwner 改变 owner 并 emit sessionOwnerChanged', () => {
+  it('claimOwner 把无主 session 给指定窗口并 emit sessionOwnerChanged', () => {
     FakePty.reset();
     const mgr = new SessionManager(
       makeStubWindowManager(),
       makeStubPathManager(),
       fakeSpawn,
     );
-    const ownerListener = vi.fn();
-    mgr.on('sessionOwnerChanged', ownerListener);
 
     const info = mgr.createSession({
       pathId: '/x',
@@ -255,13 +253,110 @@ describe('SessionManager — owner 切换', () => {
       cols: 80,
       rows: 24,
     });
+    // 先释放 → 才能被另一窗口接管 (CP-2 勘误后单焦点 owner 模型禁止抢占)
+    mgr.releaseOwner(info.id, 'w-1');
+    const ownerListener = vi.fn();
+    mgr.on('sessionOwnerChanged', ownerListener);
     mgr.claimOwner(info.id, 'w-2');
     expect(mgr.get(info.id)!.ownerWindowId).toBe('w-2');
     expect(ownerListener).toHaveBeenCalledWith({
       sessionId: info.id,
-      oldOwnerWindowId: 'w-1',
+      oldOwnerWindowId: null,
       newOwnerWindowId: 'w-2',
     });
+  });
+
+  it('claimOwner 不允许从其他窗口抢占 → SessionAlreadyOwned', () => {
+    FakePty.reset();
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const info = mgr.createSession({
+      pathId: '/x',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    expect(() => mgr.claimOwner(info.id, 'w-2')).toThrowError(
+      /SessionAlreadyOwned/,
+    );
+    expect(mgr.get(info.id)!.ownerWindowId).toBe('w-1');
+  });
+
+  it('claimOwner 维护"一窗口最多 1 owner"不变量:接管新 session 自动释放旧的', () => {
+    FakePty.reset();
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const a = mgr.createSession({
+      pathId: '/a',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    // 先把 b 创建为无主 (传空 owner),随后让 w-1 接管 b
+    const b = mgr.createSession({
+      pathId: '/b',
+      templateId: 'shell',
+      ownerWindowId: 'w-2', // 先给 w-2,稍后 release 变无主
+      cols: 80,
+      rows: 24,
+    });
+    mgr.releaseOwner(b.id, 'w-2');
+    expect(mgr.get(a.id)!.ownerWindowId).toBe('w-1');
+    expect(mgr.get(b.id)!.ownerWindowId).toBeNull();
+
+    // w-1 接管 b → a 应自动变无主
+    const ownerListener = vi.fn();
+    mgr.on('sessionOwnerChanged', ownerListener);
+    mgr.claimOwner(b.id, 'w-1');
+
+    expect(mgr.get(a.id)!.ownerWindowId).toBeNull();
+    expect(mgr.get(b.id)!.ownerWindowId).toBe('w-1');
+    // 至少 emit 两次:一次释放 a,一次接管 b
+    expect(ownerListener).toHaveBeenCalledWith({
+      sessionId: a.id,
+      oldOwnerWindowId: 'w-1',
+      newOwnerWindowId: null,
+    });
+    expect(ownerListener).toHaveBeenCalledWith({
+      sessionId: b.id,
+      oldOwnerWindowId: null,
+      newOwnerWindowId: 'w-1',
+    });
+  });
+
+  it('createSession 维护"一窗口最多 1 owner"不变量:同窗口新建会释放旧 owner', () => {
+    FakePty.reset();
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const a = mgr.createSession({
+      pathId: '/a',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    expect(mgr.get(a.id)!.ownerWindowId).toBe('w-1');
+
+    const b = mgr.createSession({
+      pathId: '/b',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    expect(mgr.get(a.id)!.ownerWindowId).toBeNull(); // a 自动释放
+    expect(mgr.get(b.id)!.ownerWindowId).toBe('w-1');
   });
 
   it('claimOwner 已是 owner → no-op', () => {
@@ -560,5 +655,110 @@ describe('SessionManagerError', () => {
     const err = new SessionManagerError('PtySpawnFailed', 'foo', { shellPath: '/bin/sh' });
     expect(err.code).toBe('PtySpawnFailed');
     expect(err.details).toEqual({ shellPath: '/bin/sh' });
+  });
+});
+
+describe('SessionManager — Scrollback ring buffer', () => {
+  it('PTY 输出累积到 scrollback,getScrollback 返回 base64 + lastSeq', () => {
+    FakePty.reset();
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const info = mgr.createSession({
+      pathId: '/x',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    FakePty.instances[0]!.emitData('PS> ');
+    FakePty.instances[0]!.emitData('hello\r\n');
+    FakePty.instances[0]!.emitData('PS> ');
+
+    const sb = mgr.getScrollback(info.id);
+    expect(Buffer.from(sb.data, 'base64').toString('utf8')).toBe('PS> hello\r\nPS> ');
+    expect(sb.lastSeq).toBe(2); // 三段 emit, seq 0/1/2
+  });
+
+  it('getScrollback 不存在的 session → 空数据 + lastSeq=-1', () => {
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    expect(mgr.getScrollback('nonexistent')).toEqual({ data: '', lastSeq: -1 });
+  });
+
+  it('scrollback 超过 SCROLLBACK_LIMIT 时尾部裁切,保留最末段', async () => {
+    FakePty.reset();
+    const { SCROLLBACK_LIMIT } = await import('./session-manager');
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const info = mgr.createSession({
+      pathId: '/x',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    // 填一段超过 LIMIT 的内容
+    const filler = 'A'.repeat(SCROLLBACK_LIMIT);
+    FakePty.instances[0]!.emitData(filler);
+    FakePty.instances[0]!.emitData('TAIL_MARKER');
+
+    const sb = mgr.getScrollback(info.id);
+    const decoded = Buffer.from(sb.data, 'base64').toString('utf8');
+    expect(decoded.length).toBe(SCROLLBACK_LIMIT);
+    // 末段保留:'TAIL_MARKER' 必须在末尾
+    expect(decoded.endsWith('TAIL_MARKER')).toBe(true);
+  });
+});
+
+describe('SessionManager — displayName / inferDisplayName', () => {
+  it('createSession 的 displayName 由当前 shell 推断 (Windows: PowerShell)', () => {
+    FakePty.reset();
+    const mgr = new SessionManager(
+      makeStubWindowManager(),
+      makeStubPathManager(),
+      fakeSpawn,
+    );
+    const info = mgr.createSession({
+      pathId: '/x',
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+    });
+    // 不再写死 'Shell'。Windows 默认 shell = powershell.exe → 'PowerShell'
+    // (跨平台测试:在非 Win32 下,getDefaultShell 取 SHELL 或 /bin/sh)
+    if (process.platform === 'win32') {
+      expect(info.displayName).toBe('PowerShell');
+    } else {
+      // SHELL 可能是 /bin/bash, /usr/bin/zsh 等
+      expect(info.displayName).not.toBe('Shell');
+      expect(info.displayName.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('inferDisplayName', () => {
+  it.each([
+    ['C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', 'PowerShell'],
+    ['C:\\Program Files\\PowerShell\\7\\pwsh.exe', 'PowerShell'],
+    ['/bin/bash', 'Bash'],
+    ['/usr/bin/bash', 'Bash'],
+    ['/bin/zsh', 'Zsh'],
+    ['/usr/bin/fish', 'fish'],
+    ['/bin/sh', 'sh'],
+    ['C:\\Windows\\System32\\cmd.exe', 'cmd'],
+    ['/usr/local/bin/nu', 'nu'], // 非常规 shell → 取 stem
+  ])('%s → %s', async (shellPath, expected) => {
+    const { inferDisplayName } = await import('./session-manager');
+    expect(inferDisplayName(shellPath)).toBe(expected);
   });
 });
