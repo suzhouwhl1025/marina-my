@@ -8,6 +8,8 @@
  * - 共享类型从 src/shared/ 引入,通过 @shared/* alias 暴露给三方
  * - main / preload 走 Node 环境(externalize node-pty 等原生模块)
  * - renderer 走浏览器环境(React + xterm.js)
+ * - CP-4 chunk 5: vite define 在编译时注入 git commit hash + 构建时间
+ *   到 __EASYTERM_BUILD_INFO__ 全局,关于页读取
  *
  * @对应文档章节: 软件定义书.md 第 9 章 (技术架构)、AGENTS.md 第 11 章 (工作流)
  *
@@ -17,8 +19,34 @@
  * - out/renderer/ — 静态资源 + 入口 index.html
  */
 import { resolve } from 'node:path';
+import { execSync } from 'node:child_process';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+
+/**
+ * 构建期获取 git commit hash + 构建时间。
+ * 仓库不可用时(如 release tarball)优雅降级。
+ */
+function getBuildInfo(): { commit: string; builtAt: string } {
+  let commit = 'unknown';
+  try {
+    commit = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    /* 没在 git 仓库或 git 不可用 */
+  }
+  return {
+    commit,
+    builtAt: new Date().toISOString(),
+  };
+}
+
+const buildInfo = getBuildInfo();
+const buildInfoDefine = {
+  __EASYTERM_BUILD_COMMIT__: JSON.stringify(buildInfo.commit),
+  __EASYTERM_BUILD_TIME__: JSON.stringify(buildInfo.builtAt),
+};
 
 export default defineConfig({
   main: {
@@ -29,6 +57,7 @@ export default defineConfig({
         '@main': resolve('src/main'),
       },
     },
+    define: buildInfoDefine,
     build: {
       outDir: 'out/main',
       rollupOptions: {
@@ -43,6 +72,7 @@ export default defineConfig({
         '@shared': resolve('src/shared'),
       },
     },
+    define: buildInfoDefine,
     build: {
       outDir: 'out/preload',
       rollupOptions: {
@@ -59,6 +89,7 @@ export default defineConfig({
         '@renderer': resolve('src/renderer'),
       },
     },
+    define: buildInfoDefine,
     build: {
       outDir: '../../out/renderer',
       emptyOutDir: true,

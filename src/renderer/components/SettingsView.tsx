@@ -1227,14 +1227,109 @@ function AdvancedPanel({
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 关于分类 (chunk 5 接入完整版)
+// 关于分类
 // ──────────────────────────────────────────────────────────────────
 
+const GITHUB_REPO = 'https://github.com/Liyue-Cheng/easyterm';
+const GITHUB_RELEASES = `${GITHUB_REPO}/releases`;
+
+const ACKNOWLEDGEMENTS: Array<{ name: string; url: string; tone: string }> = [
+  { name: 'Electron', url: 'https://www.electronjs.org/', tone: '应用框架' },
+  { name: 'React', url: 'https://react.dev/', tone: 'UI 库' },
+  { name: 'xterm.js', url: 'https://xtermjs.org/', tone: '终端模拟器' },
+  { name: 'node-pty', url: 'https://github.com/microsoft/node-pty', tone: 'PTY 绑定' },
+  { name: 'Rose Pine theme', url: 'https://rosepinetheme.com/', tone: '默认主题灵感' },
+  { name: '霞鹜文楷 (LXGW WenKai)', url: 'https://github.com/lxgw/LxgwWenKai', tone: '中文字体' },
+];
+
 function AboutPanel(): JSX.Element {
+  // build define 在 dev 模式可能未定义,做个兜底
+  // (vite 实际上 dev 时也会做 string 替换,但为了万无一失)
+  const commit =
+    typeof __EASYTERM_BUILD_COMMIT__ !== 'undefined'
+      ? __EASYTERM_BUILD_COMMIT__
+      : 'dev';
+  const builtAt =
+    typeof __EASYTERM_BUILD_TIME__ !== 'undefined'
+      ? __EASYTERM_BUILD_TIME__
+      : 'dev';
+
+  // app 版本号通过 handshake 已经拿到,从 store 读不太合适 (store 里没存)
+  // 走一次 getProtocolVersion 就够,这里 inline state
+  const [appVersion, setAppVersion] = useState<string>('—');
+  useEffect(() => {
+    let cancelled = false;
+    window.api
+      .getProtocolVersion()
+      .then((res) => {
+        if (!cancelled) setAppVersion(res.buildVersion);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const openExternal = (url: string): void => {
+    window.api
+      .invoke(COMMAND_CHANNELS.SYSTEM_OPEN_EXTERNAL, { url })
+      .catch((err) => console.warn('[About] open-external failed', err));
+  };
+
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">关于</h2>
-      <p className="settings-placeholder">⏳ chunk 5 接入版本号 / 构建信息 / 检查更新 / 致谢</p>
+
+      <SettingRow label="版本号">
+        <span className="settings-info-text">v{appVersion}</span>
+      </SettingRow>
+
+      <SettingRow label="构建信息">
+        <span className="settings-info-text">
+          commit {commit} · {builtAt}
+        </span>
+      </SettingRow>
+
+      <SettingRow label="检查更新" hint="V1 仅打开 GitHub Releases 页面;auto-updater 留 V1.1">
+        <button
+          type="button"
+          className="settings-button"
+          onClick={() => openExternal(GITHUB_RELEASES)}
+        >
+          打开 GitHub Releases
+        </button>
+      </SettingRow>
+
+      <SettingRow label="GitHub 仓库">
+        <button
+          type="button"
+          className="settings-button"
+          onClick={() => openExternal(GITHUB_REPO)}
+        >
+          {GITHUB_REPO}
+        </button>
+      </SettingRow>
+
+      <SettingRow label="License">
+        <span className="settings-info-text">MIT</span>
+      </SettingRow>
+
+      <SettingRow label="致谢" hint="EasyTerm 站在这些项目的肩上">
+        <ul className="acknowledgements-list">
+          {ACKNOWLEDGEMENTS.map((a) => (
+            <li key={a.name}>
+              <button
+                type="button"
+                className="acknowledgements-link"
+                onClick={() => openExternal(a.url)}
+              >
+                {a.name}
+              </button>
+              <span className="acknowledgements-tone"> — {a.tone}</span>
+            </li>
+          ))}
+        </ul>
+      </SettingRow>
     </section>
   );
 }

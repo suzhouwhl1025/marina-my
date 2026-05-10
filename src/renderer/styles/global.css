@@ -1225,6 +1225,40 @@ button:disabled {
   word-break: break-all;
 }
 
+/* ── About panel acknowledgements (CP-4 chunk 5) ──────────────── */
+
+.acknowledgements-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.acknowledgements-list li {
+  font-size: 12px;
+}
+
+.acknowledgements-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--foam, #f0f);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.acknowledgements-link:hover {
+  color: var(--iris, #f0f);
+}
+
+.acknowledgements-tone {
+  color: var(--subtle, #f0f);
+  font-size: 11px;
+}
+
 /* ── Template list / editor (CP-4 chunk 4) ───────────────────── */
 
 .template-list {
