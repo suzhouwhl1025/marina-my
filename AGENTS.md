@@ -372,18 +372,20 @@ EasyTerm 的开发被切分成 **N 个检查点**,与 `软件定义书.md` 第 1
 
 #### 检查点 3:Session 完整 + cwd 跟踪(对应 Phase 1 / Week 3-4 后半)
 
-**目标**:Session 状态机完整,cwd 自动跟踪工作,启动模板可用。
+**目标**:Session 状态机完整,cwd 跟踪工作,启动模板可用。
+
+> v1.2 起本检查点的部分要求已修订,详见软件定义书 ADR-008:path 与 cwd 解耦、砍墓地。
 
 **完成标志**:
 - [ ] Session 有"活跃 / 空闲 / 已退出"三种状态显示,自动切换
-- [ ] 在 session 里 `cd` 到另一个路径 → session 在 UI 上自动迁移到那个路径
-- [ ] 那个新路径自动出现在"临时"分类(若不是收藏)
-- [ ] Session 进程退出后,标签灰显但保留 5 分钟,期间可"重启"
-- [ ] 5 分钟后标签自动消失
+- [ ] 在 session 里 `cd` 到另一个路径 → 该 session 在所属路径下不动,但其标签出现 ⚠️ 提示真实 cwd
+- [ ] Session 进程退出后,标签灯显灰色 ⚫,scrollback 完整保留;**无时限自动消失**(用户右键"关闭"才销毁)
 - [ ] 启动模板有 4 个内置:Shell / Claude Code / Codex / OpenCode(命令可执行,即使 claude 实际未安装也要能尝试启动并报错)
 - [ ] 在收藏路径设置默认模板,双击该路径直接启动该模板
-- [ ] OSC 1337 hook 注入对 PowerShell 工作
+- [ ] OSC 1337 hook 注入对 PowerShell 工作(更新 session.currentCwd,不动 path 树)
 - [ ] OSC 1337 hook 注入对 cmd.exe 工作
+- [ ] OSC 1337 兜底:启动后 5 秒内若未收到任何 OSC,启动 NtQueryInformationProcess 轮询;收到首条后关闭轮询
+- [ ] scrollback 2MB 环形缓冲(尾部裁切),owner 切换/接管时一次性推给 renderer
 - [ ] 状态机相关模块测试覆盖率 > 80%
 
 #### 检查点 4:UI 完整 + 主题 + 设置(对应 Phase 1 / Week 5-6)
