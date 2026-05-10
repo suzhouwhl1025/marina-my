@@ -786,6 +786,7 @@ button:disabled {
 /* ── Terminal ── */
 
 .terminal-wrapper {
+  position: relative; /* 让搜索栏 absolute 定位以此为基准 */
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
@@ -1222,6 +1223,77 @@ button:disabled {
   font-size: 12px;
   font-family: var(--terminal-font-family, monospace);
   word-break: break-all;
+}
+
+/* ── Terminal search bar (CP-4 chunk 3) ──────────────────────── */
+
+.terminal-search-bar {
+  position: absolute;
+  top: 36px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background-color: var(--surface, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  z-index: 100;
+}
+
+.terminal-search-input {
+  background-color: var(--base, #f0f);
+  color: var(--text, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  padding: 3px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  border-radius: 3px;
+  width: 220px;
+}
+
+.terminal-search-input:focus {
+  outline: 1px solid var(--iris, #f0f);
+  outline-offset: -1px;
+  border-color: var(--iris, #f0f);
+}
+
+.terminal-search-btn {
+  background: transparent;
+  border: 1px solid var(--overlay, #f0f);
+  color: var(--text, #f0f);
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.terminal-search-btn:hover:not(:disabled) {
+  background-color: var(--highlight-low, #f0f);
+  border-color: var(--iris, #f0f);
+}
+
+.terminal-search-btn.active {
+  background-color: var(--highlight-med, #f0f);
+  border-color: var(--iris, #f0f);
+  color: var(--iris, #f0f);
+}
+
+.terminal-search-btn.close:hover {
+  background-color: var(--love, #f0f);
+  border-color: var(--love, #f0f);
+  color: var(--base, #f0f);
+}
+
+/* ctx-menu disabled state (CP-3 加的菜单复用,CP-4 chunk 3 新加 disabled) */
+.ctx-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── Bootstrap / 错误占位 ── */

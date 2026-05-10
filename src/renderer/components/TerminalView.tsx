@@ -29,13 +29,28 @@
  * - 组件卸载时不调 cmd:session:close (session 跨 mount 存活,
  *   关闭由 Tab × 显式触发 / 窗口关闭由 main 端 handleWindowClosed 处理)
  *
+ * @CP-4 chunk 3 新增:
+ * - SearchAddon + 搜索栏 (Ctrl+F 唤出,上一个/下一个/关闭/大小写)
+ * - 右键菜单 (复制 / 粘贴 / 清屏 / 搜索) — 当 settings.behavior.terminalRightClick='menu'
+ * - 直接粘贴 — 当 settings.behavior.terminalRightClick='paste'
+ * - 选中即复制 — settings.behavior.selectOnCopy=true 时
+ *
  * @对应文档章节:
- *   软件定义书.md 5.1.4 (终端体验)、5.1.9 (主题)、8.4 (owner);
+ *   软件定义书.md 5.1.4 (终端体验)、5.1.9 (主题)、6.6.2 (行为)、8.4 (owner);
  *   ipc-protocol.md 5.2、6.2、第 8 (字节流)
  */
-import { useEffect, useMemo, useRef } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import {
   COMMAND_CHANNELS,
@@ -230,10 +245,17 @@ interface TerminalViewProps {
   myWindowId: string;
 }
 
+interface ContextMenuState {
+  x: number;
+  y: number;
+  hasSelection: boolean;
+}
+
 export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
 
   const appState = useAppState();
   const dispatch = useAppDispatch();
@@ -243,6 +265,8 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     appState.settings.appearance?.terminalFontFamily ??
     '"Cascadia Mono", "JetBrains Mono", Consolas, "LXGW WenKai Mono", monospace';
   const lineHeight = appState.settings.appearance?.terminalLineHeight ?? 1.2;
+  const selectOnCopy = appState.settings.behavior?.selectOnCopy ?? true;
+  const rightClickMode = appState.settings.behavior?.terminalRightClick ?? 'menu';
 
   // 把"创建期"读到的初始值用 useMemo 锁定 (terminal 创建后只用 mutator 调整),
   // 否则每次 settings 引用变化都会重建 xterm 实例。
@@ -253,12 +277,79 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     session.id,
   ]);
 
+  // 搜索栏状态
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 右键菜单状态
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
+
+  // ── 操作:复制 / 粘贴 / 清屏 / 搜索 ──
+  const handleCopy = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const sel = term.getSelection();
+    if (sel) {
+      void navigator.clipboard.writeText(sel).catch((err) => {
+        console.warn('[TerminalView] clipboard.writeText failed', err);
+      });
+    }
+  }, []);
+
+  const handlePaste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      const base64 = encodeStringToBase64(text);
+      await window.api.invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
+        sessionId: session.id,
+        data: base64,
+      });
+    } catch (err) {
+      console.warn('[TerminalView] paste failed', err);
+    }
+  }, [session.id]);
+
+  const handleClear = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.clear();
+  }, []);
+
+  const handleOpenSearch = useCallback(() => {
+    setSearchVisible(true);
+    // setState 后立即 focus 太早,DOM 还没挂;用 raf 等下一帧
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, []);
+
+  const handleCloseSearch = useCallback(() => {
+    setSearchVisible(false);
+    setSearchText('');
+    // 关闭搜索后让焦点回到终端
+    termRef.current?.focus();
+  }, []);
+
+  const performSearch = useCallback(
+    (direction: 'next' | 'previous'): void => {
+      const search = searchRef.current;
+      if (!search || !searchText) return;
+      const opts = { caseSensitive: searchCaseSensitive };
+      if (direction === 'next') search.findNext(searchText, opts);
+      else search.findPrevious(searchText, opts);
+    },
+    [searchText, searchCaseSensitive],
+  );
+
+  // ── xterm 实例生命周期 ──
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    // 不变量:组件被挂载意味着 session.ownerWindowId === myWindowId
-    // (MainPane 的 getDisplayableSession 把关)。这里直接创建 xterm。
-    void myWindowId; // 抑制 lint 未使用 (deps 仍含它以触发重建)
+    void myWindowId;
 
     const term = new Terminal({
       fontFamily,
@@ -274,9 +365,12 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
+    const searchAddon = new SearchAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
+    term.loadAddon(searchAddon);
     fitRef.current = fitAddon;
+    searchRef.current = searchAddon;
     term.open(container);
 
     try {
@@ -305,8 +399,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     }
 
     // ── Scrollback replay 协议 ──
-    // 先注册 listener 进入 buffering 模式,再 fetch scrollback。
-    // 这样保证 PTY 在 fetch 期间产生的实时输出不会丢,且不会先于历史写入。
     let replayed = false;
     let pending: Array<{ seq: number; bytes: Uint8Array }> = [];
     let lastReplayedSeq = -1;
@@ -338,7 +430,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
           term.write(decodeBase64ToBytes(res.data));
         }
         lastReplayedSeq = res.lastSeq;
-        // 把 fetch 期间到达的 pending 中"晚于 scrollback"的写入
         for (const c of pending) {
           if (c.seq > lastReplayedSeq) term.write(c.bytes);
         }
@@ -346,7 +437,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         replayed = true;
       })
       .catch((err) => {
-        // fetch scrollback 失败不致命:fallback 直接当 lastSeq=-1 写所有 pending
         console.warn('[TerminalView] get-scrollback failed, falling back', err);
         if (disposed) return;
         for (const c of pending) term.write(c.bytes);
@@ -366,18 +456,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     });
 
     // ResizeObserver — trailing debounce 150ms (用户勘误后续 #4)
-    //
-    // 为什么不能 RAF 节流就够:每次 fit + SESSION_RESIZE → main pty.resize →
-    // ConPTY 的 ResizePseudoConsole 会:
-    //   (a) 把当前 viewport 内容按新尺寸重排,并整屏字节通过 PTY pipe 再发
-    //       一遍 → ring buffer 累积多份 → 视觉上"重复数据"
-    //   (b) 给 child process 发 SIGWINCH。TUI 应用 (Claude Code 等) 会
-    //       全屏重画 (数 KB 的 ANSI 序列)。若拖拽期间多次 SIGWINCH,重画
-    //       被相互打断 → 字节流交错 → 视觉上"丢数据"
-    // 对行模式 shell (PowerShell) 影响小,但对全屏 TUI 严重。
-    //
-    // 方案:整个拖拽期间不动 fit / 不发 RESIZE,稳定 150ms 后一次性 fit +
-    // 发 RESIZE。ConPTY 只被打扰一次,Claude Code 只重画一次。
     let lastCols = cols;
     let lastRows = rows;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -395,7 +473,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       if (newCols === lastCols && newRows === lastRows) return;
       lastCols = newCols;
       lastRows = newRows;
-      // 真实 fit 后的尺寸写回 store,后续 SESSION_CREATE 用此值
       dispatch({
         type: 'view/update-terminal-dims',
         dims: { cols: newCols, rows: newRows },
@@ -425,14 +502,16 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       resizeObserver.disconnect();
       cleanupOutput();
       dataHandler.dispose();
+      searchAddon.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id, myWindowId]);
 
-  // 主题运行时切换 (xterm 支持 term.options.theme = newTheme,无需重建)
+  // 主题运行时切换
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -456,11 +535,66 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     }
   }, [fontFamily, fontSize, lineHeight]);
 
-  // 不变量 (CP-2 勘误):session.ownerWindowId === myWindowId,父级把关。
-  // 之前 isOwner=false 的"接管会话"占位 UI 已删除 — 用户的设计语义里
-  // 没有这个状态:无可显示 session 时由 MainPane 渲染 EmptyPathState。
-  // ADR-008:状态条上显示 currentCwd (不是 originalCwd)。currentCwd 与
-  // originalCwd 不一致时,在路径前面加 ⚠️ 提示用户 cd 走了。
+  // 选中即复制 (settings.behavior.selectOnCopy)
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || !selectOnCopy) return undefined;
+    // xterm 的 onSelectionChange 在选区变化时触发;空选区也会触发(选区清空)
+    const disp = term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (!sel) return;
+      navigator.clipboard.writeText(sel).catch(() => {
+        // 失败静默 (剪贴板权限拒绝等)
+      });
+    });
+    return () => disp.dispose();
+  }, [selectOnCopy, session.id]);
+
+  // Ctrl+F 唤出搜索栏 — 注册在 wrapper div,这样搜索栏 input 也接收到
+  // 即可关闭(虽然搜索栏自己也有 Esc 监听)
+  const handleWrapperKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleOpenSearch();
+      }
+    },
+    [handleOpenSearch],
+  );
+
+  // 右键菜单 / 直接粘贴 — 取决于 settings.behavior.terminalRightClick
+  const handleContextMenu = useCallback(
+    (e: ReactMouseEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      if (rightClickMode === 'paste') {
+        void handlePaste();
+        return;
+      }
+      const term = termRef.current;
+      const hasSelection = !!term?.getSelection();
+      setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection });
+    },
+    [rightClickMode, handlePaste],
+  );
+
+  // 关闭右键菜单 — 全局点击 / Esc / 滚动
+  useEffect(() => {
+    if (!ctxMenu) return undefined;
+    const close = (): void => setCtxMenu(null);
+    const onKey = (ev: globalThis.KeyboardEvent): void => {
+      if (ev.key === 'Escape') close();
+    };
+    window.addEventListener('mousedown', close);
+    window.addEventListener('wheel', close, { passive: true });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', close);
+      window.removeEventListener('wheel', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
+
   const cwdDrifted =
     !!session.currentCwd &&
     !!session.originalCwd &&
@@ -471,8 +605,14 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       : session.state === 'idle'
         ? 'status-dot idle'
         : 'status-dot active';
+
   return (
-    <div className="terminal-wrapper">
+    <div
+      className="terminal-wrapper"
+      onKeyDown={handleWrapperKeyDown}
+      // wrapper 接键盘事件需要 tabIndex 让它可获焦 (xterm 内部已处理)
+      tabIndex={-1}
+    >
       <div className="terminal-statusbar">
         <span className={statusDotClass} />
         <span className="status-text">
@@ -492,7 +632,152 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
           {session.currentCwd}
         </span>
       </div>
-      <div className="terminal-host" ref={containerRef} />
+      <div
+        className="terminal-host"
+        ref={containerRef}
+        onContextMenu={handleContextMenu}
+      />
+      {searchVisible && (
+        <div className="terminal-search-bar" role="search" aria-label="终端搜索">
+          <input
+            ref={searchInputRef}
+            type="text"
+            className="terminal-search-input"
+            placeholder="搜索 (Enter 下一个 / Shift+Enter 上一个 / Esc 关闭)"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                handleCloseSearch();
+              } else if (e.key === 'Enter') {
+                e.preventDefault();
+                performSearch(e.shiftKey ? 'previous' : 'next');
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="terminal-search-btn"
+            onClick={() => performSearch('previous')}
+            title="上一个 (Shift+Enter)"
+            aria-label="上一个匹配"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className="terminal-search-btn"
+            onClick={() => performSearch('next')}
+            title="下一个 (Enter)"
+            aria-label="下一个匹配"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className={`terminal-search-btn${searchCaseSensitive ? ' active' : ''}`}
+            onClick={() => setSearchCaseSensitive((v) => !v)}
+            title="区分大小写"
+            aria-label="区分大小写"
+            aria-pressed={searchCaseSensitive}
+          >
+            Aa
+          </button>
+          <button
+            type="button"
+            className="terminal-search-btn close"
+            onClick={handleCloseSearch}
+            title="关闭 (Esc)"
+            aria-label="关闭搜索"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {ctxMenu && (
+        <TerminalContextMenu
+          state={ctxMenu}
+          onCopy={handleCopy}
+          onPaste={handlePaste}
+          onClear={handleClear}
+          onSearch={handleOpenSearch}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+interface TerminalContextMenuProps {
+  state: ContextMenuState;
+  onCopy: () => void;
+  onPaste: () => void | Promise<void>;
+  onClear: () => void;
+  onSearch: () => void;
+  onClose: () => void;
+}
+
+function TerminalContextMenu({
+  state,
+  onCopy,
+  onPaste,
+  onClear,
+  onSearch,
+  onClose,
+}: TerminalContextMenuProps): JSX.Element {
+  const items: Array<{
+    label: string;
+    hint?: string;
+    disabled?: boolean;
+    onSelect: () => void | Promise<void>;
+  }> = [
+    {
+      label: '📋 复制',
+      hint: state.hasSelection ? '复制选中文字' : '没有选中文字',
+      disabled: !state.hasSelection,
+      onSelect: onCopy,
+    },
+    {
+      label: '📥 粘贴',
+      hint: '从剪贴板粘贴文字到终端',
+      onSelect: onPaste,
+    },
+    {
+      label: '🧹 清屏',
+      hint: '清空当前显示(scrollback 保留)',
+      onSelect: onClear,
+    },
+    {
+      label: '🔍 搜索',
+      hint: 'Ctrl+F',
+      onSelect: onSearch,
+    },
+  ];
+  return (
+    <div
+      className="ctx-menu"
+      style={{ left: state.x, top: state.y }}
+      onMouseDown={(e) => e.stopPropagation()}
+      role="menu"
+    >
+      <div className="ctx-menu-title">终端</div>
+      {items.map((it, idx) => (
+        <button
+          key={idx}
+          type="button"
+          className="ctx-menu-item"
+          disabled={it.disabled}
+          title={it.hint}
+          onClick={() => {
+            void it.onSelect();
+            onClose();
+          }}
+        >
+          <span className="ctx-menu-check"> </span>
+          <span className="ctx-menu-label">{it.label}</span>
+        </button>
+      ))}
     </div>
   );
 }
