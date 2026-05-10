@@ -459,15 +459,37 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   // 不变量 (CP-2 勘误):session.ownerWindowId === myWindowId,父级把关。
   // 之前 isOwner=false 的"接管会话"占位 UI 已删除 — 用户的设计语义里
   // 没有这个状态:无可显示 session 时由 MainPane 渲染 EmptyPathState。
+  // ADR-008:状态条上显示 currentCwd (不是 originalCwd)。currentCwd 与
+  // originalCwd 不一致时,在路径前面加 ⚠️ 提示用户 cd 走了。
+  const cwdDrifted =
+    !!session.currentCwd &&
+    !!session.originalCwd &&
+    session.currentCwd.toLowerCase() !== session.originalCwd.toLowerCase();
+  const statusDotClass =
+    session.state === 'exited'
+      ? 'status-dot exited'
+      : session.state === 'idle'
+        ? 'status-dot idle'
+        : 'status-dot active';
   return (
     <div className="terminal-wrapper">
       <div className="terminal-statusbar">
-        <span className="status-dot active" />
+        <span className={statusDotClass} />
         <span className="status-text">
-          {session.displayName} · pid {session.pid}
+          {session.displayName} · pid {session.pid > 0 ? session.pid : '—'}
+          {session.state === 'exited' &&
+            ` · 已退出 (exitCode=${session.exitCode ?? 0})`}
         </span>
-        <span className="status-cwd" title={session.cwd}>
-          {session.cwd}
+        <span
+          className="status-cwd"
+          title={
+            cwdDrifted
+              ? `当前: ${session.currentCwd}\n原: ${session.originalCwd}`
+              : session.currentCwd
+          }
+        >
+          {cwdDrifted && '⚠ '}
+          {session.currentCwd}
         </span>
       </div>
       <div className="terminal-host" ref={containerRef} />

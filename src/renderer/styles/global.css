@@ -634,6 +634,53 @@ button:disabled {
   font-style: italic;
 }
 
+/* ADR-008: tab 上的状态点 (active / idle / exited) 与 cwd 漂移提示 */
+.tab-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background-color: var(--muted, #f0f);
+}
+.tab-state-active {
+  background-color: var(--pine, #f0f);
+}
+.tab-state-idle {
+  background-color: var(--gold, #f0f);
+}
+.tab-state-exited {
+  background-color: var(--muted, #f0f);
+}
+
+.tab.exited {
+  opacity: 0.6;
+}
+
+.tab-cwd-drift {
+  color: var(--gold, #f0f);
+  font-size: 12px;
+  flex: 0 0 auto;
+  cursor: help;
+}
+
+.session-cwd-drift {
+  color: var(--gold, #f0f);
+  font-size: 12px;
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+.session-exit-code {
+  font-size: 10px;
+  flex: 0 0 auto;
+  margin-left: 2px;
+  opacity: 0.7;
+}
+
+.session-item.exited {
+  opacity: 0.65;
+}
+
 .tab-name {
   flex: 1 1 auto;
   white-space: nowrap;

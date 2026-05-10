@@ -25,10 +25,19 @@ import {
 import type { PathNode, SessionInfo } from '@shared/types';
 import { findMyOwnedSessionId, useAppDispatch, useAppState } from '../store';
 
+/**
+ * 状态点颜色 (软件定义书 6.2.4 状态指示):
+ * - active 🟢:近期有 PTY 输出
+ * - idle  🟡:活着但 N 秒无输出
+ * - exited ⚫:进程已退出 (ADR-008 取代旧 'tombstoned')
+ *
+ * 用 CSS variables 走主题切换 (CP-4 接通);#f0f fallback 是 stylelint 兜底
+ * 防止变量缺失渲染成黑色 (软件定义书 5.1.9)。
+ */
 const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
   active: 'var(--pine, #f0f)',
   idle: 'var(--gold, #f0f)',
-  tombstoned: 'var(--muted, #f0f)',
+  exited: 'var(--muted, #f0f)',
 };
 
 export function Sidebar(): JSX.Element {
@@ -202,13 +211,16 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
 
   const handleDoubleClick = async (): Promise<void> => {
     // 双击 = 在该 path 下用默认模板新建 session
+    // 优先级:bookmark.defaultTemplateId > 全局 defaultTemplateId > 'shell' 兜底
+    const templateId =
+      node.defaultTemplateId ?? state.defaultTemplateId ?? 'shell';
     try {
       const dims = state.lastTerminalDims;
       const res = await window.api.invoke<unknown, CreateSessionResponse>(
         COMMAND_CHANNELS.SESSION_CREATE,
         {
           pathId: node.path,
-          templateId: 'shell',
+          templateId,
           cols: dims.cols,
           rows: dims.rows,
         },
@@ -222,12 +234,41 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
     }
   };
 
+  const handleContextMenu = (e: MouseEvent<HTMLDivElement>): void => {
+    // 仅收藏路径支持设置默认模板 (软件定义书 6.2.2)
+    if (node.category !== 'bookmarked') return;
+    e.preventDefault();
+    e.stopPropagation();
+    // CP-3:简化弹窗式菜单。CP-4 完整化右键菜单 (复制路径 / 在 Explorer 中显示 / 重命名等)。
+    const templateNames = state.templates
+      .map((t, i) => `${i + 1}. ${t.icon} ${t.name}${t.id === node.defaultTemplateId ? ' (当前)' : ''}`)
+      .join('\n');
+    const input = window.prompt(
+      `[${node.displayName ?? node.path}] 设默认启动模板\n\n` +
+        templateNames +
+        `\n\n输入序号 1-${state.templates.length}:`,
+      String(state.templates.findIndex((t) => t.id === node.defaultTemplateId) + 1 || 1),
+    );
+    if (!input) return;
+    const idx = parseInt(input, 10) - 1;
+    if (Number.isNaN(idx) || idx < 0 || idx >= state.templates.length) return;
+    const target = state.templates[idx];
+    if (!target) return;
+    window.api
+      .invoke(COMMAND_CHANNELS.BOOKMARK_SET_DEFAULT_TEMPLATE, {
+        pathId: node.path,
+        templateId: target.id,
+      })
+      .catch((err) => console.error('[Sidebar] set-default-template failed', err));
+  };
+
   return (
     <li className={`path-item${selected ? ' selected' : ''}`}>
       <div
         className="path-item-row"
         onClick={handleSelect}
         onDoubleClick={() => void handleDoubleClick()}
+        onContextMenu={handleContextMenu}
         title={node.path}
       >
         {sessions.length > 0 ? (
@@ -322,26 +363,61 @@ function SessionItem({ session }: { session: SessionInfo }): JSX.Element {
       });
   };
 
+  // ADR-008:currentCwd 与 originalCwd 不一致时显示 ⚠️ tooltip 真实 cwd。
+  // session.pathId 永久不变,所以不会在 UI 上"跳" path,只是这个标志告诉用户
+  // session 内 cd 走了。
+  const cwdDrifted =
+    !!session.currentCwd &&
+    !!session.originalCwd &&
+    !samePath(session.currentCwd, session.originalCwd);
+
+  const baseTitle = ownedByOther
+    ? `${session.displayName} (在其他窗口,点击聚焦那个窗口)`
+    : session.displayName;
+  const fullTitle = cwdDrifted
+    ? `${baseTitle}\n当前目录已变 → ${session.currentCwd}\n(原: ${session.originalCwd})`
+    : baseTitle;
+
   return (
     <li
       className={`session-item${selected ? ' selected' : ''}${
         ownedByOther ? ' owned-by-other' : ''
-      }`}
+      }${session.state === 'exited' ? ' exited' : ''}`}
       onClick={() => void handleClick()}
-      title={
-        ownedByOther
-          ? `${session.displayName} (在其他窗口,点击聚焦那个窗口)`
-          : session.displayName
-      }
+      title={fullTitle}
     >
       <span
         className="session-state-dot"
         style={{ backgroundColor: STATE_DOT_COLOR[session.state] }}
       />
       <span className="session-name">{session.displayName}</span>
+      {cwdDrifted && (
+        <span className="session-cwd-drift" aria-label="当前目录已变" title={session.currentCwd}>
+          ⚠
+        </span>
+      )}
+      {session.state === 'exited' && (
+        <span
+          className="session-exit-code"
+          title={`已退出 (exitCode=${session.exitCode ?? 0})`}
+        >
+          ⚫
+        </span>
+      )}
       {ownedByOther && <span className="session-owned-by-other">↗</span>}
     </li>
   );
+}
+
+/**
+ * 比较两个路径是否指向同一目录。Windows 大小写无关,POSIX 大小写敏感。
+ * 不做 normalize (currentCwd / originalCwd 进入 SessionInfo 之前已经 path.resolve 过)。
+ */
+function samePath(a: string, b: string): boolean {
+  if (a === b) return true;
+  // Windows 上 C:\Foo 和 c:\foo 指同一目录。SessionManager 已经把卷符大写,
+  // 但 OSC 报告的 cwd 卷符大小写可能不一致,这里再松一层。
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 function lastSegmentOf(path: string): string {

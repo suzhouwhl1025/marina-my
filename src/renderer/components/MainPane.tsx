@@ -109,14 +109,18 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const dispatch = useAppDispatch();
   const [creating, setCreating] = useState(false);
 
-  const handleCreate = async (): Promise<void> => {
+  // CP-3:每个模板按钮直接用对应模板创建 session。
+  // 加号按钮 → 用 path 自身的默认模板 (若收藏路径) 或全局默认模板。
+  const pathDefaultTemplateId = findDefaultTemplateForPath(state, pathId);
+
+  const handleCreate = async (templateId: string): Promise<void> => {
     if (creating) return;
     setCreating(true);
     try {
       const dims = state.lastTerminalDims;
       const res = await window.api.invoke<unknown, CreateSessionResponse>(
         COMMAND_CHANNELS.SESSION_CREATE,
-        { pathId, templateId: 'shell', cols: dims.cols, rows: dims.rows },
+        { pathId, templateId, cols: dims.cols, rows: dims.rows },
       );
       dispatch({ type: 'view/select-session', sessionId: res.session.id });
     } catch (err) {
@@ -126,7 +130,6 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
     }
   };
 
-  // CP-2 仅 'shell' 模板;CP-3 起从 state.templates 渲染按钮列表
   const templates = state.templates;
 
   return (
@@ -134,9 +137,12 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
       <button
         type="button"
         className="empty-create-btn"
-        onClick={() => void handleCreate()}
+        onClick={() => void handleCreate(pathDefaultTemplateId)}
         disabled={creating}
-        aria-label="在此路径新建终端"
+        aria-label="在此路径用默认模板新建终端"
+        title={`默认模板:${
+          templates.find((t) => t.id === pathDefaultTemplateId)?.name ?? pathDefaultTemplateId
+        }`}
       >
         +
       </button>
@@ -147,9 +153,9 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
             key={t.id}
             type="button"
             className="template-button"
-            onClick={() => void handleCreate()}
+            onClick={() => void handleCreate(t.id)}
             disabled={creating}
-            title={t.name}
+            title={t.command ? `${t.name} — 启动命令: ${t.command}` : t.name}
           >
             <span className="template-icon">{t.icon}</span>
             <span className="template-label">{t.name}</span>
@@ -158,6 +164,14 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
       </div>
     </div>
   );
+}
+
+function findDefaultTemplateForPath(
+  state: ReturnType<typeof useAppState>,
+  pathId: string,
+): string {
+  const node = state.pathTree.bookmarks.find((p) => p.id === pathId);
+  return node?.defaultTemplateId ?? state.defaultTemplateId ?? 'shell';
 }
 
 interface TabBarProps {
@@ -171,13 +185,15 @@ function TabBar({ sessions, selectedSessionId }: TabBarProps): JSX.Element {
 
   const handleNewTab = async (): Promise<void> => {
     if (!state.selectedPathId) return;
+    // 用该 path 的默认模板 (收藏路径有自定义默认 → 用它)
+    const templateId = findDefaultTemplateForPath(state, state.selectedPathId);
     try {
       const dims = state.lastTerminalDims;
       const res = await window.api.invoke<unknown, CreateSessionResponse>(
         COMMAND_CHANNELS.SESSION_CREATE,
         {
           pathId: state.selectedPathId,
-          templateId: 'shell',
+          templateId,
           cols: dims.cols,
           rows: dims.rows,
         },
@@ -317,6 +333,27 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
       .catch((err) => console.error('[Tab] close failed', err));
   };
 
+  // ADR-008:cwd 漂移提示。session.pathId 永久不变,只有 currentCwd 与
+  // originalCwd 不一致时才显示 ⚠️。
+  const cwdDrifted =
+    !!session.currentCwd &&
+    !!session.originalCwd &&
+    session.currentCwd.toLowerCase() !== session.originalCwd.toLowerCase();
+
+  const tooltipParts: string[] = [];
+  if (variant === 'other') {
+    tooltipParts.push(`${session.displayName} (在其他窗口)`);
+  } else {
+    tooltipParts.push(session.displayName);
+  }
+  if (cwdDrifted) {
+    tooltipParts.push(`当前目录 → ${session.currentCwd}`);
+    tooltipParts.push(`(原: ${session.originalCwd})`);
+  }
+  if (session.state === 'exited') {
+    tooltipParts.push(`已退出 (exitCode=${session.exitCode ?? 0})`);
+  }
+
   return (
     <button
       type="button"
@@ -324,16 +361,24 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
         `tab` +
         (selected ? ' selected' : '') +
         (variant === 'other' ? ' owned-by-other' : '') +
-        (variant === 'orphan' ? ' orphan' : '')
+        (variant === 'orphan' ? ' orphan' : '') +
+        (session.state === 'exited' ? ' exited' : '') +
+        (session.state === 'idle' ? ' idle' : '') +
+        (session.state === 'active' ? ' active' : '')
       }
       onClick={handleClick}
-      title={
-        variant === 'other'
-          ? `${session.displayName} (在其他窗口)`
-          : session.displayName
-      }
+      title={tooltipParts.join('\n')}
     >
+      <span
+        className={`tab-state-dot tab-state-${session.state}`}
+        aria-label={`状态: ${session.state}`}
+      />
       <span className="tab-name">{session.displayName}</span>
+      {cwdDrifted && (
+        <span className="tab-cwd-drift" aria-label="当前目录已变">
+          ⚠
+        </span>
+      )}
       {variant !== 'other' && (
         <span
           className="tab-close"

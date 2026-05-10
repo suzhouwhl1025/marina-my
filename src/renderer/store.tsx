@@ -35,7 +35,9 @@ import {
   type SessionDestroyedPayload,
   type SessionExitedPayload,
   type SessionOwnerChangedPayload,
+  type SessionStateChangedPayload,
   type SettingsChangedPayload,
+  type TemplateListUpdatedPayload,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
 } from '@shared/protocol';
@@ -101,10 +103,12 @@ export type AppAction =
   | { type: 'bookmarks/update'; bookmarks: Bookmark[] }
   | { type: 'sessions/created'; session: SessionInfo }
   | { type: 'sessions/owner-changed'; sessionId: string; ownerWindowId: string | null }
+  | { type: 'sessions/state-changed'; sessionId: string; changes: Partial<SessionInfo> }
   | { type: 'sessions/exited'; sessionId: string; exitCode: number }
   | { type: 'sessions/destroyed'; sessionId: string }
   | { type: 'windows/list-update'; windows: WindowInfo[] }
   | { type: 'settings/changed'; settings: Settings }
+  | { type: 'templates/update'; templates: Template[]; defaultTemplateId: string }
   | { type: 'view/select-path'; pathId: string | null }
   | { type: 'view/select-session'; sessionId: string | null }
   | { type: 'view/toggle-path-expand'; pathId: string }
@@ -179,15 +183,35 @@ function reducer(state: AppState, action: AppAction): AppState {
     case 'sessions/exited': {
       const existing = state.sessions.get(action.sessionId);
       if (!existing) return state;
+      // ADR-008:'exited' 是新状态名 (取代 'tombstoned'),无 5 分钟自动消失。
       const updated: SessionInfo = {
         ...existing,
-        state: 'tombstoned',
+        state: 'exited',
         exitCode: action.exitCode,
+        exitedAt: Date.now(),
       };
       const sessions = new Map(state.sessions);
       sessions.set(action.sessionId, updated);
       return { ...state, sessions };
     }
+
+    case 'sessions/state-changed': {
+      // 由 main 的 evt:session:state-changed 推送。覆盖任意子集字段:
+      // state (active/idle/exited)、currentCwd、exitCode、exitedAt 等。
+      const existing = state.sessions.get(action.sessionId);
+      if (!existing) return state;
+      const merged: SessionInfo = { ...existing, ...action.changes };
+      const sessions = new Map(state.sessions);
+      sessions.set(action.sessionId, merged);
+      return { ...state, sessions };
+    }
+
+    case 'templates/update':
+      return {
+        ...state,
+        templates: action.templates,
+        defaultTemplateId: action.defaultTemplateId,
+      };
 
     case 'sessions/destroyed': {
       const sessions = new Map(state.sessions);
@@ -443,9 +467,27 @@ export function useIpcSync(): { ready: boolean; error: string | null } {
                 exitCode: p.exitCode,
               }),
           ),
+          window.api.on<SessionStateChangedPayload>(
+            EVENT_CHANNELS.SESSION_STATE_CHANGED,
+            (p) =>
+              dispatch({
+                type: 'sessions/state-changed',
+                sessionId: p.sessionId,
+                changes: p.changes,
+              }),
+          ),
           window.api.on<SessionDestroyedPayload>(
             EVENT_CHANNELS.SESSION_DESTROYED,
             (p) => dispatch({ type: 'sessions/destroyed', sessionId: p.sessionId }),
+          ),
+          window.api.on<TemplateListUpdatedPayload>(
+            EVENT_CHANNELS.TEMPLATES_UPDATED,
+            (p) =>
+              dispatch({
+                type: 'templates/update',
+                templates: p.templates,
+                defaultTemplateId: p.defaultTemplateId,
+              }),
           ),
           window.api.on<WindowListUpdatedPayload>(
             EVENT_CHANNELS.WINDOW_LIST_UPDATED,
