@@ -66,9 +66,11 @@ import {
   type SessionExitedPayload,
   type SessionOutputPayload,
   type SessionOwnerChangedPayload,
+  type SessionStateChangedPayload,
   type SetDefaultTemplateForBookmarkPayload,
   type SettingsChangedPayload,
   type ShowInExplorerPayload,
+  type TemplateListUpdatedPayload,
   type UpdateSettingsPayload,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
@@ -78,31 +80,15 @@ import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
 import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
+import type { TemplatesManager } from './templates-manager';
 import { setQuitting } from './index';
-
-/**
- * CP-2 内置模板表。CP-3 起由 TemplateManager 持久化。
- */
-const CP2_BUILTIN_TEMPLATES: Template[] = [
-  {
-    id: 'shell',
-    name: 'Shell',
-    icon: '🐚',
-    isBuiltin: true,
-    command: '',
-    args: [],
-    env: {},
-    shellFirst: true,
-    postExitAction: 'close_session',
-  },
-];
-const CP2_DEFAULT_TEMPLATE_ID = 'shell';
 
 export interface IpcLayerDeps {
   windowManager: WindowManager;
   pathManager: PathManager;
   settingsManager: SettingsManager;
   sessionManager: SessionManager;
+  templatesManager: TemplatesManager;
 }
 
 let installed = false;
@@ -142,7 +128,13 @@ function sendEventTo<P>(win: BrowserWindow, channel: string, payload: P): void {
 // ──────────────────────────────────────────────────────────────────
 
 function registerCommandHandlers(deps: IpcLayerDeps): void {
-  const { windowManager, pathManager, settingsManager, sessionManager } = deps;
+  const {
+    windowManager,
+    pathManager,
+    settingsManager,
+    sessionManager,
+    templatesManager,
+  } = deps;
 
   // App
   ipcMain.handle(
@@ -214,15 +206,17 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
   // Session
   ipcMain.handle(
     COMMAND_CHANNELS.SESSION_CREATE,
-    (
+    async (
       _e,
       envelope: CommandEnvelope<CreateSessionPayload>,
-    ): CreateSessionResponse => {
+    ): Promise<CreateSessionResponse> => {
       const { pathId, templateId, takeOwnership = true, cols, rows } = envelope.payload;
       const oldTreeJson = JSON.stringify(pathManager.getTree());
-      const session = sessionManager.createSession({
+      const effectiveTemplateId =
+        templateId ?? templatesManager.getDefaultTemplateId();
+      const session = await sessionManager.createSession({
         pathId: pathId ?? '',
-        templateId: templateId ?? CP2_DEFAULT_TEMPLATE_ID,
+        templateId: effectiveTemplateId,
         ownerWindowId: takeOwnership ? envelope.windowId : '',
         cols,
         rows,
@@ -431,7 +425,13 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
 // ──────────────────────────────────────────────────────────────────
 
 function wireEventBroadcasts(deps: IpcLayerDeps): void {
-  const { windowManager, pathManager, settingsManager, sessionManager } = deps;
+  const {
+    windowManager,
+    pathManager,
+    settingsManager,
+    sessionManager,
+    templatesManager,
+  } = deps;
 
   // Path 树变化 → 广播 evt:path:tree-updated
   pathManager.on('pathTreeUpdated', () => {
@@ -467,9 +467,31 @@ function wireEventBroadcasts(deps: IpcLayerDeps): void {
     broadcastEvent<SessionOwnerChangedPayload>(EVENT_CHANNELS.SESSION_OWNER_CHANGED, e);
   });
 
+  // CP-3: state-changed 涵盖 active/idle 转移、currentCwd 更新、exited 状态。
+  // SessionExitedPayload 仍单独发,因为它带 exitCode 等额外信息。
+  sessionManager.on('sessionStateChanged', (e: SessionStateChangedPayload) => {
+    broadcastEvent<SessionStateChangedPayload>(
+      EVENT_CHANNELS.SESSION_STATE_CHANGED,
+      e,
+    );
+    // active/idle 转移可能影响 trayManager 的图标 (V1.1),广播 app state
+    broadcastAppState(deps);
+  });
+
   sessionManager.on('sessionExited', (e: SessionExitedPayload) => {
     broadcastEvent<SessionExitedPayload>(EVENT_CHANNELS.SESSION_EXITED, e);
   });
+
+  // 模板变化 (CP-3: 用户改默认模板 / CP-4: CRUD 自定义模板)
+  templatesManager.on(
+    'templatesUpdated',
+    (e: { templates: Template[]; defaultTemplateId: string }) => {
+      broadcastEvent<TemplateListUpdatedPayload>(
+        EVENT_CHANNELS.TEMPLATES_UPDATED,
+        e,
+      );
+    },
+  );
 
   sessionManager.on('sessionDestroyed', (e: SessionDestroyedPayload) => {
     broadcastEvent<SessionDestroyedPayload>(EVENT_CHANNELS.SESSION_DESTROYED, e);
@@ -522,8 +544,8 @@ function buildSnapshot(deps: IpcLayerDeps, myWindowId: string): AppSnapshot {
     windows: deps.windowManager.list(),
     sessions: deps.sessionManager.list(),
     pathTree: deps.pathManager.getTree(),
-    templates: CP2_BUILTIN_TEMPLATES,
-    defaultTemplateId: CP2_DEFAULT_TEMPLATE_ID,
+    templates: deps.templatesManager.list(),
+    defaultTemplateId: deps.templatesManager.getDefaultTemplateId(),
     settings: deps.settingsManager.get(),
     myWindowId,
   };

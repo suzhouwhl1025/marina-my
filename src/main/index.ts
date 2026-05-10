@@ -24,9 +24,15 @@ import { TrayManager } from './tray';
 import { SessionManager } from './session-manager';
 import { PathManager } from './path-manager';
 import { SettingsManager, DEFAULT_SETTINGS } from './settings-manager';
+import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
-import type { BookmarksFile, RecentFile, Settings } from '@shared/types';
+import type {
+  BookmarksFile,
+  RecentFile,
+  Settings,
+  TemplatesFile,
+} from '@shared/types';
 
 let isQuitting = false;
 
@@ -54,10 +60,17 @@ function bootstrap(): void {
   const settingsStore = new JsonStore<Settings>(join(dataDir, 'settings.json'));
   const bookmarksStore = new JsonStore<BookmarksFile>(join(dataDir, 'bookmarks.json'));
   const recentStore = new JsonStore<RecentFile>(join(dataDir, 'recent.json'));
+  const templatesStore = new JsonStore<TemplatesFile>(join(dataDir, 'templates.json'));
 
   const settingsManager = new SettingsManager(settingsStore);
   const pathManager = new PathManager(bookmarksStore, recentStore);
-  const sessionManager = new SessionManager(windowManager, pathManager);
+  const templatesManager = new TemplatesManager(templatesStore);
+  const sessionManager = new SessionManager(
+    windowManager,
+    pathManager,
+    templatesManager,
+    settingsManager,
+  );
   const trayManager = new TrayManager(windowManager);
 
   // second-instance:在已运行实例新开窗口
@@ -85,12 +98,15 @@ function bootstrap(): void {
       const settingsSrc = await settingsManager.initialize();
       console.info(`[main] settings loaded from: ${settingsSrc}`);
       await pathManager.initialize();
+      const tmplSrc = await templatesManager.initialize();
+      console.info(`[main] templates loaded from: ${tmplSrc}`);
 
       installIpcLayer({
         windowManager,
         pathManager,
         settingsManager,
         sessionManager,
+        templatesManager,
       });
 
       trayManager.init();
@@ -108,7 +124,11 @@ function bootstrap(): void {
     sessionManager.shutdown();
     try {
       // 等数据落盘最多 1 秒,避免无限 block
-      const flushAll = Promise.all([settingsManager.flush(), pathManager.flush()]);
+      const flushAll = Promise.all([
+        settingsManager.flush(),
+        pathManager.flush(),
+        templatesManager.flush(),
+      ]);
       await Promise.race([
         flushAll,
         new Promise<void>((resolve) => setTimeout(resolve, 1000)),
