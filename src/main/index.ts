@@ -17,7 +17,7 @@
  *
  * @对应文档章节: 软件定义书.md 8.1、9.2.1;AGENTS.md 检查点 1/2
  */
-import { app } from 'electron';
+import { app, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { WindowManager } from './window-manager';
 import { TrayManager } from './tray';
@@ -27,6 +27,7 @@ import { SettingsManager, DEFAULT_SETTINGS } from './settings-manager';
 import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
+import { getPlatformAdapter } from './platform';
 import type {
   BookmarksFile,
   RecentFile,
@@ -108,6 +109,38 @@ function bootstrap(): void {
         sessionManager,
         templatesManager,
       });
+
+      // ── 设置副作用 wiring ─────────────────────────────
+      // settings.behavior.autoStart 改变 → 触发 OS Run 表写入
+      // settings.appearance.followSystemTheme 改变 → 立即同步当前系统颜色
+      // nativeTheme.updated → 若 followSystemTheme=true 则切对应主题
+      const platformAdapter = process.platform === 'win32' ? getPlatformAdapter() : null;
+
+      const applyFollowSystemTheme = (): void => {
+        const s = settingsManager.get();
+        if (!s.appearance.followSystemTheme) return;
+        const desired = nativeTheme.shouldUseDarkColors ? 'rose-pine' : 'rose-pine-dawn';
+        if (s.appearance.theme !== desired) {
+          settingsManager.update({ appearance: { theme: desired } });
+        }
+      };
+
+      settingsManager.on('settingsChanged', (e: { changedKeys: string[]; settings: Settings }) => {
+        if (e.changedKeys.includes('behavior.autoStart') && platformAdapter) {
+          platformAdapter
+            .setAutoStart(e.settings.behavior.autoStart)
+            .catch((err) => console.warn('[main] setAutoStart failed', err));
+        }
+        if (e.changedKeys.includes('appearance.followSystemTheme')) {
+          applyFollowSystemTheme();
+        }
+      });
+
+      nativeTheme.on('updated', () => applyFollowSystemTheme());
+
+      // 启动时执行一次 followSystemTheme 同步 (用户上次开了它,系统主题
+      // 改了,启动时该立即对齐)
+      applyFollowSystemTheme();
 
       trayManager.init();
       windowManager.createWindow();

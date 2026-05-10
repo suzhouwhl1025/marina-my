@@ -223,12 +223,28 @@ export class WindowsAdapter implements PlatformAdapter {
     return null;
   }
 
-  async setAutoStart(_enabled: boolean): Promise<void> {
-    throw new Error('[WindowsAdapter] setAutoStart not implemented (CP-4)');
+  /**
+   * 开机启动 — 用 Electron 的 setLoginItemSettings,Windows 上等价于
+   * 写 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+   * 一个名为应用 productName 的 REG_SZ 项。
+   *
+   * args 里加 --hidden,让随系统启动的进程进入"纯托盘模式"
+   * (软件定义书 7.4.2 + behavior.startupBehavior=tray-only 场景)。
+   * 实际是否直接进托盘由 settings.behavior.startupBehavior 决定,这里
+   * 只负责注册到 Run 表;如果 startupBehavior=open-window,启动后会自动
+   * 创建第一个窗口。
+   */
+  async setAutoStart(enabled: boolean): Promise<void> {
+    const { app } = await import('electron');
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      args: ['--auto-start'],
+    });
   }
 
   async isAutoStartEnabled(): Promise<boolean> {
-    throw new Error('[WindowsAdapter] isAutoStartEnabled not implemented (CP-4)');
+    const { app } = await import('electron');
+    return app.getLoginItemSettings().openAtLogin;
   }
 }
 

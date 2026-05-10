@@ -24,6 +24,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import {
   COMMAND_CHANNELS,
   EVENT_CHANNELS,
@@ -43,11 +44,14 @@ import {
   type EventEnvelope,
   type FocusSessionOwnerPayload,
   type FocusWindowPayload,
+  type GetAutoStartResponse,
   type GetProtocolVersionResponse,
   type GetScrollbackPayload,
   type GetScrollbackResponse,
   type GetSettingsResponse,
   type GetSnapshotPayload,
+  type ListShellsResponse,
+  type OpenExternalPayload,
   type GetSnapshotResponse,
   type PathTreeUpdatedPayload,
   type PickFolderPayload,
@@ -408,6 +412,35 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     },
   );
 
+  ipcMain.handle(
+    COMMAND_CHANNELS.SETTINGS_RESET,
+    (_e, _envelope: CommandEnvelope<undefined>): void => {
+      settingsManager.reset();
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SETTINGS_LIST_SHELLS,
+    async (_e, _envelope: CommandEnvelope<undefined>): Promise<ListShellsResponse> => {
+      const shells = await sessionManager.listAvailableShells();
+      return {
+        shells: shells.map((s) => ({
+          id: s.id,
+          displayName: s.displayName,
+          executablePath: s.executablePath,
+        })),
+      };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SETTINGS_GET_AUTO_START,
+    (_e, _envelope: CommandEnvelope<undefined>): GetAutoStartResponse => {
+      // Electron 跨平台 API,Windows 上读 Run 注册表
+      return { enabled: app.getLoginItemSettings().openAtLogin };
+    },
+  );
+
   // System
   ipcMain.handle(
     COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER,
@@ -416,6 +449,44 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       envelope: CommandEnvelope<ShowInExplorerPayload>,
     ): Promise<void> => {
       shell.showItemInFolder(envelope.payload.path);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_OPEN_DATA_DIR,
+    async (_e, _envelope: CommandEnvelope<undefined>): Promise<void> => {
+      // app.getPath('userData') = %APPDATA%\EasyTerm
+      await shell.openPath(app.getPath('userData'));
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_OPEN_LOGS_DIR,
+    async (_e, _envelope: CommandEnvelope<undefined>): Promise<void> => {
+      // logs 目录:%APPDATA%\EasyTerm\logs (CP-4 实际不一定存在 — V1 我们
+      // 还没接通日志框架,但目录能打开,空就空)。
+      const logsDir = joinPath(app.getPath('userData'), 'logs');
+      try {
+        await fs.mkdir(logsDir, { recursive: true });
+      } catch {
+        /* 已存在或创建失败都直接尝试打开,反正用户能看到 */
+      }
+      await shell.openPath(logsDir);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_OPEN_EXTERNAL,
+    async (
+      _e,
+      envelope: CommandEnvelope<OpenExternalPayload>,
+    ): Promise<void> => {
+      const url = envelope.payload.url;
+      // 安全:仅允许 http / https / mailto,拒绝 file:// 等本地协议
+      if (!/^(https?|mailto):/i.test(url)) {
+        throw makeIpcError('InvalidUrl', `不允许的 URL 协议: "${url}"`);
+      }
+      await shell.openExternal(url);
     },
   );
 }

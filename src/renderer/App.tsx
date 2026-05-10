@@ -95,6 +95,17 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
   const sync = useIpcSync();
   const state = useAppState();
 
+  const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
+  const uiZoom = state.settings.appearance?.uiZoom ?? 1;
+
+  // 即时同步 uiZoom 到 webFrame.setZoomFactor (preload 桥)。
+  // 必须在 early return 之前 — React Hooks 规则:每次渲染调用顺序须一致。
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.api?.setUiZoom) {
+      window.api.setUiZoom(uiZoom);
+    }
+  }, [uiZoom]);
+
   if (sync.error) {
     return (
       <FullPagePlaceholder
@@ -109,8 +120,6 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
   if (!sync.ready) {
     return <FullPagePlaceholder title="EasyTerm" subtitle="加载状态…" />;
   }
-
-  const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
 
   return (
     <div className="app-root with-shell" data-theme={currentTheme}>

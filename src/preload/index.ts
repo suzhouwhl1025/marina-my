@@ -17,7 +17,7 @@
  * 暴露 windowId / windowNumber / invoke / on / getProtocolVersion。
  * 完整业务方法 (session/bookmark/template) 在 CP-2/3/4 加入。
  */
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import { COMMAND_CHANNELS, type CommandEnvelope } from '@shared/protocol';
 
 /**
@@ -82,6 +82,16 @@ const api = {
 
   /** 订阅事件 */
   on,
+
+  /**
+   * 设置当前 renderer 的 zoom factor (CP-4 uiZoom)。webFrame 只在
+   * preload 上下文可用,所以这里包装一下。范围由 main 端 SettingsManager
+   * 校验为 [0.75, 1.5];这里只做最低限度兜底,异常值不应用。
+   */
+  setUiZoom(factor: number): void {
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    webFrame.setZoomFactor(factor);
+  },
 } as const;
 
 contextBridge.exposeInMainWorld('api', api);

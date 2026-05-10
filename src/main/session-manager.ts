@@ -813,6 +813,14 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * 公开版:供 IPC handler 给设置页"默认 shell"下拉框列出可用 shell 用。
+   * 调用方需自行 await。结果会被缓存,与 createSession 共享。
+   */
+  async listAvailableShells(): Promise<ShellInfo[]> {
+    return this.getShells();
+  }
+
+  /**
    * 测试用:直接重置 detectShells 缓存。
    */
   resetShellCache(): void {

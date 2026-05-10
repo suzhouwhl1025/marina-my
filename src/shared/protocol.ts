@@ -66,9 +66,15 @@ export const COMMAND_CHANNELS = {
   // Settings 域
   SETTINGS_GET: 'cmd:settings:get',
   SETTINGS_UPDATE: 'cmd:settings:update',
+  SETTINGS_RESET: 'cmd:settings:reset',
+  SETTINGS_LIST_SHELLS: 'cmd:settings:list-shells',
+  SETTINGS_GET_AUTO_START: 'cmd:settings:get-auto-start',
 
   // System 域
   SYSTEM_SHOW_IN_EXPLORER: 'cmd:system:show-in-explorer',
+  SYSTEM_OPEN_DATA_DIR: 'cmd:system:open-data-dir',
+  SYSTEM_OPEN_LOGS_DIR: 'cmd:system:open-logs-dir',
+  SYSTEM_OPEN_EXTERNAL: 'cmd:system:open-external',
 } as const;
 
 export type CommandChannel = (typeof COMMAND_CHANNELS)[keyof typeof COMMAND_CHANNELS];
@@ -290,12 +296,34 @@ export interface UpdateSettingsPayload {
   partial: DeepPartial<Settings>;
 }
 
+export interface ShellListItem {
+  /** shell id (pwsh / powershell / cmd / git-bash 等) */
+  id: string;
+  /** 用户友好显示名 (PowerShell 7 / Windows PowerShell / Command Prompt 等) */
+  displayName: string;
+  /** 实测命中的可执行文件绝对路径 */
+  executablePath: string;
+}
+
+export interface ListShellsResponse {
+  shells: ShellListItem[];
+}
+
+export interface GetAutoStartResponse {
+  enabled: boolean;
+}
+
 // ──────────────────────────────────────────────────────────────────
 // System 域
 // ──────────────────────────────────────────────────────────────────
 
 export interface ShowInExplorerPayload {
   path: string;
+}
+
+export interface OpenExternalPayload {
+  /** http(s) URL — 文件 / file:// 协议拒绝 (安全) */
+  url: string;
 }
 
 // ──────────────────────────────────────────────────────────────────
