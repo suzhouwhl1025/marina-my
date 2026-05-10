@@ -35,31 +35,44 @@ CP-3 行为变化(与 CP-2 / 早期 V1 设计不同):
 | "重启已退出 session" 功能 | (CP-2 没做) | **永不提供**;想再跑就在同一 path 新建一个 |
 | 启动模板 | 仅 'shell' 一种 | shell / claude-code / codex / opencode 四种 |
 | OSC 1337 cwd 跟踪 | 关 | 开;PowerShell 与 cmd 都注入 hook |
-| PowerShell 启动 banner | 重开窗口时重复 8 次 (errata #2) | 仅 1 行(`-NoLogo` 应当根除) |
+| PowerShell 启动 banner | 重开窗口时重复 8 次 (errata #2) | 自然显示一次(2-3 行,与原生 PowerShell 一致;CP-3 勘误 #1 后保留 banner) |
 
 ---
 
-## 测试 1:基础启动 + 横幅修复(预计 1 分钟)
+## 测试 1:基础启动 + 横幅显示一次(预计 1 分钟)
 
 1. 跑 `npm run dev`。
 2. 等到 EasyTerm 窗口出现,自动选中第一个收藏路径(若没有收藏就显示欢迎页)。
 3. 添加一个收藏路径(收藏区 + 按钮 → 选任意目录),双击它。
 4. 终端区出现 PowerShell。
-5. **预期**:终端区**最多 1 行** "Windows PowerShell" 横幅(因 `-NoLogo` 通常一行也没有,只显示提示符)。
-6. **失败现象**:看到多行 "Windows PowerShell\n版权所有..."(CP-2 errata #2 残留)。
-7. 关掉这个窗口,从托盘菜单"打开新窗口",再去同一路径双击 → 仍然不应该出现 banner 重复。
+5. **预期**(CP-3 勘误 #1 修订):看到 PowerShell **完整原生 banner 一次**,例如:
+   ```
+   Windows PowerShell
+   版权所有(C)Microsoft Corporation。保留所有权利。
+   安装最新的 PowerShell, ...
+   PS C:\...>
+   ```
+   银纸内容来自 PowerShell 自己,我们不再用 `-NoLogo` 砍掉,以保留原生终端体验。
+6. **失败现象**:
+   - banner 出现**多次**(2 次以上)→ CP-2 errata #2 残留(说明 `-NoExit -Command` 链式注入逻辑回退了)
+   - banner 完全不出现 → 说明回退到 `-NoLogo`
+7. 关掉这个窗口,从托盘菜单"打开新窗口",再去同一路径双击 → banner 应**只出现一次**(每次 PTY 启动一次)。
 
 ---
 
 ## 测试 2:状态点(active / idle / exited)(预计 2 分钟)
 
 1. 在某收藏路径双击启动 PowerShell。
-2. **预期**:tab 上有一个**绿色小点**(active),侧栏 SessionItem 也是绿色。
-3. 等 ~3 秒不动键盘(默认 idle 阈值 2 秒),状态点应变成**黄色**(idle)。
-4. 在终端里敲一个回车 → 立刻变回**绿色**(active)。
+2. **预期**(CP-3 勘误 #3 修订):
+   - 启动后头 5 秒(grace 期),状态点**保持绿色**(active),即使 PowerShell 中间停几秒也不会闪到 idle
+   - 这是为消除 Claude Code 等"启动期吐 banner→停一下→出 prompt"的"绿黄绿"闪烁噪声
+3. 等 ~8 秒后不动键盘(grace 5s + 默认阈值 3s),状态点应变成**黄色**(idle)。
+4. 在终端里敲一个回车 → shell echo 一行 → 立刻变回**绿色**(active)。
 5. 在终端里输入 `exit` 回车 → PTY 死掉,但 **tab 不消失**,变成**灰色 ⚫**;tab 标题旁有 `⚫` 小图标;鼠标悬停 tab 看 tooltip 显示 "已退出 (exitCode=0)"。
 6. 终端区状态条也显示 `· 已退出 (exitCode=0)`,scrollback 仍可见(向上滚看历史)。
 7. 在那个灰显的 tab 上右键 → "关闭" → tab 消失,session 真销毁。
+
+> 关于状态点的设计意图(勘误 #2):状态点反映"PTY 是否在产生输出"。用户输入(键盘按键)本身**不直接**影响状态,但 shell 会 echo 用户输入,所以输入会通过 echo 间接触发 active。这是 PTY 的固有特性,不是 bug。
 
 ---
 
@@ -115,13 +128,18 @@ CP-3 行为变化(与 CP-2 / 早期 V1 设计不同):
 ## 测试 6:收藏路径默认模板(预计 2 分钟)
 
 1. 在收藏路径上**右键单击**(注意是右键 path 行,不是 session 行)。
-2. **预期**:弹一个 prompt 对话框,列出 4 个模板,问"输入序号 1-4"。
-3. 输入 `2` 回车(选 Claude Code),关闭弹窗。
-4. **预期**:无明显 UI 变化(后端默认模板已记到 bookmarks.json)。
-5. 现在双击该路径。
-6. **预期**:启动的是 **Claude Code**(而不是默认 shell)。
-7. 关掉 session,再次右键路径 → 输入 `1` 选回 Shell,双击验证回到 Shell。
-8. 关闭 EasyTerm,完全退出。重启 EasyTerm,验证默认模板**持久化了**(再双击仍是上次设的模板)。
+2. **预期**(CP-3 勘误 #4 修订):
+   - 鼠标位置出现一个**自定义 React 菜单**(深色背景,圆角)
+   - 顶部小标题:`设默认模板 — <路径名>`
+   - 4 行模板,当前选中的那行有 ✓ 前缀
+   - 点击外部 / 按 Esc / 滚轮 → 菜单消失
+3. 点 `🤖 Claude Code` → 菜单消失,无明显 UI 变化(后端默认模板已记到 bookmarks.json)。
+4. 现在双击该路径。
+5. **预期**:启动的是 **Claude Code**(而不是默认 shell)。
+6. 关掉 session,再次右键路径,**预期**这次菜单中 Claude Code 行有 ✓;选 Shell 切回。双击验证回到 Shell。
+7. 关闭 EasyTerm,完全退出。重启 EasyTerm,验证默认模板**持久化了**(再双击仍是上次设的模板)。
+
+> 失败现象:右键完全无反应 → 说明回退到 `window.prompt`,Electron 默认忽略它。本次勘误 #4 已用 React 渲染菜单替代。
 
 ---
 
@@ -148,14 +166,15 @@ CP-3 行为变化(与 CP-2 / 早期 V1 设计不同):
 
 ---
 
-## 测试 9:多 session 同 path 切换不丢历史(预计 2 分钟)
+## 测试 9:多 session 同 path 切换不丢历史 + tab 顺序稳定(预计 2 分钟)
 
 1. 在某收藏路径开 session A,在终端跑 `dir`。
 2. 点 tab 区右上 + 按钮(或者再次双击该 path)新建 session B。
 3. 在 B 里跑 `Get-Date`。
 4. 切回 A 的 tab → **预期**看到完整 `dir` 输出。
 5. 切回 B 的 tab → 看到 `Get-Date` 输出。
-6. (本测试是 CP-2 错误 #1 "tab 跳" 的回归测试 — 切 tab 时其位置不应改变。)
+6. **预期**(CP-3 勘误 #5):无论你怎么点 A / B,**tab 顺序不动**(始终按创建顺序 A 在左、B 在右)。哪个被选中只是 selected 高亮变化,不会让 tab 物理移位。
+7. 启动第二个窗口(托盘"打开新窗口"),在窗口 2 看同一 path 下,A 和 B 都显示为灰显(其他窗口持有);**预期顺序仍是 A 在左、B 在右,与窗口 1 完全一致**。CP-3 早期"灰显抽到最右边"逻辑已彻底拿掉。
 
 ---
 

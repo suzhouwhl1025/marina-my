@@ -122,9 +122,14 @@ export class WindowsAdapter implements PlatformAdapter {
     switch (shell.id) {
       case 'pwsh':
       case 'powershell': {
-        // -NoLogo: 不打印 "Windows PowerShell\n版权..." 横幅
+        // 关键:**不要用 -NoLogo** — 用户报告砍掉 banner 影响原生感受 (cp3 勘误 #1)。
+        // 让 PowerShell 自然出 "Windows PowerShell\n版权..." 横幅,跟原生体验一致。
+        //
         // -NoExit: hook + command 跑完后保持交互 (postExitAction=keep_shell)
         // -Command: dot-source hook 文件,可选追加用户 command
+        // 单次 dot-source 是关键:CP-2 errata #2 报告的 banner 重复 8 次 是因为
+        // 历史代码用了 `-NoExit -Command "..." -NoExit -Command "..."` 链式注入。
+        // 现在只 -Command 一次,banner 只会出现一次 (PowerShell 标准行为)。
         // 转义路径:PowerShell 单引号内只有 ' 需要转义为 ''
         const escapedHook = hookFilePath.replace(/'/g, "''");
         let scriptBlock = `. '${escapedHook}'`;
@@ -136,7 +141,7 @@ export class WindowsAdapter implements PlatformAdapter {
           scriptBlock += `; & ${cmd}${a ? ' ' + a : ''}`;
         }
         return {
-          args: ['-NoLogo', '-NoExit', '-Command', scriptBlock],
+          args: ['-NoExit', '-Command', scriptBlock],
           env: {},
         };
       }

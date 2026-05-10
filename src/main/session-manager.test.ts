@@ -229,6 +229,8 @@ function makeManager(
     spawnFn?: PtySpawnFn;
     adapter?: PlatformAdapter;
     settings?: SettingsManager;
+    /** 默认 0 — 测试不走启动 grace,让 idle 计时器只受阈值约束 */
+    startupGraceMs?: number;
   } = {},
 ): {
   mgr: SessionManager;
@@ -244,6 +246,7 @@ function makeManager(
     spawnFn: opts.spawnFn ?? fakeSpawn,
     platformAdapter: opts.adapter ?? makeFakeAdapter(),
     hookFileResolver: () => 'C:\\fake\\hook.ps1',
+    startupGraceMs: opts.startupGraceMs ?? 0,
   });
   return { mgr, win, path };
 }
@@ -401,6 +404,26 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
     // 至少有一条 state-changed 把 state 改成 idle
     const idleChange = stateChanges.find((c) => c.state === 'idle');
     expect(idleChange).toBeDefined();
+  });
+
+  it('启动 grace 期内不切 idle (CP-3 勘误 #3,即使阈值已到也不动)', async () => {
+    const settings = makeStubSettingsManager({ activeIdleThresholdSeconds: 1 });
+    const { mgr } = makeManager({ settings, startupGraceMs: 5000 });
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('boot');
+    // 推进到阈值 (1s),理论上应切 idle,但 grace=5s 应该挡住
+    vi.advanceTimersByTime(1500);
+    expect(mgr.get(info.id)?.state).toBe('active');
+    // 推进到 grace 之后,再多等阈值,这次应切 idle
+    vi.advanceTimersByTime(5500); // 总 7s,超过 grace 5s + 阈值 1s
+    expect(mgr.get(info.id)?.state).toBe('idle');
   });
 
   it('idle 后再有输出 → state=active', async () => {

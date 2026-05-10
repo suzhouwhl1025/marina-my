@@ -15,7 +15,17 @@
  *
  * @对应文档章节: 软件定义书.md 6.2 (左侧栏)、7.3 (拖拽规格)
  */
-import { useState, useMemo, type DragEvent, type MouseEvent } from 'react';
+import {
+  useState,
+  useMemo,
+  useEffect,
+  createContext,
+  useContext,
+  useCallback,
+  type DragEvent,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 import {
   COMMAND_CHANNELS,
   type AddBookmarkResponse,
@@ -39,6 +49,113 @@ const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
   idle: 'var(--gold, #f0f)',
   exited: 'var(--muted, #f0f)',
 };
+
+// ──────────────────────────────────────────────────────────────────
+// 简易 Context Menu (CP-3 勘误 #4)
+//
+// Electron 默认会忽略 window.prompt / alert 这种 web 标准 API,所以原
+// CP-3 用 prompt 实现的"设默认模板"完全没反应。这里用 React 渲染一个
+// fixed 定位的菜单,点击外部 / Esc 关闭。
+//
+// CP-4 时若加更多右键交互 (复制路径 / Explorer 中显示 / 重命名),把这个
+// 抽出 components/ContextMenu.tsx 复用。CP-3 阶段只用一处,内联即可。
+// ──────────────────────────────────────────────────────────────────
+
+interface ContextMenuItem {
+  /** 显示文本;支持 emoji 前缀 */
+  label: string;
+  /** 鼠标悬停 tooltip,可选 */
+  hint?: string;
+  /** 当前是否选中 (用于显示 ✓ 前缀) */
+  checked?: boolean;
+  /** 点击触发的副作用 */
+  onSelect: () => void;
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  items: ContextMenuItem[];
+  /** 顶部小标题,可选 */
+  title?: string;
+}
+
+interface ContextMenuApi {
+  open(state: ContextMenuState): void;
+  close(): void;
+}
+
+const ContextMenuApiContext = createContext<ContextMenuApi | null>(null);
+
+function useContextMenuApi(): ContextMenuApi {
+  const v = useContext(ContextMenuApiContext);
+  if (!v) throw new Error('[Sidebar] ContextMenuApi 必须在 ContextMenuProvider 内使用');
+  return v;
+}
+
+function ContextMenuProvider({ children }: { children: ReactNode }): JSX.Element {
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const close = useCallback(() => setMenu(null), []);
+  const api = useMemo<ContextMenuApi>(
+    () => ({
+      open: (state) => setMenu(state),
+      close,
+    }),
+    [close],
+  );
+
+  // Esc / 全局点击 / 滚轮 都关菜单
+  useEffect(() => {
+    if (!menu) return undefined;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close();
+    };
+    const onClickAway = (): void => close();
+    const onScroll = (): void => close();
+    window.addEventListener('keydown', onKey);
+    // mousedown 比 click 早一个 phase,在浮层"自己消失"前就拿到事件;
+    // 浮层内部的 mousedown 用 stopPropagation 阻止冒泡到这里。
+    window.addEventListener('mousedown', onClickAway);
+    window.addEventListener('wheel', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onClickAway);
+      window.removeEventListener('wheel', onScroll);
+    };
+  }, [menu, close]);
+
+  return (
+    <ContextMenuApiContext.Provider value={api}>
+      {children}
+      {menu && (
+        <div
+          className="ctx-menu"
+          style={{ left: menu.x, top: menu.y }}
+          // 内部 mousedown 不冒泡到 window onClickAway
+          onMouseDown={(e) => e.stopPropagation()}
+          role="menu"
+        >
+          {menu.title && <div className="ctx-menu-title">{menu.title}</div>}
+          {menu.items.map((it, idx) => (
+            <button
+              key={idx}
+              type="button"
+              className={`ctx-menu-item${it.checked ? ' checked' : ''}`}
+              title={it.hint}
+              onClick={() => {
+                it.onSelect();
+                close();
+              }}
+            >
+              <span className="ctx-menu-check">{it.checked ? '✓' : ' '}</span>
+              <span className="ctx-menu-label">{it.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </ContextMenuApiContext.Provider>
+  );
+}
 
 export function Sidebar(): JSX.Element {
   const state = useAppState();
@@ -96,44 +213,38 @@ export function Sidebar(): JSX.Element {
   };
 
   return (
-    <aside className="sidebar">
-      <div
-        className={`sidebar-bookmarks-dropzone${dragOver ? ' drag-over' : ''}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={(e) => void handleDrop(e)}
-      >
-        <Category
-          title="收藏"
-          icon="📌"
-          paths={state.pathTree.bookmarks}
-          actionLabel="+"
-          actionTitle="选择文件夹添加到收藏"
-          onAction={() => void handlePickFolder()}
-        />
-        <Category
-          title="临时"
-          icon="🕐"
-          paths={state.pathTree.temporary}
-        />
-        <Category
-          title="最近"
-          icon="•"
-          paths={state.pathTree.recent}
-        />
-      </div>
-      <div className="sidebar-footer">
-        <button
-          type="button"
-          className="settings-entry"
-          onClick={() => dispatch({ type: 'view/enter-settings' })}
-          title="设置 (CP-4 接入)"
-          disabled
+    <ContextMenuProvider>
+      <aside className="sidebar">
+        <div
+          className={`sidebar-bookmarks-dropzone${dragOver ? ' drag-over' : ''}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={(e) => void handleDrop(e)}
         >
-          ⚙ 设置
-        </button>
-      </div>
-    </aside>
+          <Category
+            title="收藏"
+            icon="📌"
+            paths={state.pathTree.bookmarks}
+            actionLabel="+"
+            actionTitle="选择文件夹添加到收藏"
+            onAction={() => void handlePickFolder()}
+          />
+          <Category title="临时" icon="🕐" paths={state.pathTree.temporary} />
+          <Category title="最近" icon="•" paths={state.pathTree.recent} />
+        </div>
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className="settings-entry"
+            onClick={() => dispatch({ type: 'view/enter-settings' })}
+            title="设置 (CP-4 接入)"
+            disabled
+          >
+            ⚙ 设置
+          </button>
+        </div>
+      </aside>
+    </ContextMenuProvider>
   );
 }
 
@@ -191,6 +302,7 @@ function Category({
 function PathItem({ node }: { node: PathNode }): JSX.Element {
   const state = useAppState();
   const dispatch = useAppDispatch();
+  const ctxMenu = useContextMenuApi();
   const expanded = state.expandedPathIds.has(node.id);
   const selected = state.selectedPathId === node.id;
   const sessions = useMemo(
@@ -235,31 +347,33 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
   };
 
   const handleContextMenu = (e: MouseEvent<HTMLDivElement>): void => {
-    // 仅收藏路径支持设置默认模板 (软件定义书 6.2.2)
+    // CP-3 勘误 #4:仅收藏路径支持右键菜单 (软件定义书 6.2.2)。
+    // 临时 / 最近的右键菜单 (加入收藏 / 从最近移除等) 是 CP-4 范围。
     if (node.category !== 'bookmarked') return;
     e.preventDefault();
     e.stopPropagation();
-    // CP-3:简化弹窗式菜单。CP-4 完整化右键菜单 (复制路径 / 在 Explorer 中显示 / 重命名等)。
-    const templateNames = state.templates
-      .map((t, i) => `${i + 1}. ${t.icon} ${t.name}${t.id === node.defaultTemplateId ? ' (当前)' : ''}`)
-      .join('\n');
-    const input = window.prompt(
-      `[${node.displayName ?? node.path}] 设默认启动模板\n\n` +
-        templateNames +
-        `\n\n输入序号 1-${state.templates.length}:`,
-      String(state.templates.findIndex((t) => t.id === node.defaultTemplateId) + 1 || 1),
-    );
-    if (!input) return;
-    const idx = parseInt(input, 10) - 1;
-    if (Number.isNaN(idx) || idx < 0 || idx >= state.templates.length) return;
-    const target = state.templates[idx];
-    if (!target) return;
-    window.api
-      .invoke(COMMAND_CHANNELS.BOOKMARK_SET_DEFAULT_TEMPLATE, {
-        pathId: node.path,
-        templateId: target.id,
-      })
-      .catch((err) => console.error('[Sidebar] set-default-template failed', err));
+
+    const items = state.templates.map((t) => ({
+      label: `${t.icon} ${t.name}`,
+      hint: t.command ? `启动命令: ${t.command}` : '系统默认 shell',
+      checked: t.id === node.defaultTemplateId,
+      onSelect: () => {
+        window.api
+          .invoke(COMMAND_CHANNELS.BOOKMARK_SET_DEFAULT_TEMPLATE, {
+            pathId: node.path,
+            templateId: t.id,
+          })
+          .catch((err) =>
+            console.error('[Sidebar] set-default-template failed', err),
+          );
+      },
+    }));
+    ctxMenu.open({
+      x: e.clientX,
+      y: e.clientY,
+      title: `设默认模板 — ${node.displayName ?? lastSegmentOf(node.path)}`,
+      items,
+    });
   };
 
   return (

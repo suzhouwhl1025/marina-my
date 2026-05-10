@@ -634,6 +634,64 @@ button:disabled {
   font-style: italic;
 }
 
+/* ── CP-3 勘误 #4: Context Menu ───────────────────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: 360px;
+  background-color: var(--surface, #f0f);
+  color: var(--text, #f0f);
+  border: 1px solid var(--overlay, #f0f);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  font-size: 12px;
+  user-select: none;
+}
+.ctx-menu-title {
+  padding: 6px 10px 4px;
+  color: var(--subtle, #f0f);
+  font-size: 11px;
+  border-bottom: 1px solid var(--overlay, #f0f);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.ctx-menu-item:hover {
+  background-color: var(--highlight-low, #f0f);
+}
+.ctx-menu-item.checked {
+  color: var(--iris, #f0f);
+}
+.ctx-menu-check {
+  width: 12px;
+  flex: 0 0 auto;
+  text-align: center;
+  font-weight: bold;
+}
+.ctx-menu-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ADR-008: tab 上的状态点 (active / idle / exited) 与 cwd 漂移提示 */
 .tab-state-dot {
   width: 6px;

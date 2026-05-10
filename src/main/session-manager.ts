@@ -73,6 +73,16 @@ const CWD_GRACE_MS = 5000;
 const CWD_POLL_INTERVAL_MS = 5000;
 
 /**
+ * 状态机启动 grace:session 创建后 N 毫秒内不切 idle (CP-3 勘误 #3)。
+ *
+ * 解决 Claude Code 等"启动期吐很多东西然后停一下又吐"的场景下用户感知到
+ * 的"绿→黄→绿"闪烁噪声 — claude 进入 prompt 前的 sleep 可能超过 idle 阈值,
+ * 导致刚启动就切 idle 然后又切回 active。grace 期内 idle 计时器即使到点
+ * 也不真正切。
+ */
+const STATE_STARTUP_GRACE_MS = 5000;
+
+/**
  * spawn 工厂,与 node-pty 的 spawn 兼容。测试中用 mock 替换。
  */
 export type PtySpawnFn = (
@@ -201,6 +211,11 @@ export interface SessionManagerOptions {
   spawnFn?: PtySpawnFn;
   platformAdapter?: PlatformAdapter;
   hookFileResolver?: (shellId: string) => string;
+  /**
+   * 状态机启动 grace 时长 (ms)。生产 5000;测试通常传 0 (跳过 grace,
+   * 走纯 idle 阈值逻辑)。详见 STATE_STARTUP_GRACE_MS 注释。
+   */
+  startupGraceMs?: number;
 }
 
 export class SessionManager extends EventEmitter {
@@ -209,6 +224,7 @@ export class SessionManager extends EventEmitter {
   private readonly spawnFn: PtySpawnFn;
   private readonly platformAdapter: PlatformAdapter;
   private readonly hookFileResolver: (shellId: string) => string;
+  private readonly startupGraceMs: number;
 
   /**
    * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
@@ -230,6 +246,7 @@ export class SessionManager extends EventEmitter {
       options.platformAdapter ??
       (process.platform === 'win32' ? getPlatformAdapter() : createNoopAdapter());
     this.hookFileResolver = options.hookFileResolver ?? defaultHookFileResolver;
+    this.startupGraceMs = options.startupGraceMs ?? STATE_STARTUP_GRACE_MS;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -658,7 +675,12 @@ export class SessionManager extends EventEmitter {
   private scheduleIdleCheck(managed: ManagedSession): void {
     if (managed.idleTimer) clearTimeout(managed.idleTimer);
     const thresholdSec = this.settingsManager.get().advanced.activeIdleThresholdSeconds;
-    const ms = Math.max(100, thresholdSec * 1000);
+    const baseMs = Math.max(100, thresholdSec * 1000);
+    // 启动 grace (CP-3 勘误 #3):session 创建后头 startupGraceMs 内
+    // 即使 idle 计时器到点也不切。把 timeout 推到 max(baseMs, gracetail)。
+    const elapsed = Date.now() - managed.info.createdAt;
+    const remainGrace = Math.max(0, this.startupGraceMs - elapsed);
+    const ms = Math.max(baseMs, remainGrace);
     managed.idleTimer = setTimeout(() => {
       managed.idleTimer = null;
       if (managed.info.state === 'active') {

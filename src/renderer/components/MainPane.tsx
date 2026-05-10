@@ -204,38 +204,25 @@ function TabBar({ sessions, selectedSessionId }: TabBarProps): JSX.Element {
     }
   };
 
-  // CP-2 勘误后:tab 顺序稳定 — 不按 owner 分组重排。
-  // 本窗口可能"显示"的 (owner=myWindow 或 orphan) 按 path 原顺序留在
-  // sessions 数组的位置;其他窗口持有的单独抽到最右端灰显。
-  // 这样点击 orphan tab 触发 claim 后,该 tab 保持原位,旧 my-owned 也
-  // 保持原位 — 用户视觉上不会看到 tab 跳动 (用户勘误 #1)。
-  const visibleTabs: SessionInfo[] = [];
-  const ownedByOtherTabs: SessionInfo[] = [];
-  for (const s of sessions) {
-    if (s.ownerWindowId !== null && s.ownerWindowId !== state.myWindowId) {
-      ownedByOtherTabs.push(s);
-    } else {
-      visibleTabs.push(s);
-    }
-  }
-
+  // CP-3 勘误 #5:**彻底**移除"灰显抽到最右边"的分组逻辑。
+  // 直接按 path.sessionIds 顺序渲染所有 tab — 不分组、不重排。
+  // 灰显 / orphan / mine 的视觉差由 Tab 自己根据 ownerWindowId 决定 variant,
+  // 与位置无关。
+  //
+  // 顺序保证:sessions 来自 getSessionsInSelectedPath → path.sessionIds,
+  // 这个数组 PathManager 用 push 追加 (创建顺序);任何 owner 切换 / 状态
+  // 变化都不会 reorder,所以同一窗口的同一 path 看到的 tab 顺序在 session
+  // 生命周期内稳定。侧栏 SessionItem 也用同一数组顺序,两边自然同步。
+  // 拖拽改顺序是 V1.2 工作 (软件定义书 5.2、7.3 规划)。
   return (
     <div className="tab-bar">
       <div className="tab-list">
-        {visibleTabs.map((s) => (
+        {sessions.map((s) => (
           <Tab
             key={s.id}
             session={s}
             myWindowId={state.myWindowId}
             selected={s.id === selectedSessionId}
-          />
-        ))}
-        {ownedByOtherTabs.map((s) => (
-          <Tab
-            key={s.id}
-            session={s}
-            myWindowId={state.myWindowId}
-            selected={false}
           />
         ))}
       </div>
