@@ -91,7 +91,12 @@ export default defineConfig({
     },
     define: buildInfoDefine,
     build: {
-      outDir: '../../out/renderer',
+      // 用绝对路径,避免 electron-vite 把相对 outDir 从 CWD(项目根)再向上拼路径,
+      // 导致产物跑到 `E:/out/renderer/`(项目目录之外,完全不进 asar)。
+      // 历史上写过 `../../out/renderer` 试图从 src/renderer/ 退回项目根,
+      // 实际被解释成从项目根再向上两层 → 跑到磁盘根的 out/ 下,asar 里就没有 renderer。
+      // 用 resolve() 直接给绝对路径最稳。
+      outDir: resolve('out/renderer'),
       emptyOutDir: true,
       rollupOptions: {
         input: { index: resolve('src/renderer/index.html') },
