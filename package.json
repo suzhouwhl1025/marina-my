@@ -1,6 +1,6 @@
 {
   "name": "marina-app",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "private": true,
   "description": "Marina — path-centric, AI-agent-friendly terminal manager for Windows (formerly EasyTerm)",
   "license": "MIT",
@@ -13,6 +13,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
+    "generate-icon": "node scripts/generate-icon.cjs",
     "build": "electron-vite build && electron-builder --win --x64",
     "build:unpack": "electron-vite build && electron-builder --win --x64 --dir",
     "preview": "electron-vite preview",

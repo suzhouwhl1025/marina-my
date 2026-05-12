@@ -30,6 +30,13 @@ asar: true
 asarUnpack:
   - node_modules/node-pty/**
 
+# Shell hook 脚本不能放在 asar 内 — pwsh.exe / bash.exe 是外部进程,无法
+# 读 asar 虚拟文件系统。放在 `<install>\resources\shell-hooks\` 旁与 app.asar
+# 同级,运行期通过 process.resourcesPath 定位。
+extraResources:
+  - from: src/shell-hooks
+    to: shell-hooks
+
 # Windows: V1 唯一发布目标
 #
 # M1-E:source 设计图标 build/icon.svg 已就位;.ico 需要离线转换一次,
@@ -42,7 +49,9 @@ win:
     - target: portable
       arch: [x64]
   artifactName: ${productName}-Setup-${version}-${arch}.${ext}
-  # icon: build/icon.ico
+  # win.icon 接受 PNG/ICO,electron-builder 内嵌到 exe。
+  # NSIS installer/uninstaller chrome 只认 ICO,所以两者并发,由 generate-icon.cjs 一并产出。
+  icon: build/icon.ico
   requestedExecutionLevel: asInvoker
 
 nsis:
@@ -52,8 +61,11 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Marina
-  # installerIcon: build/icon.ico
-  # uninstallerIcon: build/icon.ico
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  # 卸载时清理 Explorer 右键集成的 HKCU 注册表项,避免旧 command 指向已删 exe
+  # (prelease 前勘误 #16:用户看到 "unable to find electron app at ...")。
+  include: build/installer.nsh
 
 portable:
   artifactName: ${productName}-Portable-${version}-${arch}.${ext}
