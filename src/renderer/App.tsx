@@ -101,6 +101,8 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
   const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
   const windowStyle = state.settings.appearance?.windowStyle ?? 'windows';
   const uiZoom = state.settings.appearance?.uiZoom ?? 1;
+  const uiFontFamily = state.settings.appearance?.uiFontFamily ?? '';
+  const terminalFontFamily = state.settings.appearance?.terminalFontFamily ?? '';
 
   // 即时同步 uiZoom 到 webFrame.setZoomFactor (preload 桥)。
   // 必须在 early return 之前 — React Hooks 规则:每次渲染调用顺序须一致。
@@ -109,6 +111,23 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
       window.api.setUiZoom(uiZoom);
     }
   }, [uiZoom]);
+
+  // settings.appearance.uiFontFamily / terminalFontFamily 写到 :root CSS 变量。
+  // 用户报告"UI 字体没生效":历史 CSS 把这俩值硬编码在 :root,设置变更后
+  // 没有任何代码把它写回 DOM。在这里 setProperty 即可。空字符串走 CSS 默认值。
+  useEffect(() => {
+    const root = document.documentElement;
+    if (uiFontFamily.trim()) {
+      root.style.setProperty('--ui-font-family', uiFontFamily);
+    } else {
+      root.style.removeProperty('--ui-font-family');
+    }
+    if (terminalFontFamily.trim()) {
+      root.style.setProperty('--terminal-font-family', terminalFontFamily);
+    } else {
+      root.style.removeProperty('--terminal-font-family');
+    }
+  }, [uiFontFamily, terminalFontFamily]);
 
   if (sync.error) {
     return (

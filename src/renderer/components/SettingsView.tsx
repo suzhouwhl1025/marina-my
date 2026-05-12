@@ -184,7 +184,7 @@ const THEMES: Array<{ id: ThemeId; label: string; tone: string }> = [
   { id: 'rose-pine', label: 'Rose Pine', tone: '深色 · 默认' },
   { id: 'rose-pine-dawn', label: 'Rose Pine Dawn', tone: '浅色' },
   { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色变体' },
-  { id: 'cutie', label: 'Cutie', tone: '粉紫' },
+  { id: 'cutie', label: 'Cutie', tone: '奶油粉 · Kawaii' },
   { id: 'business', label: 'Business', tone: '商务蓝灰' },
   { id: 'ubuntu', label: 'Ubuntu', tone: '经典棕紫' },
   { id: 'windows-terminal', label: 'Windows Terminal', tone: 'Campbell 配色' },

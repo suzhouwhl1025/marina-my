@@ -89,23 +89,23 @@
   --iris: #c4a7e7;
 }
 
-/* Cutie — 粉紫高对比 */
+/* Cutie — 奶油粉 Kawaii 浅色 */
 [data-theme='cutie'] {
-  --base: #231a30;
-  --surface: #2c2240;
-  --overlay: #3a2c4a;
-  --highlight-low: #322545;
-  --highlight-med: #4d3a5b;
-  --highlight-high: #614c70;
-  --muted: #7a6488;
-  --subtle: #b39ec5;
-  --text: #f7e6f5;
-  --love: #ff6ea1;
-  --gold: #ffd479;
-  --rose: #f7a8d8;
-  --pine: #a3e8c2;
-  --foam: #a8e6f0;
-  --iris: #d4a3ff;
+  --base: #fff5f9;
+  --surface: #ffeef5;
+  --overlay: #ffd9e8;
+  --highlight-low: #ffe9f2;
+  --highlight-med: #ffccdf;
+  --highlight-high: #ffb3d1;
+  --muted: #b8809e;
+  --subtle: #8a4d6f;
+  --text: #6b2e4f;
+  --love: #ff5d9e;
+  --gold: #ffb86b;
+  --rose: #7ad7d7;
+  --pine: #6fcf97;
+  --foam: #6ec0e8;
+  --iris: #c77dff;
 }
 
 /* Business — 商务蓝灰 (Nord 风) */
@@ -1420,40 +1420,137 @@ select.settings-input option {
   min-width: 80px;
 }
 
+/*
+ * 用户反馈:终端字号 / 行高 等数字框的 spinner 箭头在深色主题下露白,
+ * 不主题化。Chromium 的 ::*-spin-button 颜色几乎不可主题化,直接隐藏更干净;
+ * 用户用键盘或粘贴输入。
+ */
+.settings-input[type='number']::-webkit-inner-spin-button,
+.settings-input[type='number']::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.settings-input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+/*
+ * 自绘 checkbox / radio。用户反馈原生方形/圆形粗糙,且主题色 (accent-color)
+ * 在 Windows 上深色主题下背景与勾选色对比不足。改成 16px 的自绘块,边框 +
+ * iris 填充 + 白色对勾(checkbox)或内圈点(radio)。
+ */
 .settings-checkbox {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 13px;
   color: var(--text, #f0f);
   cursor: pointer;
+  user-select: none;
 }
 
-.settings-checkbox input {
+.settings-checkbox input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
   margin: 0;
-  accent-color: var(--iris, #f0f);
+  border: 1.5px solid var(--highlight-high, #f0f);
+  border-radius: 3px;
+  background-color: var(--surface, #f0f);
+  position: relative;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  flex-shrink: 0;
+}
+
+.settings-checkbox input[type='checkbox']:hover:not(:disabled) {
+  border-color: var(--iris, #f0f);
+}
+
+.settings-checkbox input[type='checkbox']:checked {
+  background-color: var(--iris, #f0f);
+  border-color: var(--iris, #f0f);
+}
+
+.settings-checkbox input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid var(--base, #f0f);
+  border-bottom: 2px solid var(--base, #f0f);
+  transform: rotate(45deg);
+}
+
+.settings-checkbox input[type='checkbox']:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .settings-radio-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .settings-radio {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 13px;
   color: var(--text, #f0f);
   cursor: pointer;
+  user-select: none;
 }
 
-.settings-radio input {
+.settings-radio input[type='radio'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
   margin: 0;
-  accent-color: var(--iris, #f0f);
+  border: 1.5px solid var(--highlight-high, #f0f);
+  border-radius: 50%;
+  background-color: var(--surface, #f0f);
+  position: relative;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+  flex-shrink: 0;
 }
 
+.settings-radio input[type='radio']:hover:not(:disabled) {
+  border-color: var(--iris, #f0f);
+}
+
+.settings-radio input[type='radio']:checked {
+  border-color: var(--iris, #f0f);
+}
+
+.settings-radio input[type='radio']:checked::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--iris, #f0f);
+  transform: translate(-50%, -50%);
+}
+
+.settings-radio input[type='radio']:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/*
+ * 设置页按钮:固定 min-width,让"导出 / 导入"两个按钮等宽,避免视觉上长短不一。
+ */
 .settings-button {
   background-color: var(--surface, #f0f);
   border: 1px solid var(--overlay, #f0f);
@@ -1461,6 +1558,8 @@ select.settings-input option {
   padding: 5px 12px;
   font-size: 12px;
   border-radius: 4px;
+  min-width: 96px;
+  text-align: center;
 }
 
 .settings-button:hover:not(:disabled) {
