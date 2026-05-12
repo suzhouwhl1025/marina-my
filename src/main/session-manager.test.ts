@@ -250,6 +250,7 @@ function makeManager(
     hookFileResolver: () => 'C:\\fake\\hook.ps1',
     resizeQuietMs: opts.resizeQuietMs ?? 0,
     startupGraceMs: opts.startupGraceMs ?? 0,
+    skipCwdValidation: true,
   });
   return { mgr, win, path };
 }

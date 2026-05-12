@@ -38,6 +38,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, resolve as resolvePath } from 'node:path';
 import { spawn as defaultSpawnPty, type IPty, type IDisposable } from 'node-pty';
@@ -114,6 +115,8 @@ export type PtySpawnFn = (
     rows: number;
     cwd: string;
     env: Record<string, string>;
+    /** 强制走 ConPTY (Win10 1809+ 默认 true,显式开避免 winpty fallback 闪窗) */
+    useConpty?: boolean;
   },
 ) => IPty;
 
@@ -146,27 +149,38 @@ export function inferDisplayName(shellPath: string): string {
 }
 
 /**
- * 解析 shell hook 文件路径。文件位于源码 src/shell-hooks/。
+ * 解析 shell hook 文件路径。
  *
- * 开发模式 (npm run dev,ts 直跑) 与打包模式都通过 __dirname 相对项目根
- * 解析。打包后 electron-builder 应配置把 src/shell-hooks 拷到 resourcesPath
- * 旁边 (CP-4 处理),目前 V1 仅支持开发态运行。
+ * **dev 模式**:hook 在源码 src/shell-hooks/,__dirname 指向 .ts 真实位置。
+ * **packed 模式**:hook 通过 electron-builder.yml 的 `extraResources` 拷到
+ *   `<install>\resources\shell-hooks\` (`process.resourcesPath/shell-hooks`)。
+ *   asar 内的 src/shell-hooks 不可达 — pwsh.exe / bash.exe 是外部进程,
+ *   读不到 asar 虚拟 FS。
+ *
+ * 决策依据:`app.isPackaged` 在 Electron 31 可靠区分两种模式。
  */
 export function defaultHookFileResolver(shellId: string): string {
-  // 当前文件位于 src/main/,hook 文件在 src/shell-hooks/。
-  // 注:ESM/Vite 环境下 __dirname 由 tsconfig + esbuild 处理,生产构建会
-  // 重定向到 dist/main/。为了健壮,直接 resolve 到项目根再拼。
-  const projectRoot = resolvePath(__dirname, '..', '..');
+  let hookDir: string;
+  // 静态判定:若 process.resourcesPath 存在 + __dirname 含 'app.asar' → packed。
+  // 直接读 app.isPackaged 会引入对 electron 的硬依赖,不利于 SessionManager
+  // 单测;用文件系统线索就够。
+  const isPacked = __dirname.includes('app.asar');
+  if (isPacked && process.resourcesPath) {
+    hookDir = resolvePath(process.resourcesPath, 'shell-hooks');
+  } else {
+    // dev 模式 / 单测:src/main/ → 项目根 → src/shell-hooks/
+    hookDir = resolvePath(__dirname, '..', '..', 'src', 'shell-hooks');
+  }
   switch (shellId) {
     case 'pwsh':
     case 'powershell':
-      return resolvePath(projectRoot, 'src', 'shell-hooks', 'pwsh.ps1');
+      return resolvePath(hookDir, 'pwsh.ps1');
     case 'cmd':
-      return resolvePath(projectRoot, 'src', 'shell-hooks', 'cmd.bat');
+      return resolvePath(hookDir, 'cmd.bat');
     case 'git-bash':
-      return resolvePath(projectRoot, 'src', 'shell-hooks', 'bash.sh');
+      return resolvePath(hookDir, 'bash.sh');
     default:
-      return resolvePath(projectRoot, 'src', 'shell-hooks', 'pwsh.ps1');
+      return resolvePath(hookDir, 'pwsh.ps1');
   }
 }
 
@@ -249,6 +263,14 @@ export interface SessionManagerOptions {
    * 让 createSession 之后第一波字节立即走 markActive。详见 STARTUP_GRACE_MS。
    */
   startupGraceMs?: number;
+  /**
+   * prelease 前勘误 #18:createSession 前对 cwd 做 fs.existsSync + isDirectory
+   * 校验,在非常态路径(被删/编码异常)上提前抛 CwdNotAccessible,避免 ConPTY
+   * 直接报 "error code: 267"。
+   * 单测里大量用伪路径 'C:\\proj\\a',文件系统层不存在;测试场景下传 false 跳过。
+   * 生产代码不显式传,默认 true。
+   */
+  skipCwdValidation?: boolean;
 }
 
 export class SessionManager extends EventEmitter {
@@ -259,6 +281,7 @@ export class SessionManager extends EventEmitter {
   private readonly hookFileResolver: (shellId: string) => string;
   private readonly resizeQuietMs: number;
   private readonly startupGraceMs: number;
+  private readonly skipCwdValidation: boolean;
 
   /**
    * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
@@ -282,6 +305,7 @@ export class SessionManager extends EventEmitter {
     this.hookFileResolver = options.hookFileResolver ?? defaultHookFileResolver;
     this.resizeQuietMs = options.resizeQuietMs ?? RESIZE_QUIET_MS;
     this.startupGraceMs = options.startupGraceMs ?? STARTUP_GRACE_MS;
+    this.skipCwdValidation = options.skipCwdValidation ?? false;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -307,6 +331,32 @@ export class SessionManager extends EventEmitter {
     }
     const shell = pickShell(shells, this.settingsManager.get());
     const cwd = input.pathId || homedir();
+
+    // cwd 预校验:不存在 / 不是目录 → 直接抛 CwdNotAccessible,带友好消息。
+    // 否则交给 node-pty,ConPTY 在 CreateProcess 时会因 lpCurrentDirectory 失败
+    // 抛 ERROR_DIRECTORY (267),用户看到的是"Cannot create process, error code: 267",
+    // 完全看不出问题在 cwd。此外 Explorer 集成场景下用户可能把右键时存在的
+    // 文件夹在 Marina 处理过程中删了,这里给出明确兜底。
+    // 单测用伪路径,通过 options.skipCwdValidation=true 跳过此检查。
+    if (!this.skipCwdValidation) {
+      try {
+        if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+          throw new SessionManagerError(
+            'CwdNotAccessible',
+            `工作目录 "${cwd}" 不存在或不是目录。可能它被删除 / 改名,或路径里含 Marina 无法访问的字符。`,
+            { cwd },
+          );
+        }
+      } catch (err) {
+        if (err instanceof SessionManagerError) throw err;
+        throw new SessionManagerError(
+          'CwdNotAccessible',
+          `读取工作目录 "${cwd}" 失败:${err instanceof Error ? err.message : String(err)}`,
+          { cwd },
+        );
+      }
+    }
+
     const hookFile = this.hookFileResolver(shell.id);
     const launchParams = this.platformAdapter.buildShellLaunchParams(
       shell,
@@ -328,6 +378,10 @@ export class SessionManager extends EventEmitter {
         rows: dims.rows,
         cwd,
         env,
+        // 强制 ConPTY:Win 10 1809+ 默认就是它,但显式开避免某些环境
+        // 下 node-pty fallback 到 winpty(winpty 会闪 conhost 窗口,
+        // 用户报告 "新建 shell 时有一闪而过的新建窗口")。
+        useConpty: true,
       });
     } catch (err) {
       throw new SessionManagerError(
