@@ -166,7 +166,7 @@ function CategoryPanel({ categoryId, setError }: CategoryPanelProps): JSX.Elemen
     case 'data':
       return <DataPanel setError={setError} />;
     case 'system-integration':
-      return <SystemIntegrationPanel />;
+      return <SystemIntegrationPanel setError={setError} />;
     case 'advanced':
       return <AdvancedPanel setError={setError} />;
     case 'about':
@@ -1126,22 +1126,82 @@ function DataPanel({
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 系统集成分类 (V1.2 启用,V1 显示但置灰)
+// 系统集成分类 — Explorer 右键 "在 Marina 终端中打开"(M1 提前)
 // ──────────────────────────────────────────────────────────────────
 
-function SystemIntegrationPanel(): JSX.Element {
+function SystemIntegrationPanel({
+  setError,
+}: {
+  setError: (msg: string | null) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const sys = state.settings?.systemIntegration;
+  const enabled = sys?.explorerContextMenu ?? false;
+  const openIn = sys?.explorerOpenIn ?? 'new-window';
+
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">系统集成</h2>
 
       <SettingRow
         label="Explorer 右键集成"
-        hint='"在 Marina 中打开此文件夹"(V1.2 启用,V1 占位)'
+        hint='在文件夹或其空白处右键 → "在 Marina 终端中打开" (写 HKCU 注册表,需手动安装/卸载时再次切换)'
       >
         <label className="settings-checkbox">
-          <input type="checkbox" disabled checked={false} readOnly />
-          <span>启用(V1.2 才真正生效)</span>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) =>
+              void updateSettings(
+                { systemIntegration: { explorerContextMenu: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          <span>启用</span>
         </label>
+      </SettingRow>
+
+      <SettingRow
+        label="打开方式"
+        hint="Marina 已在运行时,从 Explorer 触发的新会话开在哪里"
+      >
+        <div className="settings-radio-group">
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="explorer-open-in"
+              value="new-window"
+              disabled={!enabled}
+              checked={openIn === 'new-window'}
+              onChange={() =>
+                void updateSettings(
+                  { systemIntegration: { explorerOpenIn: 'new-window' } },
+                  setError,
+                )
+              }
+            />
+            新窗口打开
+          </label>
+          <label className="settings-radio">
+            <input
+              type="radio"
+              name="explorer-open-in"
+              value="recent-window-tab"
+              disabled={!enabled}
+              checked={openIn === 'recent-window-tab'}
+              onChange={() =>
+                void updateSettings(
+                  {
+                    systemIntegration: { explorerOpenIn: 'recent-window-tab' },
+                  },
+                  setError,
+                )
+              }
+            />
+            在最近活动的窗口新开标签
+          </label>
+        </div>
       </SettingRow>
     </section>
   );

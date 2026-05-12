@@ -56,6 +56,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   systemIntegration: {
     explorerContextMenu: false,
+    explorerOpenIn: 'new-window',
   },
   advanced: {
     logLevel: 'INFO',
@@ -319,6 +320,14 @@ export function validateSettings(s: Settings): void {
     throw new SettingsError(
       'InvalidSettings',
       `shell.newTerminalShellPolicy="${s.shell.newTerminalShellPolicy}" 必须是 default 或 last-used`,
+    );
+  }
+  if (
+    !['new-window', 'recent-window-tab'].includes(s.systemIntegration.explorerOpenIn)
+  ) {
+    throw new SettingsError(
+      'InvalidSettings',
+      `systemIntegration.explorerOpenIn="${s.systemIntegration.explorerOpenIn}" 必须是 new-window 或 recent-window-tab`,
     );
   }
 }

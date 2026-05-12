@@ -18,6 +18,7 @@
  * @对应文档章节: 软件定义书.md 8.1、9.2.1;AGENTS.md 检查点 1/2
  */
 import { app, Menu, session as electronSession } from 'electron';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { WindowManager } from './window-manager';
 import { TrayManager } from './tray';
@@ -28,6 +29,8 @@ import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
 import { getPlatformAdapter } from './platform';
+import { WindowsAdapter } from './platform/windows';
+import { parseOpenHere } from './argv-utils';
 import { logger } from './logger';
 import type {
   BookmarksFile,
@@ -139,10 +142,22 @@ function bootstrap(): void {
     };
   });
 
-  // second-instance:已有窗口时聚焦最近活动的;否则新开。
-  // M1-K:对齐"双击桌面快捷方式不该无脑新开窗口"的 daily-driver 直觉。
-  app.on('second-instance', () => {
+  // second-instance:
+  //   - `--open-here <path>` → 走 openPathInTerminal,按 settings.systemIntegration.explorerOpenIn 路由
+  //   - 否则:已有窗口时聚焦最近活动的;否则新开 (M1-K 行为)
+  app.on('second-instance', (_event, argv) => {
     try {
+      const requested = parseOpenHere(argv);
+      if (requested) {
+        const path = sanitizeOpenHerePath(requested);
+        const mode = settingsManager.get().systemIntegration.explorerOpenIn;
+        void openPathInTerminal(
+          { windowManager, sessionManager, templatesManager },
+          path,
+          mode,
+        ).catch((err) => logger.error('main', 'openPathInTerminal failed', err));
+        return;
+      }
       const recent = windowManager.getMostRecentlyActive();
       if (recent) {
         if (recent.isMinimized()) recent.restore();
@@ -151,7 +166,7 @@ function bootstrap(): void {
         windowManager.createWindowFromFactory();
       }
     } catch (err) {
-      console.error('[main] second-instance: createWindow failed', err);
+      console.error('[main] second-instance handler failed', err);
     }
   });
 
@@ -260,12 +275,77 @@ function bootstrap(): void {
         if (e.changedKeys.includes('advanced.logLevel')) {
           logger.setLevel(e.settings.advanced.logLevel === 'DEBUG' ? 'debug' : 'info');
         }
+        // Explorer 右键集成:开/关即写/删 HKCU 注册表
+        if (
+          e.changedKeys.includes('systemIntegration.explorerContextMenu') &&
+          platformAdapter
+        ) {
+          const enabled = e.settings.systemIntegration.explorerContextMenu;
+          const op = enabled
+            ? platformAdapter.registerFileManagerIntegration(app.getPath('exe'))
+            : platformAdapter.unregisterFileManagerIntegration();
+          op.catch((err) =>
+            logger.warn(
+              'main',
+              `${enabled ? 'register' : 'unregister'}FileManagerIntegration failed`,
+              err,
+            ),
+          );
+        }
       });
 
+      // v1.5 改名遗留清理:EasyTerm 时代写入的右键菜单 key 若残留,会与 Marina
+      // 并排出现两条菜单项。启动期静默清一次。失败 (例如本来就没装过) 不阻塞。
+      if (platformAdapter instanceof WindowsAdapter) {
+        platformAdapter
+          .cleanupLegacyExplorerIntegration()
+          .catch((err) =>
+            logger.warn('main', 'cleanupLegacyExplorerIntegration failed', err),
+          );
+      }
+
+      // 启动期同步:用户上次留下 explorerContextMenu=true 时,确保 HKCU 注册表
+      // 项指向当前 exe(用户卸载重装、portable 模式改路径都会让旧 command 失效)。
+      if (
+        platformAdapter &&
+        settingsManager.get().systemIntegration.explorerContextMenu
+      ) {
+        platformAdapter
+          .registerFileManagerIntegration(app.getPath('exe'))
+          .catch((err) =>
+            logger.warn('main', 'startup re-register integration failed', err),
+          );
+      }
+
       trayManager.init();
-      // 启动行为:settings.behavior.startupBehavior='tray-only' → 不开窗口,只托盘运行
-      if (settingsManager.get().behavior.startupBehavior !== 'tray-only') {
-        windowManager.createWindowFromFactory();
+
+      // 启动行为:--open-here 优先级最高 (Explorer 右键触发的冷启动 — 用户意图明确)。
+      // 其次看 settings.behavior.startupBehavior:tray-only 不开窗,其他开窗。
+      const startupOpenHere = parseOpenHere(process.argv);
+      const wantWindow =
+        startupOpenHere !== null ||
+        settingsManager.get().behavior.startupBehavior !== 'tray-only';
+      if (wantWindow) {
+        const win = windowManager.createWindowFromFactory();
+        if (startupOpenHere !== null) {
+          // 冷启动:在刚创建的窗口里起 session(忽略 explorerOpenIn=recent-window-tab,
+          // 此时没有"最近"可用)。等 did-finish-load 后再 createSession,
+          // 保证 evt:session:created 不会落在 renderer 还没订阅的空档。
+          const targetWindow = windowManager.getById(win.id);
+          const path = sanitizeOpenHerePath(startupOpenHere);
+          if (targetWindow) {
+            targetWindow.webContents.once('did-finish-load', () => {
+              if (targetWindow.isDestroyed()) return;
+              void createSessionInWindow(
+                { sessionManager, templatesManager },
+                win.id,
+                path,
+              ).catch((err) =>
+                logger.error('main', 'cold-start open-here createSession failed', err),
+              );
+            });
+          }
+        }
       }
     } catch (err) {
       logger.error('main', 'bootstrap failed', err);
@@ -300,6 +380,113 @@ function bootstrap(): void {
   // ESLint:DEFAULT_SETTINGS 引用让 import 不被 tree-shake 警告。
   // 实际我们不在这用,留这一行为了明示编译期依赖。
   void DEFAULT_SETTINGS;
+}
+
+/**
+ * 把 Explorer 传来的路径做基础清理:trim、剥末尾反斜杠(除根盘符外)、
+ * 校验路径存在且是目录;不存在/不是目录 → 退回到用户家目录 + warn 日志。
+ * 调用方可以放心拿返回值喂给 sessionManager。
+ */
+function sanitizeOpenHerePath(raw: string): string {
+  let p = raw.trim();
+  // Explorer 偶尔在末尾留反斜杠("C:\\Users\\me\\"),除盘符根本身外都剥掉
+  if (p.length > 3 && (p.endsWith('\\') || p.endsWith('/'))) {
+    p = p.slice(0, -1);
+  }
+  try {
+    if (!existsSync(p) || !statSync(p).isDirectory()) {
+      logger.warn(
+        'main',
+        `open-here path "${p}" 不存在或不是目录,退回 home`,
+      );
+      return app.getPath('home');
+    }
+  } catch (err) {
+    logger.warn('main', `open-here path stat 失败,退回 home: ${p}`, err);
+    return app.getPath('home');
+  }
+  return p;
+}
+
+interface OpenPathDeps {
+  windowManager: WindowManager;
+  sessionManager: SessionManager;
+  templatesManager: TemplatesManager;
+}
+
+/**
+ * Explorer 右键 → "在 Marina 终端中打开" 已运行时的 dispatcher。
+ *
+ * - mode='new-window': 始终新开一个窗口,等 did-finish-load 后再 createSession
+ *   (复用 tray.ts focusSession 已验证过的模式)
+ * - mode='recent-window-tab': 复用最近活动窗口直接 createSession;若无最近 → 降级 new-window
+ *
+ * 冷启动场景不走这里(无 most-recently-active,直接走 whenReady 末尾的分支)。
+ */
+async function openPathInTerminal(
+  deps: OpenPathDeps,
+  pathArg: string,
+  mode: 'new-window' | 'recent-window-tab',
+): Promise<void> {
+  const { windowManager, sessionManager, templatesManager } = deps;
+
+  if (mode === 'recent-window-tab') {
+    const recent = windowManager.getMostRecentlyActive();
+    if (recent) {
+      if (recent.isMinimized()) recent.restore();
+      recent.focus();
+      const windowId = windowManager
+        .list()
+        .find((w) => w.electronWindowId === recent.webContents.id)?.id;
+      if (windowId) {
+        await createSessionInWindow(
+          { sessionManager, templatesManager },
+          windowId,
+          pathArg,
+        );
+        return;
+      }
+    }
+    // 无最近活动窗口 → 降级新开
+  }
+
+  // mode='new-window' 或 recent 降级:新开窗口,等 did-finish-load 再 createSession,
+  // 这样 evt:session:created 不会落在 renderer 还没订阅的空档。
+  const info = windowManager.createWindowFromFactory();
+  const target = windowManager.getById(info.id);
+  if (!target) return;
+  target.webContents.once('did-finish-load', () => {
+    if (target.isDestroyed()) return;
+    void createSessionInWindow(
+      { sessionManager, templatesManager },
+      info.id,
+      pathArg,
+    ).catch((err) =>
+      logger.error('main', 'openPathInTerminal createSession failed', err),
+    );
+  });
+}
+
+/**
+ * 在指定窗口里 创建一个 session,用全局默认模板。复用 SessionManager.createSession
+ * 完整流程;path tree 通过 attachSession 自动维护。renderer 端收到 evt:session:created
+ * 后自动选中(store.tsx case 'sessions/created' 逻辑)。
+ */
+async function createSessionInWindow(
+  deps: Pick<OpenPathDeps, 'sessionManager' | 'templatesManager'>,
+  ownerWindowId: string,
+  pathArg: string,
+): Promise<void> {
+  const { sessionManager, templatesManager } = deps;
+  // 80x24 是终端事实标准 fallback;renderer 在 TerminalView mount 之后会通过
+  // cmd:session:resize 把 PTY 重新尺寸调到 xterm fit() 的实际值。
+  await sessionManager.createSession({
+    pathId: pathArg,
+    templateId: templatesManager.getDefaultTemplateId(),
+    ownerWindowId,
+    cols: 80,
+    rows: 24,
+  });
 }
 
 bootstrap();

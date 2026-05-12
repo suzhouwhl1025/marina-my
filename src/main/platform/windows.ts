@@ -18,9 +18,37 @@
  *
  * @对应文档章节: 软件定义书.md 5.1.8、12.2、ADR-003、ADR-008
  */
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import type { PlatformAdapter, ShellInfo } from './index';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Explorer 右键集成的注册表 key 列表(HKCU 用户级,无需 admin)。
+ * Directory\shell  = 右键文件夹本身; %1 = 被点击文件夹的全路径
+ * Directory\Background\shell = 右键文件夹空白处; %V = 当前打开的目录全路径
+ *
+ * 选用 Marina 这个固定 key 名(不带版本/平台后缀);设置开关 off 时 unregister 同名 key。
+ * 改名前 EasyTerm 时代的旧 key 在 main/index.ts 启动期单独清理。
+ */
+const EXPLORER_INTEGRATION_KEYS = [
+  { hive: 'HKCU\\Software\\Classes\\Directory\\shell\\Marina', argToken: '%1' },
+  { hive: 'HKCU\\Software\\Classes\\Directory\\Background\\shell\\Marina', argToken: '%V' },
+] as const;
+
+const EXPLORER_INTEGRATION_MENU_TEXT = '在 Marina 终端中打开';
+
+/**
+ * 旧 EasyTerm 注册表 key (v1.5 改名前可能残留)。
+ * 启动期静默 unregister 一次,避免用户看到两条菜单项。
+ */
+export const LEGACY_EXPLORER_INTEGRATION_KEYS = [
+  'HKCU\\Software\\Classes\\Directory\\shell\\EasyTerm',
+  'HKCU\\Software\\Classes\\Directory\\Background\\shell\\EasyTerm',
+] as const;
 
 /**
  * 候选 shell 路径列表。同 id 的多个候选按数组顺序探测,首次命中即用。
@@ -190,16 +218,72 @@ export class WindowsAdapter implements PlatformAdapter {
     }
   }
 
-  async registerFileManagerIntegration(_appExePath: string): Promise<void> {
-    throw new Error(
-      '[WindowsAdapter] registerFileManagerIntegration not implemented (V1.2)',
-    );
+  /**
+   * 注册 Explorer 右键菜单"在 Marina 终端中打开"。
+   *
+   * 写 HKCU(用户级,无需提升权限)下 4 个键值:
+   *   Directory\shell\Marina            (default) = 菜单文案
+   *   Directory\shell\Marina\command    (default) = "<exe>" --open-here "%1"
+   *   Directory\Background\shell\Marina (default) = 菜单文案
+   *   Directory\Background\shell\Marina\command   = "<exe>" --open-here "%V"
+   *
+   * 调 reg.exe 走 execFile(数组参数),由 Node 处理 Windows quoting,避免
+   * cmd.exe 注入风险。每次 register 前先 unregister 一次,清掉可能残留的
+   * 旧 command(例如 exe 路径变了)。
+   *
+   * Icon 字段暂不写 — build/icon.ico 还没生成,exe 内嵌图标走 Electron 默认。
+   * 后续补 icon 时只需在 register 时多加一条 "/v Icon /d <exe>,0"。
+   */
+  async registerFileManagerIntegration(appExePath: string): Promise<void> {
+    // 先清一遍,确保不会因为旧 command 字段(路径变化)导致脏数据
+    await this.unregisterFileManagerIntegration();
+
+    for (const { hive, argToken } of EXPLORER_INTEGRATION_KEYS) {
+      // 菜单文案写到根 key 的默认值
+      await runReg([
+        'add',
+        hive,
+        '/ve',
+        '/d',
+        EXPLORER_INTEGRATION_MENU_TEXT,
+        '/f',
+      ]);
+      // command 子 key 的默认值 = `"<exe>" --open-here "<%1|%V>"`
+      // 注意:reg.exe 接受的 /d 值字符串里的双引号会原样存入注册表,
+      // execFile 数组参数让 Node 在调用 CreateProcess 时给整段加外层引号。
+      const commandValue = `"${appExePath}" --open-here "${argToken}"`;
+      await runReg([
+        'add',
+        `${hive}\\command`,
+        '/ve',
+        '/d',
+        commandValue,
+        '/f',
+      ]);
+    }
   }
 
+  /**
+   * 启动期清理改名前(EasyTerm)残留的右键菜单注册表项。
+   * 静默失败(不存在视为成功),失败也只是日志,不阻塞启动。
+   * v1.5 改名后保留一两个版本周期即可移除该方法。
+   */
+  async cleanupLegacyExplorerIntegration(): Promise<void> {
+    for (const hive of LEGACY_EXPLORER_INTEGRATION_KEYS) {
+      await runReg(['delete', hive, '/f'], { allowNotFound: true });
+    }
+  }
+
+  /**
+   * 删除 Explorer 右键集成注册表项。
+   *
+   * 不存在(reg.exe exit code 1)视为成功 — 反复 unregister 不应抛错。
+   * 其他错误向上抛,由调用方决定是 warn 还是 toast。
+   */
   async unregisterFileManagerIntegration(): Promise<void> {
-    throw new Error(
-      '[WindowsAdapter] unregisterFileManagerIntegration not implemented (V1.2)',
-    );
+    for (const { hive } of EXPLORER_INTEGRATION_KEYS) {
+      await runReg(['delete', hive, '/f'], { allowNotFound: true });
+    }
   }
 
   /**
@@ -271,4 +355,58 @@ function quoteCmd(s: string): string {
 function quoteBash(s: string): string {
   if (!/[\s"'$`\\&|<>()*?#!]/.test(s)) return s;
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * 调 reg.exe,等待退出。
+ *
+ * 测试 hook:由 `__setRunRegImpl` 注入 mock,生产代码总是真实 execFile。
+ *
+ * @param args reg.exe 参数数组,Node 自己处理 Windows quoting
+ * @param options.allowNotFound true 时把 reg.exe exit code 1(key 不存在)
+ *   视为成功 — unregister 时反复调用不该抛错
+ */
+let runRegImpl: (args: string[]) => Promise<{ stderr: string; code: number }> =
+  defaultRunReg;
+
+async function defaultRunReg(
+  args: string[],
+): Promise<{ stderr: string; code: number }> {
+  try {
+    const { stderr } = await execFileAsync('reg', args, {
+      windowsHide: true,
+      // reg.exe 输出很短,1MB buffer 远远够
+      maxBuffer: 1024 * 1024,
+    });
+    return { stderr, code: 0 };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { code?: number; stderr?: string };
+    return {
+      stderr: e.stderr ?? e.message,
+      code: typeof e.code === 'number' ? e.code : -1,
+    };
+  }
+}
+
+async function runReg(
+  args: string[],
+  options: { allowNotFound?: boolean } = {},
+): Promise<void> {
+  const { stderr, code } = await runRegImpl(args);
+  if (code === 0) return;
+  // reg.exe delete 不存在的 key:code=1 + stderr 含 "找不到" / "cannot find"
+  if (options.allowNotFound && code === 1) return;
+  throw new Error(
+    `[WindowsAdapter] reg.exe ${args.join(' ')} exited code=${code} stderr=${stderr.trim()}`,
+  );
+}
+
+/**
+ * 仅供测试用,生产代码不调。
+ * 传 null 恢复真实 execFile 实现。
+ */
+export function __setRunRegImplForTest(
+  impl: ((args: string[]) => Promise<{ stderr: string; code: number }>) | null,
+): void {
+  runRegImpl = impl ?? defaultRunReg;
 }

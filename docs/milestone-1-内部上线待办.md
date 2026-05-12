@@ -7,6 +7,8 @@
 **起点**:本清单写于 2026-05-11,基于 CP-1~CP-4 已通过 + CP-4 勘误回合已闭环的状态。
 **不包含**:CP-5 开源准备(README 中英 / CONTRIBUTING / CI / GitHub Release)— 那是 Phase 2,daily 用够稳了再做。
 
+**2026-05-12 追加**:Explorer 右键集成("在 Marina 终端中打开")原计划 V1.2,本日提前到 v0.1.0-alpha.1 实装。详见 `docs/explorer-集成-工作记录-20260512.md`。HKCU 注册表写入 + 设置开关 + 行为可选(new-window / recent-window-tab),冷启动 / second-instance 都接通。
+
 ---
 
 ## 0. 总览

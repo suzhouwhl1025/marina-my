@@ -177,7 +177,7 @@ function makeStubSettingsManager(
       selectOnCopy: true,
       terminalRightClick: 'menu',
     },
-    systemIntegration: { explorerContextMenu: false },
+    systemIntegration: { explorerContextMenu: false, explorerOpenIn: 'new-window' },
     advanced: {
       logLevel: 'INFO',
       activeIdleThresholdSeconds: 2,

@@ -157,6 +157,18 @@ describe('validateSettings', () => {
     (bad.behavior as { terminalRightClick: string }).terminalRightClick = 'pop';
     expect(() => validateSettings(bad)).toThrowError(/terminalRightClick/);
   });
+
+  it('systemIntegration.explorerOpenIn 默认 new-window', () => {
+    expect(DEFAULT_SETTINGS.systemIntegration.explorerOpenIn).toBe('new-window');
+  });
+
+  it('systemIntegration.explorerOpenIn 非法 throw', () => {
+    const bad = structuredClone(DEFAULT_SETTINGS);
+    (
+      bad.systemIntegration as { explorerOpenIn: string }
+    ).explorerOpenIn = 'detached';
+    expect(() => validateSettings(bad)).toThrowError(/explorerOpenIn/);
+  });
 });
 
 describe('SettingsManager — initialize', () => {
