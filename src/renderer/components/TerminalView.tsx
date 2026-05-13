@@ -826,11 +826,24 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       if (disposed) return;
       try {
         fitAddon.fit();
-      } catch {
+      } catch (err) {
+        // RSZ-4:fit 抛错原来 silent return,lastCols/Rows 不更新 → 下次
+        // RO 仍会 retry。改 logger.warn 让排查 readline 行宽错位 / TUI
+        // 重绘异常的开发者能看到上下文。
+        console.warn('[TerminalView] fit() failed, will retry on next RO', err);
         return;
       }
       const newCols = term.cols;
       const newRows = term.rows;
+      // XTM-8 / FLK-3:断言尺寸合理,不达不发 IPC。
+      // fit 在容器 layout 未收敛时可能算出 cols=0 / rows=0,xterm 内部
+      // InputHandler 在 0 维度下处理换行 / 光标位置错乱,导致首屏渲染
+      // 像 "窄一条字" 闪过再撑开。20×5 是终端的最小实用阈值
+      // (validateDimensions 在 main 端兜底用 1×1,这里在 renderer 提前 guard
+      //  更严格,等下一轮 RO 拿到稳定 layout 再发)。
+      if (newCols < 20 || newRows < 5) {
+        return;
+      }
       if (newCols === lastCols && newRows === lastRows) return;
       lastCols = newCols;
       lastRows = newRows;
@@ -886,6 +899,21 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     if (!term) return;
     term.options.theme = getXtermTheme(themeId);
   }, [themeId]);
+
+  // FLK-10:session.state='exited' 时 stop 光标闪烁,避免"会话已死但光标
+  // 在闪"误导用户以为还能交互(配合 TYP-1 的 toast,死后输入有可见反馈)。
+  // 状态回到 active/idle 时(实际不会发生,exited 是终态)恢复闪。
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (session.state === 'exited') {
+      term.options.cursorBlink = false;
+      term.options.cursorStyle = 'underline';
+    } else {
+      term.options.cursorBlink = true;
+      term.options.cursorStyle = 'bar';
+    }
+  }, [session.state]);
 
   // 字体 / 字号 / 行高 运行时切换 + 重新 fit
   useEffect(() => {
@@ -1045,16 +1073,52 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   );
 
   // M1-I:Ctrl + 滚轮调节字号 (spec 7.2.2)
+  //
+  // FLK-4:本地立即生效 + trailing 100ms 才广播 SETTINGS_UPDATE。
+  //
+  // 历史:每个 wheel tick 立即发 SETTINGS_UPDATE → main 广播给所有窗口
+  // → 全部 TerminalView 跑 [fontFamily, fontSize, lineHeight] effect →
+  // 全部 re-fit。三窗口五会话场景下单次滚轮触发 15 次 fit 抖动可见。
+  //
+  // 现在:term.options.fontSize 本地立刻改给用户视觉反馈,IPC 走 trailing
+  // debounce — 滚动停 100ms 后才广播一次,跨窗口同步只发生一次。
+  const wheelDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const pendingFontSizeRef = useRef<number | null>(null);
   const handleWheel = useCallback(
     (e: ReactWheelEvent<HTMLDivElement>) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
+      const term = termRef.current;
+      const fit = fitRef.current;
+      const current = pendingFontSizeRef.current ?? fontSize;
       const delta = e.deltaY < 0 ? 1 : -1;
-      const next = Math.max(8, Math.min(24, fontSize + delta));
-      if (next === fontSize) return;
-      void window.api.invoke(COMMAND_CHANNELS.SETTINGS_UPDATE, {
-        partial: { appearance: { terminalFontSize: next } },
-      });
+      const next = Math.max(8, Math.min(24, current + delta));
+      if (next === current) return;
+      pendingFontSizeRef.current = next;
+      // 本地立即生效 — 用户视觉反馈
+      if (term) term.options.fontSize = next;
+      if (fit) {
+        try {
+          fit.fit();
+        } catch {
+          /* ignore */
+        }
+      }
+      // trailing 100ms 才广播,避免跨窗口同步风暴
+      if (wheelDebounceTimerRef.current) {
+        clearTimeout(wheelDebounceTimerRef.current);
+      }
+      wheelDebounceTimerRef.current = setTimeout(() => {
+        wheelDebounceTimerRef.current = null;
+        const settled = pendingFontSizeRef.current;
+        pendingFontSizeRef.current = null;
+        if (settled === null) return;
+        void window.api.invoke(COMMAND_CHANNELS.SETTINGS_UPDATE, {
+          partial: { appearance: { terminalFontSize: settled } },
+        });
+      }, 100);
     },
     [fontSize],
   );
