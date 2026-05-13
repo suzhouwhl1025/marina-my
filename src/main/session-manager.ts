@@ -710,7 +710,16 @@ export class SessionManager extends EventEmitter {
     if (!managed) return { accepted: false, reason: 'session-not-found' };
     if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
-    managed.inputQuietUntil = Date.now() + this.inputQuietMs;
+    // CUR-1:用户按 Enter (\r 或 \n) → 关闭 input quiet 窗口,让紧随的
+    // 真实命令输出立即触发 markActive。否则 200ms 内的真输出被压成
+    // "状态点保持 idle 黄色",直到 200ms 后才变绿 — 用户视角"按 Enter
+    // 后命令延迟一拍才显示在跑"。
+    // 普通按键(非 Enter)仍走原逻辑顺延 quiet 窗口。
+    if (text.includes('\r') || text.includes('\n')) {
+      managed.inputQuietUntil = 0;
+    } else {
+      managed.inputQuietUntil = Date.now() + this.inputQuietMs;
+    }
     // TYP-2:pty.write 在 ConPTY pipe half-closed / 子进程已死但 onExit 还
     // 没到达等 race 情况下会同步抛错。原来无 try/catch → IPC handle 把
     // 异常包装成 promise reject → renderer .catch(console.error) 静默吞,
@@ -871,6 +880,14 @@ export class SessionManager extends EventEmitter {
         now >= managed.inputQuietUntil
       ) {
         this.markActive(managed);
+      } else if (now < managed.startupGraceUntil) {
+        // STM-4:grace 期内有字节流入,虽然跳过 markActive(避免抖动),
+        // 但仍重置 idle timer — 否则 banner 在 1.49s 才结束的极端 case
+        // 下,createSession 起的 idle timer 2s 到点 fire → "刚结束 banner
+        // 就 idle"。重置后 idle timer 顺延,grace 后实际进 idle 的时机
+        // = 最后一条 banner 字节 + activeIdleThresholdSeconds(默认 2s),
+        // 符合用户预期。
+        this.scheduleIdleCheck(managed);
       }
     }
   }
