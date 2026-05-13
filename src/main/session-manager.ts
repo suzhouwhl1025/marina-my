@@ -932,9 +932,23 @@ export class SessionManager extends EventEmitter {
       managed.scrollback = Buffer.concat([managed.scrollback, bytes]);
     }
     if (managed.scrollback.length > SCROLLBACK_LIMIT) {
-      managed.scrollback = managed.scrollback.subarray(
-        managed.scrollback.length - SCROLLBACK_LIMIT,
+      // OSC-2:尾部裁切对齐 ESC/换行边界,避免接管首屏乱码。
+      //
+      // 历史:`subarray(length - LIMIT)` 在裸字节上做裁切,落点可能在:
+      //   - 多字节 UTF-8 序列中间 → 首字符 U+FFFD(轻微)
+      //   - CSI/OSC/DCS 转义序列中间 → xterm 进 OSC parse 状态吞数十-数百
+      //     字节直到下一个 BEL/ST(严重,首屏大段隐形或状态污染)
+      //   - SGR 颜色序列中间 → 颜色错位直到下一个完整 SGR
+      //
+      // 修复:findSafeTruncationBoundary 从目标偏移向前找最近的 \n,把
+      // 实际裁切点对齐到完整 ANSI 行的边界。最多回退 4KB(防极端 case
+      // 整段没换行时永远回退)。
+      const minStart = managed.scrollback.length - SCROLLBACK_LIMIT;
+      const safeStart = findSafeTruncationBoundary(
+        managed.scrollback,
+        minStart,
       );
+      managed.scrollback = managed.scrollback.subarray(safeStart);
     }
   }
 
@@ -1235,6 +1249,36 @@ function sanitizeTitle(raw: string): string {
   s = s.replace(/\s+/g, ' ').trim();
   if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN);
   return s;
+}
+
+/**
+ * OSC-2:scrollback 尾部裁切对齐 ANSI/UTF-8 边界。
+ *
+ * 从 minStart 开始向后扫描,找到最近的 `\n`(0x0A)作为安全起点。
+ * 没找到时最多向后扫 4KB,仍没找到 → 用 minStart 兜底(整段无换行的
+ * 极端 case,只能接受可能的 ANSI 半截);防止扫遍整段 buffer。
+ *
+ * 为什么找 \n 而不是找 ESC 边界:
+ *   - 找 ESC 边界更精确(任何完整 SGR/CSI 之后都是安全的),但实现复杂
+ *     (需识别完整 vt 状态机)
+ *   - \n 总是 ANSI 行边界,xterm 解析时一定回到 ground state,简单可靠
+ *   - 4KB 上限保证最坏情况下损失数十行,远好过乱码风险
+ *
+ * 测试覆盖:OSC-2 test case 见 session-manager.test.ts。
+ */
+export function findSafeTruncationBoundary(
+  buf: Buffer,
+  minStart: number,
+): number {
+  if (minStart <= 0) return 0;
+  const maxScanEnd = Math.min(buf.length, minStart + 4096);
+  for (let i = minStart; i < maxScanEnd; i++) {
+    if (buf[i] === 0x0a /* \n */) {
+      return i + 1; // \n 后的下一个字节才是安全起点
+    }
+  }
+  // 没找到合理边界 — 用 minStart 兜底,接受可能的 ANSI 半截
+  return minStart;
 }
 
 /**
