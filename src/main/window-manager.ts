@@ -25,7 +25,7 @@
  * getByElectronId / getMostRecentlyActive。
  * CP-1 还不需要 session-window 的关系管理,该功能在 CP-3 加入。
  */
-import { BrowserWindow, screen } from 'electron';
+import { BrowserWindow, screen, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -292,6 +292,19 @@ export class WindowManager implements IWindowManager {
         `[WindowManager] preload-error (window ${windowNumber}): preload="${preloadPath}"`,
         error,
       );
+    });
+
+    // OSC-5 / SEC-4:WebLinksAddon + OSC 8 超链接的点击触发 window.open,
+    // Electron 默认拦截。这里装 setWindowOpenHandler 把白名单协议路由到
+    // shell.openExternal 用系统默认浏览器打开。
+    //
+    // 白名单:http / https / mailto。拒绝 file:// / javascript: / chrome: 等
+    // 本地协议(防 OSC 8 注入打开本地文件 / 触发 webview 漏洞)。
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^(https?|mailto):/i.test(url)) {
+        void shell.openExternal(url);
+      }
+      return { action: 'deny' };
     });
 
     for (const handler of this.onCreatedHandlers) {
