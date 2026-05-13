@@ -1089,20 +1089,39 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   );
 
   const handleTerminalDrop = useCallback(
-    (e: ReactDragEvent<HTMLDivElement>) => {
+    async (e: ReactDragEvent<HTMLDivElement>) => {
       e.preventDefault();
       e.stopPropagation();
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
       // file.path 在 Electron 31 上仍由扩展 File API 提供(同 Sidebar 用法);
       // 32+ 才需要切 webUtils.getPathForFile,届时再迁移。
-      const quoted = files
+      const paths = files
         .map((f) => (f as File & { path?: string }).path)
-        .filter((p): p is string => !!p && p.length > 0)
+        .filter((p): p is string => !!p && p.length > 0);
+      if (paths.length === 0) return;
+      // SEC-5:NTFS 允许文件名含 ; & ` 等 shell 元字符,拖进 bash / PowerShell
+      // 会被解释成命令分隔符或子命令。罕见但能让"文件路径 foo;rm -rf ~/x"
+      // 实际执行 rm。检测元字符弹 Modal.confirm 让用户确认。
+      const SHELL_METAS = /[;&`$|<>(){}\\!*?\n\r]/;
+      const dangerousPaths = paths.filter((p) => SHELL_METAS.test(p));
+      if (dangerousPaths.length > 0) {
+        const ok = await modal.confirm({
+          title: '路径包含危险字符',
+          message:
+            '拖入的文件路径含 shell 元字符 (; & ` $ | < > 等)。\n' +
+            '某些 shell 会把这些当成命令分隔符或子命令,导致意外执行。',
+          preview: dangerousPaths.join('\n'),
+          confirmLabel: '强制粘贴',
+          cancelLabel: '取消',
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      const quoted = paths
         // Windows 路径不允许包含 ",所以只需对含空白的路径加双引号即可。
         .map((p) => (/\s/.test(p) ? `"${p}"` : p))
         .join(' ');
-      if (!quoted) return;
       const base64 = encodeStringToBase64(quoted);
       window.api
         .invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
@@ -1115,7 +1134,7 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       // 同一接口,搜索栏可见时自动跳过)。
       focusTerminal(termRef, searchVisibleRef);
     },
-    [session.id],
+    [session.id, modal],
   );
 
   // M1-I:Ctrl + 滚轮调节字号 (spec 7.2.2)
