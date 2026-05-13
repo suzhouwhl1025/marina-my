@@ -221,6 +221,18 @@ export interface Settings {
     confirmOnQuit: boolean;
     selectOnCopy: boolean;
     terminalRightClick: TerminalRightClick;
+    /**
+     * bracketed paste 协议 (fix/robustness-pass-20260513, CPB-P8)。
+     * 启用时 handlePaste 包裹 \x1b[200~ ... \x1b[201~,支持的 shell
+     * (PowerShell 7+, bash 5+, zsh, fish, Claude Code REPL)把粘贴
+     * 内容当 literal,用户可编辑后再 Enter;不再被 shell 立即执行。
+     *
+     * 不支持的 shell(cmd.exe 无 readline / 老版 bash)会把 marker
+     * 显示成 ^[[200~ 字面乱码。建议用 cmd 的用户关闭此项。
+     *
+     * 默认 true 因为 Marina 默认 shell 是 PowerShell,大多数用户用 pwsh。
+     */
+    bracketedPaste: boolean;
   };
 
   systemIntegration: {

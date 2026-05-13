@@ -302,6 +302,7 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   const lineHeight = appState.settings.appearance?.terminalLineHeight ?? 1.2;
   const selectOnCopy = appState.settings.behavior?.selectOnCopy ?? true;
   const rightClickMode = appState.settings.behavior?.terminalRightClick ?? 'menu';
+  const bracketedPaste = appState.settings.behavior?.bracketedPaste ?? true;
 
   // 把"创建期"读到的初始值用 useMemo 锁定 (terminal 创建后只用 mutator 调整),
   // 否则每次 settings 引用变化都会重建 xterm 实例。
@@ -368,32 +369,62 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     try {
       const text = await readClipboardText();
       if (!text) return;
-      // CP-4 勘误 #10:多行粘贴警告。剪贴板含换行 (\r 或 \n) → 弹确认,
-      // 防止意外把整段脚本喂给 shell 触发执行。普通单行粘贴不打扰。
-      // 行数估算:把 \r\n 归一化后按 \n 切。
+
+      // CPB-P8:启用 bracketed paste 协议时,shell 端(PowerShell 7+ /
+      // bash 5+ / zsh / fish / Claude Code REPL 等)把 \x1b[200~..\x1b[201~
+      // 之间的内容当 literal,用户可编辑后再 Enter,不会被立即执行。
+      // 此模式下多行不再需要 confirm 兜底。
       //
-      // CPB-P2:把 window.confirm 换成自绘 Modal — 原生 dialog 关闭后
-      // Chromium 焦点归还行为不可控,自绘 Modal 显式 previousActiveElement
-      // 恢复机制 + handlePaste 末尾 focusTerminal 双重兜底。
-      const normalized = text.replace(/\r\n?/g, '\n');
-      const lineCount = normalized.split('\n').length;
-      if (lineCount > 1) {
+      // 用户禁用 bracketed paste(用 cmd 等不支持 readline 的 shell)时,
+      // 多行粘贴回到原行为:走 confirm 警告。
+
+      // 内嵌 ESC(0x1B)→ 可能是 ANSI 注入(OSC/CSI 改终端状态),弹强警告
+      // confirm。普通粘贴含 ESC 极罕见。bracketed paste 包裹会让 ESC 也
+      // 被 literal 处理,但 modal 显示给用户决定是否真要这么干。
+      const hasEsc = text.indexOf('\x1b') >= 0;
+      if (hasEsc) {
         const preview =
-          normalized.length > 200
-            ? normalized.slice(0, 200) + '…'
-            : normalized;
+          text.length > 200 ? text.slice(0, 200) + '…' : text;
         const ok = await modal.confirm({
-          title: '多行粘贴确认',
+          title: '粘贴内容含转义字符',
           message:
-            `即将粘贴 ${lineCount} 行内容到终端。\n` +
-            '多行内容可能被 shell 当成多条命令立即执行。',
+            '剪贴板内容包含 ESC 控制字符(可能改终端状态 / 清屏 / 改标题等)。\n' +
+            '常见于从恶意网页或受感染的剪贴板内容。继续粘贴?',
           preview,
-          confirmLabel: '粘贴',
+          confirmLabel: '强制粘贴',
           cancelLabel: '取消',
+          danger: true,
         });
         if (!ok) return;
       }
-      const base64 = encodeStringToBase64(text);
+
+      // bracketed paste 禁用 + 多行 → 走旧 confirm 兜底
+      if (!bracketedPaste) {
+        const normalized = text.replace(/\r\n?/g, '\n');
+        const lineCount = normalized.split('\n').length;
+        if (lineCount > 1) {
+          const preview =
+            normalized.length > 200
+              ? normalized.slice(0, 200) + '…'
+              : normalized;
+          const ok = await modal.confirm({
+            title: '多行粘贴确认',
+            message:
+              `即将粘贴 ${lineCount} 行内容到终端。\n` +
+              '多行内容可能被 shell 当成多条命令立即执行。\n' +
+              '建议在"设置 → 行为"启用 bracketed paste 让支持的 shell 把粘贴当 literal。',
+            preview,
+            confirmLabel: '粘贴',
+            cancelLabel: '取消',
+          });
+          if (!ok) return;
+        }
+      }
+
+      // bracketed paste 包裹(可通过 settings.behavior.bracketedPaste 关闭,
+      // cmd.exe 等不支持 readline 的 shell 用户应当关闭以免看到字面 marker)
+      const payload = bracketedPaste ? `\x1b[200~${text}\x1b[201~` : text;
+      const base64 = encodeStringToBase64(payload);
       await window.api.invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
         sessionId: session.id,
         data: base64,
@@ -401,11 +432,10 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     } catch (err) {
       console.warn('[TerminalView] paste failed', err);
     } finally {
-      // CPB-P1:粘贴完成无论成功失败都归还焦点 — 修复用户主诉"粘贴后
-      // 打不进字必须关窗口"。Modal close 内部也会归还,这里是双保险。
+      // CPB-P1:粘贴完成无论成功失败都归还焦点。
       focusTerminal(termRef, searchVisibleRef);
     }
-  }, [session.id, modal]);
+  }, [session.id, modal, bracketedPaste]);
 
   const handleClear = useCallback(() => {
     const term = termRef.current;
