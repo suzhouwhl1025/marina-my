@@ -102,6 +102,22 @@ export function MainPane(): JSX.Element {
   const fontSize = state.settings.appearance?.terminalFontSize ?? 13;
   const lineHeight = state.settings.appearance?.terminalLineHeight ?? 1.2;
 
+  // FOC-6:selectedSessionId 变化时(托盘点击 / 跨窗口聚焦 /
+  // evt:window:focus-requested / view/select-session 等任意路径)
+  // 把焦点送到新 session 的 xterm。
+  //
+  // 与 A1/A2 的关系:
+  // - A1 在 TerminalView mount 时 term.focus() — 覆盖新建 + 切 session(key 重建)
+  // - A2 在 Tab / Chrome / Template button click 末尾 focusTerminalDom — 显式
+  // - A4 此 effect 兜底所有 dispatch 路径(reducer 改 selectedSessionId 但
+  //   没人显式 focus 的场景,如 sessions/created reducer 自动 select)
+  //
+  // displayable 为 null(EmptyPathState)时不送焦点 — xterm 不存在,
+  // focusTerminalDom 内部 querySelector 会 no-op 安全。
+  useEffect(() => {
+    if (state.selectedSessionId) focusTerminalDom();
+  }, [state.selectedSessionId]);
+
   // 勘误第二轮:移除"拖文件夹到主区 → 新建终端"自定义。原 M1-B 的 onDragOver
   // preventDefault 把整个 main-pane 变成 droptarget,xterm 元素接不到 drop
   // 事件,Windows Terminal-风格的"拖文件到终端 → 粘贴路径"默认行为被吃掉。
