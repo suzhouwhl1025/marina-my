@@ -104,6 +104,28 @@ const RESIZE_QUIET_MS = 500;
 const STARTUP_GRACE_MS = 1500;
 
 /**
+ * Input echo quiet 窗口(抖动源 C/E)。
+ *
+ * 解决:用户在终端里敲键 → cooked mode shell echo 字节回来(或 raw mode TUI
+ * 触发整屏重绘)→ handlePtyData 收到字节 → markActive → idle 状态点闪绿。
+ * 用户视角:**我只是在敲键,不是程序在跑**,这个闪绿是噪音。
+ *
+ * 修复:sendInput 调用时把 inputQuietUntil = now + INPUT_QUIET_MS。窗口内
+ * PTY 出来的字节认为是按键自己的回声 / 重绘,**不触发 markActive**(但仍
+ * 写 scrollback、仍 emit sessionOutput,xterm 视觉上要正常看到回显)。
+ *
+ * 200ms 的来源:本机 echo 通常几毫秒到几十毫秒;200ms 给 ConPTY + raw mode
+ * TUI 重绘留足余量,又短到不会把"按 Enter 后立即开始的真实输出"全吞掉。
+ *
+ * 连续敲键时每次都顺延窗口 → 整段打字过程都不变绿:这是想要的语义,
+ * 因为打字阶段终端语义上是 prompt/idle 而非 active。命令真的开始跑、且
+ * 超过 200ms 还在输出 → markActive 正常触发。50ms 跑完的"快命令"
+ * (如 `ls`)全程在窗口内 → 状态不闪 → 可接受,精确的命令边界
+ * 等 OSC 133 接入后才有解。
+ */
+const INPUT_QUIET_MS = 200;
+
+/**
  * spawn 工厂,与 node-pty 的 spawn 兼容。测试中用 mock 替换。
  */
 export type PtySpawnFn = (
@@ -217,6 +239,18 @@ interface ManagedSession {
   resizeQuietUntil: number;
   /** M1-I:启动期 grace 截止 ts (createSession 时 = now + STARTUP_GRACE_MS) */
   startupGraceUntil: number;
+  /**
+   * Input echo quiet 窗口截止 ts。sendInput 时 = now + INPUT_QUIET_MS;
+   * handlePtyData 在该窗口内不触发 markActive(详见 INPUT_QUIET_MS 注释)。
+   * 0 = 无窗口 (从未 sendInput)。
+   */
+  inputQuietUntil: number;
+  /**
+   * 用户是否已手动改过 displayName。一旦为 true,后续 OSC 0/1/2 标题事件
+   * 不再覆盖 displayName — 手动改名优先级永久高于 shell 标题(Claude Code、
+   * Windows Terminal hostname 等会持续刷标题,不锁住会冲掉用户的命名)。
+   */
+  manuallyRenamed: boolean;
 }
 
 export interface CreateSessionInput {
@@ -225,6 +259,13 @@ export interface CreateSessionInput {
   ownerWindowId: string;
   cols: number;
   rows: number;
+  /**
+   * 勘误第二轮 #3:可选 shell id 覆盖。给定时跳过 pickShell 的 settings 兜底,
+   * 直接用此 id 命中 detectShells 列表里的 shell。EmptyPathState 的"检测到的
+   * Shell"按钮通过此字段让用户对单 session 指定 shell。
+   * 命中失败 (id 不存在) 时回退到 pickShell 默认逻辑。
+   */
+  shellIdOverride?: string;
 }
 
 export class SessionManagerError extends Error {
@@ -264,6 +305,11 @@ export interface SessionManagerOptions {
    */
   startupGraceMs?: number;
   /**
+   * Input echo quiet 时长 (ms)。生产 200;测试可传 0 跳过窗口逻辑。
+   * 详见 INPUT_QUIET_MS。
+   */
+  inputQuietMs?: number;
+  /**
    * prelease 前勘误 #18:createSession 前对 cwd 做 fs.existsSync + isDirectory
    * 校验,在非常态路径(被删/编码异常)上提前抛 CwdNotAccessible,避免 ConPTY
    * 直接报 "error code: 267"。
@@ -281,6 +327,7 @@ export class SessionManager extends EventEmitter {
   private readonly hookFileResolver: (shellId: string) => string;
   private readonly resizeQuietMs: number;
   private readonly startupGraceMs: number;
+  private readonly inputQuietMs: number;
   private readonly skipCwdValidation: boolean;
 
   /**
@@ -305,6 +352,7 @@ export class SessionManager extends EventEmitter {
     this.hookFileResolver = options.hookFileResolver ?? defaultHookFileResolver;
     this.resizeQuietMs = options.resizeQuietMs ?? RESIZE_QUIET_MS;
     this.startupGraceMs = options.startupGraceMs ?? STARTUP_GRACE_MS;
+    this.inputQuietMs = options.inputQuietMs ?? INPUT_QUIET_MS;
     this.skipCwdValidation = options.skipCwdValidation ?? false;
   }
 
@@ -329,7 +377,7 @@ export class SessionManager extends EventEmitter {
           '请确保至少一个 shell 在 %ProgramFiles% 或 %SystemRoot%\\System32 下。',
       );
     }
-    const shell = pickShell(shells, this.settingsManager.get());
+    const shell = pickShell(shells, this.settingsManager.get(), input.shellIdOverride);
     const cwd = input.pathId || homedir();
 
     // cwd 预校验:不存在 / 不是目录 → 直接抛 CwdNotAccessible,带友好消息。
@@ -426,6 +474,8 @@ export class SessionManager extends EventEmitter {
       oscReceived: false,
       resizeQuietUntil: 0,
       startupGraceUntil: Date.now() + this.startupGraceMs,
+      inputQuietUntil: 0,
+      manuallyRenamed: false,
     };
     this.sessions.set(sessionId, managed);
 
@@ -465,6 +515,10 @@ export class SessionManager extends EventEmitter {
   /**
    * M1-C:重命名 session 的 displayName。空字符串拒绝。幂等(同名无副作用)。
    * 不存在的 sessionId 静默(与 sendInput / resize 一致的"竞态时静默"语义)。
+   *
+   * 调用后 manuallyRenamed 永久置 true,后续 OSC 0/1/2 标题事件不再覆盖
+   * 此 session 的 displayName(见 handleOscTitle)。即使新名 = 旧名也置位
+   * — 用户明确说"我要这个名字"就是接管命名权。
    */
   renameSession(sessionId: string, newDisplayName: string): void {
     const managed = this.sessions.get(sessionId);
@@ -476,6 +530,7 @@ export class SessionManager extends EventEmitter {
         `[SessionManager] rename: 新名不能为空 (sessionId="${sessionId}")`,
       );
     }
+    managed.manuallyRenamed = true;
     if (managed.info.displayName === trimmed) return;
     managed.info.displayName = trimmed;
     this.emitStateChanged(managed, { displayName: trimmed });
@@ -602,11 +657,16 @@ export class SessionManager extends EventEmitter {
   /**
    * 把 base64 数据写到 PTY stdin。session 不存在 / 已 exited 时静默
    * (cp1 修过的同样关闭/HMR 竞态)。
+   *
+   * 顺手开 input echo quiet 窗口(抖动源 C/E):窗口期内 PTY 出来的字节
+   * 视作按键自己的 echo / TUI 重绘回声,不触发 markActive,避免"敲键自己
+   * 点亮状态点"。详见 INPUT_QUIET_MS。
    */
   sendInput(sessionId: string, base64Data: string): void {
     const managed = this.sessions.get(sessionId);
     if (!managed || !managed.pty) return; // 静默
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
+    managed.inputQuietUntil = Date.now() + this.inputQuietMs;
     managed.pty.write(text);
   }
 
@@ -621,13 +681,18 @@ export class SessionManager extends EventEmitter {
     const managed = this.sessions.get(sessionId);
     if (!managed || !managed.pty) return;
     const dims = validateDimensions(cols, rows);
+    // 勘误第二轮:即便 no-op 也开 quiet 窗口。原因 — Claude Code 这类 TUI 在
+    // 终端被"重新显示"时会自发整屏重绘(切 tab 后用户回到它,xterm 重挂
+    // → claude code 收到任意刺激 → 重绘 → markActive → idle tab 闪绿)。
+    // TerminalView mount 后总会调一次 resize(即使 dims 与 spawn 时相同),
+    // 这就是"我刚被显示"信号。原来的 no-op short-circuit 把该信号丢掉了,
+    // 导致 idle session 闪绿。这里改为先开 quiet 窗口、再决定是否真 resize。
+    managed.resizeQuietUntil = Date.now() + this.resizeQuietMs;
     if (dims.cols === managed.info.cols && dims.rows === managed.info.rows) {
-      // 同尺寸 no-op,不开 quiet 窗口 (避免有人无谓地反复调 resize 反而压制活跃)
       return;
     }
     managed.info.cols = dims.cols;
     managed.info.rows = dims.rows;
-    managed.resizeQuietUntil = Date.now() + this.resizeQuietMs;
     try {
       managed.pty.resize(dims.cols, dims.rows);
     } catch (err) {
@@ -682,10 +747,12 @@ export class SessionManager extends EventEmitter {
     const bytes = Buffer.from(data, 'utf8');
     const parsed = managed.parser.parse(bytes);
 
-    // 处理 OSC 1337 事件
+    // 处理 OSC 事件
     for (const ev of parsed.events) {
       if (ev.kind === 'cwd') {
         this.handleOsc1337Cwd(managed, ev.value);
+      } else if (ev.kind === 'title') {
+        this.handleOscTitle(managed, ev.value);
       }
       // unknown 事件目前忽略 (V1.1 加 RemoteHost 等)
     }
@@ -705,15 +772,22 @@ export class SessionManager extends EventEmitter {
       this.emit('sessionOutput', payload);
 
       // 状态机:有输出 → active,重置 idle 计时器。
-      // 跳过 markActive 的两种 quiet 窗口:
-      //   - resize quiet (CP-3 勘误 #3 v2):scrollback / sessionOutput 仍正常,
-      //     只跳过 markActive,避免 ConPTY/SIGWINCH 重绘字节让 tab 闪绿
+      // 跳过 markActive 的三种 quiet 窗口(scrollback / sessionOutput 仍正常,
+      // 只跳过 markActive):
+      //   - resize quiet (CP-3 勘误 #3 v2):避免 ConPTY/SIGWINCH 重绘字节让
+      //     tab 闪绿;TerminalView mount 时也无条件触发此窗口
       //   - startup grace (M1-I):session 初创 1.5s 内的 banner/prompt 输出
       //     视作"应有的启动声",不让它"创建 → 立即 active → 1.5s 后 idle"
       //     这套抖动闪过去;创建时 state='active' + scheduleIdleCheck 已起好,
       //     grace 内 markActive 跳过,grace 结束后正常变 idle
+      //   - input echo quiet (抖动源 C/E):压住 sendInput 后 200ms 内的 echo /
+      //     TUI 重绘字节,避免"敲键自己点亮状态点"
       const now = Date.now();
-      if (now >= managed.resizeQuietUntil && now >= managed.startupGraceUntil) {
+      if (
+        now >= managed.resizeQuietUntil &&
+        now >= managed.startupGraceUntil &&
+        now >= managed.inputQuietUntil
+      ) {
         this.markActive(managed);
       }
     }
@@ -847,6 +921,28 @@ export class SessionManager extends EventEmitter {
     this.emitStateChanged(managed, { currentCwd: next });
   }
 
+  /**
+   * 处理 OSC 0/1/2 标题事件 — 用 shell / Claude Code 报告的标题更新
+   * session.displayName。
+   *
+   * 规则:
+   * - manuallyRenamed=true → 跳过,用户手动改名优先(见 renameSession)
+   * - 清掉控制字符(\r \n \t 等):标题如果含换行会把 sidebar 排版打乱;
+   *   shell 实践里也极少把控制字符放进标题(Claude Code 用空格连接段)
+   * - 长度上限 100:与 path-manager 收藏改名上限一致;过长 sidebar 显示不下,
+   *   也防恶意 OSC 注入超长字符串
+   * - 去前后空白后为空 → 忽略(有的 shell 启动期会发空标题清屏,不动当前名)
+   * - 与现有 displayName 相同 → no-op,不发广播
+   */
+  private handleOscTitle(managed: ManagedSession, rawTitle: string): void {
+    if (managed.manuallyRenamed) return;
+    const cleaned = sanitizeTitle(rawTitle);
+    if (!cleaned) return;
+    if (cleaned === managed.info.displayName) return;
+    managed.info.displayName = cleaned;
+    this.emitStateChanged(managed, { displayName: cleaned });
+  }
+
   private startCwdPolling(managed: ManagedSession): void {
     if (managed.cwdPollTimer) return; // 已在跑
     managed.cwdPollTimer = setInterval(() => {
@@ -940,10 +1036,23 @@ export class SessionManager extends EventEmitter {
 }
 
 /**
- * 选 shell:settings.shell.defaultShellId 优先;否则数组第一个 (探测顺序
- * 已是 pwsh > powershell > cmd > git-bash)。
+ * 选 shell:
+ *   1. override (来自 createSession 入参 — UI 显式选择,优先级最高)
+ *   2. settings.shell.defaultShellId
+ *   3. 数组第一个 (探测顺序已是 pwsh > powershell > cmd > git-bash)
+ *
+ * override 命中失败 (id 不在 detectShells 结果里) 时回退到 settings 兜底,
+ * 不抛错 — 给用户的视觉效果是"用默认 shell 启动",比报错更友好。
  */
-function pickShell(shells: ShellInfo[], settings: Settings): ShellInfo {
+function pickShell(
+  shells: ShellInfo[],
+  settings: Settings,
+  override?: string,
+): ShellInfo {
+  if (override) {
+    const found = shells.find((s) => s.id === override);
+    if (found) return found;
+  }
   const preferred = settings.shell.defaultShellId;
   if (preferred) {
     const found = shells.find((s) => s.id === preferred);
@@ -960,6 +1069,23 @@ function pickShell(shells: ShellInfo[], settings: Settings): ShellInfo {
 function pickDisplayName(template: Template, shell: ShellInfo): string {
   if (template.command) return template.name;
   return inferDisplayName(shell.executablePath);
+}
+
+/**
+ * OSC 0/1/2 标题规范化:控制字符替成空格、合并连续空格、trim、截到 100 字符。
+ * 空串返回 ''(调用方据此跳过)。
+ */
+const TITLE_MAX_LEN = 100;
+function sanitizeTitle(raw: string): string {
+  // 把 \r \n \t \v \f 与其他 C0 控制字符(<0x20)替为空格;DEL (0x7F) 同处理
+  let s = '';
+  for (const ch of raw) {
+    const code = ch.codePointAt(0)!;
+    s += code < 0x20 || code === 0x7f ? ' ' : ch;
+  }
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN);
+  return s;
 }
 
 /**

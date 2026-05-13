@@ -177,7 +177,7 @@ function makeStubSettingsManager(
       selectOnCopy: true,
       terminalRightClick: 'menu',
     },
-    systemIntegration: { explorerContextMenu: false, explorerOpenIn: 'new-window' },
+    systemIntegration: { explorerOpenIn: 'new-window' },
     advanced: {
       logLevel: 'INFO',
       activeIdleThresholdSeconds: 2,
@@ -233,6 +233,8 @@ function makeManager(
     resizeQuietMs?: number;
     /** M1-I:默认 0 — 同上,测试默认跳过启动期 grace,markActive 立即生效 */
     startupGraceMs?: number;
+    /** 抖动源 C/E:默认 0 — 测试不走 input echo quiet 窗口 */
+    inputQuietMs?: number;
   } = {},
 ): {
   mgr: SessionManager;
@@ -250,6 +252,7 @@ function makeManager(
     hookFileResolver: () => 'C:\\fake\\hook.ps1',
     resizeQuietMs: opts.resizeQuietMs ?? 0,
     startupGraceMs: opts.startupGraceMs ?? 0,
+    inputQuietMs: opts.inputQuietMs ?? 0,
     skipCwdValidation: true,
   });
   return { mgr, win, path };
@@ -462,7 +465,12 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
     expect(mgr.get(info.id)?.state).toBe('active');
   });
 
-  it('同尺寸 resize 不开 quiet 窗口 (避免无谓压制活跃)', async () => {
+  it('同尺寸 resize 也开 quiet 窗口 (勘误第二轮 #9:TerminalView mount 信号)', async () => {
+    // 行为变更原因:Claude Code / 其他 TUI 在终端"重新被显示"时会自发整屏
+    // 重绘(切 tab → xterm 重挂 → child 收到刺激 → 重绘 → markActive)。
+    // TerminalView mount 后总会调一次 resize 即使 dims 没变,这是"我刚被显示"
+    // 信号。原同尺寸 short-circuit 把该信号丢了,导致 idle session 闪绿。
+    // 现在:任何 resize 调用(含 no-op)都打开 quiet 窗口。
     const settings = makeStubSettingsManager({ activeIdleThresholdSeconds: 1 });
     const { mgr } = makeManager({ settings, resizeQuietMs: 500 });
     const info = await mgr.createSession({
@@ -477,9 +485,73 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
     vi.advanceTimersByTime(1100);
     expect(mgr.get(info.id)?.state).toBe('idle');
 
-    mgr.resize(info.id, 80, 24); // 与当前尺寸完全一致
-    fp.emitData('user types');
-    // 同尺寸不开窗口,所以这次输出应该触发 markActive
+    mgr.resize(info.id, 80, 24); // 与当前尺寸完全一致 (TerminalView mount 信号)
+    fp.emitData('reshow burst'); // 同 mount 触发的 ConPTY/TUI 重绘字节
+    // quiet 窗口内不 markActive,session 仍是 idle
+    expect(mgr.get(info.id)?.state).toBe('idle');
+
+    // quiet 窗口过后真实用户活动 → 正常变 active
+    vi.advanceTimersByTime(600);
+    fp.emitData('真实用户活动');
+    expect(mgr.get(info.id)?.state).toBe('active');
+  });
+
+  it('sendInput 后 input quiet 窗口内 PTY 字节不触发 markActive (抖动源 C/E)', async () => {
+    // 行为目的:用户敲键 → cooked mode shell echo / raw mode TUI 重绘的字节
+    // 不应把 idle dot 点亮 — 用户视角"我在打字,不是程序在跑"。
+    const settings = makeStubSettingsManager({ activeIdleThresholdSeconds: 1 });
+    const { mgr } = makeManager({ settings, inputQuietMs: 200 });
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    // 先让 session 进入 idle
+    fp.emitData('hi');
+    vi.advanceTimersByTime(1100);
+    expect(mgr.get(info.id)?.state).toBe('idle');
+
+    // 模拟用户敲一个键 → 主进程 sendInput → PTY echo 回字节
+    const base64 = Buffer.from('a', 'utf8').toString('base64');
+    mgr.sendInput(info.id, base64);
+    fp.emitData('a'); // echo
+    // input quiet 窗口内不 markActive,session 仍是 idle
+    expect(mgr.get(info.id)?.state).toBe('idle');
+
+    // 连续敲键(每次都顺延窗口) → 整段打字过程仍是 idle
+    vi.advanceTimersByTime(100);
+    mgr.sendInput(info.id, Buffer.from('b', 'utf8').toString('base64'));
+    fp.emitData('b');
+    vi.advanceTimersByTime(100);
+    mgr.sendInput(info.id, Buffer.from('c', 'utf8').toString('base64'));
+    fp.emitData('c');
+    expect(mgr.get(info.id)?.state).toBe('idle');
+  });
+
+  it('sendInput 后超过 input quiet 窗口,真实命令输出正常触发 markActive', async () => {
+    const settings = makeStubSettingsManager({ activeIdleThresholdSeconds: 1 });
+    const { mgr } = makeManager({ settings, inputQuietMs: 200 });
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('hi');
+    vi.advanceTimersByTime(1100);
+    expect(mgr.get(info.id)?.state).toBe('idle');
+
+    // 用户按 Enter
+    mgr.sendInput(info.id, Buffer.from('\r', 'utf8').toString('base64'));
+    // 推进超过 input quiet 窗口
+    vi.advanceTimersByTime(250);
+    // 命令真的开始输出 (≥ 200ms 后) → markActive 正常触发
+    fp.emitData('command output...');
     expect(mgr.get(info.id)?.state).toBe('active');
   });
 
@@ -673,6 +745,119 @@ describe('SessionManager — OSC 1337 cwd 跟踪 (ADR-008)', () => {
     expect(cwdImpl).toHaveBeenCalled();
     const after = mgr.get(info.id)!;
     expect(after.currentCwd.toLowerCase()).toBe('c:\\polled');
+  });
+});
+
+describe('SessionManager — OSC 0/1/2 标题 (displayName 自动跟随)', () => {
+  it('收到 OSC 0 → displayName 更新 + state change 广播', async () => {
+    const { mgr } = makeManager();
+    const stateChanges: { displayName?: string }[] = [];
+    mgr.on('sessionStateChanged', (e: { changes: { displayName?: string } }) =>
+      stateChanges.push(e.changes),
+    );
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;✻ Claude · ~/p (working…)\x07');
+
+    const after = mgr.get(info.id)!;
+    expect(after.displayName).toBe('✻ Claude · ~/p (working…)');
+    expect(stateChanges.find((c) => c.displayName !== undefined)).toEqual({
+      displayName: '✻ Claude · ~/p (working…)',
+    });
+  });
+
+  it('OSC 0 标题不进 passthrough(不会在终端里显示乱码)', async () => {
+    const { mgr } = makeManager();
+    let receivedOutput = '';
+    mgr.on('sessionOutput', (e: { data: string }) => {
+      receivedOutput += Buffer.from(e.data, 'base64').toString('utf8');
+    });
+    await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('A\x1b]0;hello\x07B');
+    expect(receivedOutput).toBe('AB');
+  });
+
+  it('manuallyRenamed 后 OSC 标题不再覆盖 displayName', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    mgr.renameSession(info.id, 'My Pinned Name');
+    expect(mgr.get(info.id)!.displayName).toBe('My Pinned Name');
+
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;Should Be Ignored\x07');
+    expect(mgr.get(info.id)!.displayName).toBe('My Pinned Name');
+  });
+
+  it('OSC 标题里 \\n / \\t 被替成空格,过长截到 100', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;a\nb\tc\x07');
+    expect(mgr.get(info.id)!.displayName).toBe('a b c');
+
+    const long = 'X'.repeat(200);
+    fp.emitData(`\x1b]0;${long}\x07`);
+    expect(mgr.get(info.id)!.displayName).toBe('X'.repeat(100));
+  });
+
+  it('空标题(全空白)被忽略,保留旧 displayName', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const original = info.displayName;
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;   \x07');
+    expect(mgr.get(info.id)!.displayName).toBe(original);
+  });
+
+  it('相同 title 不重复广播 stateChanged', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;Same\x07');
+    const changesAfterFirst: { displayName?: string }[] = [];
+    mgr.on('sessionStateChanged', (e: { changes: { displayName?: string } }) =>
+      changesAfterFirst.push(e.changes),
+    );
+    fp.emitData('\x1b]0;Same\x07');
+    expect(changesAfterFirst.filter((c) => c.displayName !== undefined)).toEqual([]);
+    expect(mgr.get(info.id)!.displayName).toBe('Same');
   });
 });
 
@@ -901,10 +1086,42 @@ describe('Osc1337Parser', () => {
     expect(r.events).toEqual([{ kind: 'cwd', value: '/y' }]);
   });
 
-  it('其他 OSC (例如 OSC 0 设置 title) 透传不解析', () => {
+  it('OSC 0 → title 事件 + 从 passthrough 剥离', () => {
     const p = new Osc1337Parser();
     const r = p.parse(Buffer.from('\x1b]0;hello\x07'));
-    expect(r.passthrough).toEqual(Buffer.from('\x1b]0;hello\x07'));
+    expect(r.passthrough.length).toBe(0);
+    expect(r.events).toEqual([{ kind: 'title', value: 'hello' }]);
+  });
+
+  it('OSC 2 (window title only) 等价 OSC 0', () => {
+    const p = new Osc1337Parser();
+    const r = p.parse(Buffer.from('\x1b]2;just window title\x07'));
+    expect(r.passthrough.length).toBe(0);
+    expect(r.events).toEqual([{ kind: 'title', value: 'just window title' }]);
+  });
+
+  it('OSC 1 (icon name only) 也按 title 处理', () => {
+    const p = new Osc1337Parser();
+    const r = p.parse(Buffer.from('\x1b]1;icon\x07'));
+    expect(r.passthrough.length).toBe(0);
+    expect(r.events).toEqual([{ kind: 'title', value: 'icon' }]);
+  });
+
+  it('OSC 10 (前景色) 不被误判为 title — 仍然透传', () => {
+    // OSC 10 / 11 / 12 是颜色查询/设置,以 1/2 开头但第二字节是数字而非 ';'。
+    // 我们严格要求第二字节 ';',防止误吞色彩协议。
+    const p = new Osc1337Parser();
+    const seq = Buffer.from('\x1b]10;?\x07');
+    const r = p.parse(seq);
+    expect(r.passthrough).toEqual(seq);
+    expect(r.events).toEqual([]);
+  });
+
+  it('OSC 8 (超链接) 不被识别为 title — 仍然透传', () => {
+    const p = new Osc1337Parser();
+    const seq = Buffer.from('\x1b]8;;https://example.com\x07link\x1b]8;;\x07');
+    const r = p.parse(seq);
+    expect(r.passthrough).toEqual(seq);
     expect(r.events).toEqual([]);
   });
 

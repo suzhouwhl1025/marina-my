@@ -1,21 +1,24 @@
 /**
  * @file src/main/osc1337-parser.ts
- * @purpose 从 PTY 字节流中识别并提取 OSC 1337 序列 (iTerm2 扩展协议),
- *   提取 CurrentDir 等元数据。残留字节透明转发给 owner renderer。
+ * @purpose 从 PTY 字节流中识别并提取多种 OSC 序列:
+ *   - OSC 1337 (iTerm2):CurrentDir → cwd 事件
+ *   - OSC 0 / 1 / 2 (XTerm 标题):set icon/window title → title 事件
+ *     (Claude Code、Windows Terminal hostname 提示等都走这套)
+ *   残留字节透明转发给 owner renderer。
  *
  * @关键设计:
  * - 增量解析:PTY 数据流可能在任意位置被切分,序列可能跨多次 onData 到达
  * - 解析器对每个 session 独立持有 stash buffer,合并未完结的字节
- * - **不损耗任何字节流**:OSC 序列被识别后从输出中剥离,但所有非 OSC 字节
+ * - **不损耗任何字节流**:已识别 OSC 序列从输出中剥离,但所有非 OSC 字节
  *   1:1 输出。这样 xterm.js 不会渲染出 OSC 序列的乱码字符,同时也不丢失
  *   实际的 ANSI 颜色 / 控制序列
- * - 当前只识别 OSC 1337;其他 OSC (例如 OSC 0/2 设置 title) 透传
+ * - 当前识别 OSC 0/1/2/1337;其余 OSC (例如 OSC 8 超链接) 整段透传给 xterm
  * - 序列终止符接受 BEL (\x07) 与 ST (ESC \\,即 \x1b\x5c) 两种
  *
  * @对应文档章节: 软件定义书.md 5.1.8、ADR-003、ADR-008
  *
- * @AGENTS.md 5.3 必测: OSC 1337 序列解析 (各种边界:跨包、夹在 ANSI 中、
- *   超长 stash、未完结永远等不到 ST)
+ * @AGENTS.md 5.3 必测: OSC 序列解析 (各种边界:跨包、夹在 ANSI 中、
+ *   超长 stash、未完结永远等不到 ST、OSC 0/2 title 事件)
  */
 
 /**
@@ -29,11 +32,17 @@ export interface OscParseResult {
 }
 
 /**
- * OSC 1337 事件 (iTerm2 协议子集)。当前只识别 CurrentDir 与 RemoteHost。
- * 其他 key/value 直接 dropped (留接口便于将来扩展)。
+ * 解析器识别的 OSC 事件:
+ * - `cwd`:OSC 1337 CurrentDir=<path> (iTerm2 协议)
+ * - `title`:OSC 0/1/2 设置窗口/图标标题 (XTerm)。Claude Code 用 OSC 0 报告
+ *   "✻ Claude · ~/project (working…)" 这类状态;OSC 1=icon only,OSC 2=
+ *   window title only。三者业务上等价(都是给"session 显示名"用的),
+ *   parser 不区分,统一抛 title 事件
+ * - `unknown`:OSC 1337 中未知 key (例如 RemoteHost)。raw 保留供调试
  */
 export type Osc1337Event =
   | { kind: 'cwd'; value: string }
+  | { kind: 'title'; value: string }
   | { kind: 'unknown'; raw: string };
 
 /**
@@ -126,14 +135,20 @@ export class Osc1337Parser {
       }
       // OSC 完整: ESC ] payload TERM
       const payload = input.subarray(escIdx + 2, terminatorInfo.payloadEnd);
+      const titleSeq = parseTitleOscPayload(payload);
       const isOsc1337 =
         payload.length >= 5 && payload.subarray(0, 5).equals(Buffer.from('1337;'));
       if (isOsc1337) {
         const argText = payload.subarray(5).toString('utf8');
         events.push(parseOsc1337Arg(argText));
         // OSC 1337 整段从输出中剥离,不进 passthrough
+      } else if (titleSeq) {
+        // OSC 0/1/2 设置标题。剥离同 OSC 1337 — xterm.js 即使收到也只是把
+        // 它存到 term.options.title 没人读;主进程会把这个 title 反映到
+        // session.displayName,sidebar / tab 会同步更新。
+        events.push({ kind: 'title', value: titleSeq });
       } else {
-        // 其他 OSC 透传 (整段含起始 ESC ] 与终止符)
+        // 其他 OSC (例如 OSC 8 超链接) 透传给 xterm,整段含起始 ESC ] 与终止符
         passthroughChunks.push(input.subarray(escIdx, terminatorInfo.afterEnd));
       }
       cursor = terminatorInfo.afterEnd;
@@ -190,6 +205,23 @@ function findOscTerminator(
     }
   }
   return null;
+}
+
+/**
+ * 如果 payload 是 OSC 0/1/2 (设置标题) 的内容,返回标题字符串;否则返回 null。
+ *
+ * 形式:`Ps;Pt` 其中 Ps∈{0,1,2},Pt 是标题文本。
+ * 注意 OSC 0/1/2 不要跟 OSC 10/11/12 (颜色) 混了 — 这些以 1/2 开头,但
+ * 第二字节是另一个数字,而不是 ';'。所以严格要求第二字节就是 ';'。
+ */
+function parseTitleOscPayload(payload: Buffer): string | null {
+  if (payload.length < 2) return null;
+  const ps = payload[0]!;
+  if (ps !== 0x30 /* '0' */ && ps !== 0x31 /* '1' */ && ps !== 0x32 /* '2' */) {
+    return null;
+  }
+  if (payload[1] !== 0x3b /* ';' */) return null;
+  return payload.subarray(2).toString('utf8');
 }
 
 /**
