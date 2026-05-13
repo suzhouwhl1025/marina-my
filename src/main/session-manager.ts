@@ -1235,16 +1235,36 @@ function pickDisplayName(template: Template, shell: ShellInfo): string {
 }
 
 /**
- * OSC 0/1/2 标题规范化:控制字符替成空格、合并连续空格、trim、截到 100 字符。
+ * OSC 0/1/2 标题规范化:
+ *   - 控制字符(C0 + DEL)替成空格
+ *   - OSC-6:Unicode 双向重写字符也替成空格(防 RTL override 视觉欺骗)
+ *   - 合并连续空格、trim、截到 100 字符
+ *
  * 空串返回 ''(调用方据此跳过)。
  */
 const TITLE_MAX_LEN = 100;
 function sanitizeTitle(raw: string): string {
-  // 把 \r \n \t \v \f 与其他 C0 控制字符(<0x20)替为空格;DEL (0x7F) 同处理
   let s = '';
   for (const ch of raw) {
     const code = ch.codePointAt(0)!;
-    s += code < 0x20 || code === 0x7f ? ' ' : ch;
+    if (code < 0x20 || code === 0x7f) {
+      s += ' ';
+      continue;
+    }
+    // OSC-6:Unicode 双向重写字符 — 防止恶意 OSC 通过 RTL override 让
+    // tab 标题视觉上反转("safe.txt exe.live" 看上去像 "evil.exe safe.txt"
+    // 反向版)。U+200B / U+200E / U+200F / U+202A-202E / U+2066-2069。
+    if (
+      code === 0x200b ||
+      code === 0x200e ||
+      code === 0x200f ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      s += ' ';
+      continue;
+    }
+    s += ch;
   }
   s = s.replace(/\s+/g, ' ').trim();
   if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN);

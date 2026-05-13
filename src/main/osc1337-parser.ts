@@ -94,38 +94,50 @@ export class Osc1337Parser {
 
     let cursor = 0;
     while (cursor < input.length) {
-      const escIdx = input.indexOf(0x1b, cursor);
-      if (escIdx < 0) {
+      // OSC-4:识别两种 OSC 起始:
+      //   - ESC ] (0x1B 0x5D) — 标准 7-bit 形式,主流 shell 都用
+      //   - 0x9D — C1 单字节形式,少数 CJK 终端 / 某些跨平台二进制使用
+      // 找两者中最靠前的一个作为下一个候选起始点。oscPayloadStart 是
+      // payload 第一字节的下标(ESC ] → escIdx+2;0x9D → escIdx+1)。
+      const oscStart = findNextOscStart(input, cursor);
+      if (oscStart === null) {
         // 剩余全是普通字节
         passthroughChunks.push(input.subarray(cursor));
         cursor = input.length;
         break;
       }
-      // ESC 之前的普通字节透传
+      const { idx: escIdx, payloadStart: oscPayloadStart, isC1 } = oscStart;
+      // OSC 起始之前的普通字节透传
       if (escIdx > cursor) {
         passthroughChunks.push(input.subarray(cursor, escIdx));
       }
-      // ESC 之后没字节了 → 孤立 ESC 存 stash 等下次
-      if (escIdx + 1 >= input.length) {
+      // ESC ] 形式:ESC 之后没字节了 → 孤立 ESC 存 stash 等下次
+      if (!isC1 && escIdx + 1 >= input.length) {
         this.stash = input.subarray(escIdx);
         cursor = input.length;
         break;
       }
-      const next = input[escIdx + 1]!;
-      if (next !== 0x5d /* ']' */) {
-        // 不是 OSC 起始,ESC 当普通字节透传,继续从 escIdx+1 扫描
-        passthroughChunks.push(input.subarray(escIdx, escIdx + 1));
-        cursor = escIdx + 1;
-        continue;
+      // ESC 之后不是 ']' → ESC 当普通字节透传(C1 形式直接走 OSC,不走这里)
+      if (!isC1) {
+        const next = input[escIdx + 1]!;
+        if (next !== 0x5d /* ']' */) {
+          passthroughChunks.push(input.subarray(escIdx, escIdx + 1));
+          cursor = escIdx + 1;
+          continue;
+        }
       }
-      // ESC ] OSC 起始,寻找 BEL 或 ST 终止
-      const terminatorInfo = findOscTerminator(input, escIdx + 2);
+      // OSC 起始,寻找 BEL 或 ST 终止
+      const terminatorInfo = findOscTerminator(input, oscPayloadStart);
       if (!terminatorInfo) {
         // 未完结,全部存 stash 等下次
         const tail = input.subarray(escIdx);
         if (tail.length > STASH_LIMIT) {
-          // 超长不像合法 OSC,放弃 — 整段透传 (避免内存堆积)
-          passthroughChunks.push(tail);
+          // OSC-3:超长不像合法 OSC — 静默丢弃(不再 push 到 passthrough,
+          // 否则 xterm 会渲染出字面 `\x1b]1337;...` 乱码)。同时 console.warn
+          // 记录用于排查 broken sequence 的来源。
+          console.warn(
+            `[Osc1337Parser] OSC stash overflow ${tail.length} bytes — dropped to avoid memory累积`,
+          );
           cursor = input.length;
           break;
         }
@@ -133,8 +145,8 @@ export class Osc1337Parser {
         cursor = input.length;
         break;
       }
-      // OSC 完整: ESC ] payload TERM
-      const payload = input.subarray(escIdx + 2, terminatorInfo.payloadEnd);
+      // OSC 完整: <start> payload TERM
+      const payload = input.subarray(oscPayloadStart, terminatorInfo.payloadEnd);
       const titleSeq = parseTitleOscPayload(payload);
       const isOsc1337 =
         payload.length >= 5 && payload.subarray(0, 5).equals(Buffer.from('1337;'));
@@ -177,6 +189,28 @@ export class Osc1337Parser {
   get stashedBytes(): number {
     return this.stash.length;
   }
+}
+
+/**
+ * OSC-4:在 buf[start..] 范围找下一个 OSC 起始点。
+ *
+ * 同时识别:
+ *   - ESC ] (0x1B 0x5D) — 7-bit 标准形式
+ *   - 0x9D — C1 单字节形式(等价于 ESC ])
+ *
+ * 取两者中最靠前的命中点。返回 payload 起点(给 findOscTerminator 用)。
+ */
+function findNextOscStart(
+  buf: Buffer,
+  start: number,
+): { idx: number; payloadStart: number; isC1: boolean } | null {
+  const idx7 = buf.indexOf(0x1b, start);
+  const idx8 = buf.indexOf(0x9d, start);
+  if (idx7 < 0 && idx8 < 0) return null;
+  if (idx7 < 0) return { idx: idx8, payloadStart: idx8 + 1, isC1: true };
+  if (idx8 < 0) return { idx: idx7, payloadStart: idx7 + 2, isC1: false };
+  if (idx7 < idx8) return { idx: idx7, payloadStart: idx7 + 2, isC1: false };
+  return { idx: idx8, payloadStart: idx8 + 1, isC1: true };
 }
 
 /**

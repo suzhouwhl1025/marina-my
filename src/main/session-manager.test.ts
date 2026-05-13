@@ -1334,7 +1334,7 @@ describe('Osc1337Parser', () => {
     expect(r2.passthrough.toString('utf8')).toBe('\x1b[31m');
   });
 
-  it('超长 stash (> 16KB 没终止符) → flush 为透传,不死循环', () => {
+  it('超长 stash (> 16KB 没终止符) → 静默丢弃,不死循环不渲染乱码 (OSC-3)', () => {
     const p = new Osc1337Parser();
     const giant = '\x1b]1337;' + 'x'.repeat(20_000); // 没有终止符
     const r = p.parse(Buffer.from(giant));
@@ -1342,8 +1342,25 @@ describe('Osc1337Parser', () => {
     expect(p.stashedBytes).toBeLessThanOrEqual(16 * 1024);
     void r;
     const r2 = p.parse(Buffer.from('more'));
-    // stash 加上 more 后超限 → 整段透传
-    expect(r2.passthrough.length).toBeGreaterThan(0);
+    // OSC-3:超长 stash 后改为静默丢弃(不再 push 到 passthrough),
+    // 否则 xterm 会渲染字面 \x1b]1337;... 乱码。
+    // 第二次 parse 的 'more' 是在 stash 已 drop 后到来,作为新的"普通字节"
+    // 走 passthrough。所以 r2.passthrough 应当至少包含 'more'。
+    expect(r2.passthrough.toString('utf8')).toContain('more');
+  });
+
+  // OSC-4:C1 单字节 OSC 起始 (0x9D) 识别
+  it('识别 C1 单字节 OSC 起始 0x9D', () => {
+    const p = new Osc1337Parser();
+    // 0x9D + "1337;CurrentDir=/test" + BEL
+    const buf = Buffer.concat([
+      Buffer.from([0x9d]),
+      Buffer.from('1337;CurrentDir=/test'),
+      Buffer.from([0x07]),
+    ]);
+    const r = p.parse(buf);
+    expect(r.events).toHaveLength(1);
+    expect(r.events[0]).toEqual({ kind: 'cwd', value: '/test' });
   });
 });
 
