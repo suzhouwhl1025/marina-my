@@ -801,40 +801,6 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         replayed = true;
       });
 
-    // 用户键盘输入 → 发回 PTY。
-    //
-    // TYP-1 / IPC-4:main 现在返回 { accepted, reason }。accepted=false 时
-    // (session 已退出 / 已 destroy / 非 owner)给用户一个可见 toast,
-    // 避免"敲键无反应 → 关窗口重开"的体感主诉。
-    //
-    // 节流:5 秒内只弹一次 reject toast,避免一长串按键每个都触发一条。
-    const dataHandler = term.onData((data) => {
-      const base64 = encodeStringToBase64(data);
-      void window.api
-        .invoke<{ sessionId: string; data: string }, SendInputResponse>(
-          COMMAND_CHANNELS.SESSION_SEND_INPUT,
-          { sessionId: session.id, data: base64 },
-        )
-        .then((res) => {
-          if (res.accepted) return;
-          const now = Date.now();
-          if (now - lastInputRejectToastAtRef.current < 5000) return;
-          lastInputRejectToastAtRef.current = now;
-          const msg =
-            res.reason === 'pty-exited'
-              ? '会话已退出,请按 × 关闭标签或新建终端'
-              : res.reason === 'session-not-found'
-                ? '会话已不存在(可能被其他窗口关闭)'
-                : res.reason === 'not-owner'
-                  ? '此会话由其他窗口持有,输入未送达'
-                  : res.reason === 'pty-write-failed'
-                    ? 'PTY 写入失败,终端可能需要重启'
-                    : '输入未送达';
-          toastRef.current.push({ kind: 'warn', message: msg });
-        })
-        .catch((err) => console.error('[TerminalView] send-input failed', err));
-    });
-
     // ResizeObserver — trailing debounce 150ms (用户勘误后续 #4)
     let lastCols = cols;
     let lastRows = rows;
@@ -889,10 +855,71 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     });
     resizeObserver.observe(container);
 
+    // RSZ-2:最大化 / 还原是瞬时尺寸跳变,不属于连续拖拽,跳过 debounce 立即
+    // 执行 — 体感"双击 → 屏幕变大 → 终端立即铺满",而不是 150ms 停顿。
+    const cleanupMaxState = window.api.on<{ maximized: boolean }>(
+      EVENT_CHANNELS.WINDOW_MAX_STATE_CHANGED,
+      () => {
+        if (disposed) return;
+        if (resizeTimer !== null) {
+          clearTimeout(resizeTimer);
+          resizeTimer = null;
+        }
+        // 等一帧让 chrome layout 收敛后再 fit
+        requestAnimationFrame(() => {
+          if (disposed) return;
+          performResize();
+        });
+      },
+    );
+
+    // 用户键盘输入 → 发回 PTY。
+    //
+    // TYP-1 / IPC-4:main 现在返回 { accepted, reason }。accepted=false 时
+    // (session 已退出 / 已 destroy / 非 owner)给用户一个可见 toast,
+    // 避免"敲键无反应 → 关窗口重开"的体感主诉。
+    //
+    // 节流:5 秒内只弹一次 reject toast,避免一长串按键每个都触发一条。
+    //
+    // XTM-7:打字时若有待定 resize,先 flush 再发输入 — 拖窗 + 立刻打字
+    // 场景下避免 PTY 用旧 cols/rows 处理 prompt 折行错位。
+    const dataHandler = term.onData((data) => {
+      if (resizeTimer !== null) {
+        clearTimeout(resizeTimer);
+        resizeTimer = null;
+        performResize();
+      }
+      const base64 = encodeStringToBase64(data);
+      void window.api
+        .invoke<{ sessionId: string; data: string }, SendInputResponse>(
+          COMMAND_CHANNELS.SESSION_SEND_INPUT,
+          { sessionId: session.id, data: base64 },
+        )
+        .then((res) => {
+          if (res.accepted) return;
+          const now = Date.now();
+          if (now - lastInputRejectToastAtRef.current < 5000) return;
+          lastInputRejectToastAtRef.current = now;
+          const msg =
+            res.reason === 'pty-exited'
+              ? '会话已退出,请按 × 关闭标签或新建终端'
+              : res.reason === 'session-not-found'
+                ? '会话已不存在(可能被其他窗口关闭)'
+                : res.reason === 'not-owner'
+                  ? '此会话由其他窗口持有,输入未送达'
+                  : res.reason === 'pty-write-failed'
+                    ? 'PTY 写入失败,终端可能需要重启'
+                    : '输入未送达';
+          toastRef.current.push({ kind: 'warn', message: msg });
+        })
+        .catch((err) => console.error('[TerminalView] send-input failed', err));
+    });
+
     return () => {
       disposed = true;
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeObserver.disconnect();
+      cleanupMaxState();
       cleanupOutput();
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
