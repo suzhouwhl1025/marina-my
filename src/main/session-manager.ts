@@ -782,6 +782,11 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   private handlePtyData(managed: ManagedSession, data: string): void {
+    // CPT-3:ConPTY 异步关闭时仍可能 emit 一次 onData,此时 managed 可能已
+    // 从 sessions Map 删除(destroySession 走完)或 pty 已置 null(handlePtyExit
+    // 已走完但 disposable 还没完全 dispose)。早 return 显式 guard,避免依赖
+    // 下游 ipc.ts 巧合兜住的脆弱链路。
+    if (!this.sessions.has(managed.info.id) || !managed.pty) return;
     const bytes = Buffer.from(data, 'utf8');
     const parsed = managed.parser.parse(bytes);
 
