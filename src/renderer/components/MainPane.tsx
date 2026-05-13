@@ -41,6 +41,7 @@ import {
 } from '../store';
 import { TerminalView } from './TerminalView';
 import { writeClipboardText } from '../clipboard';
+import { focusTerminalDom } from '../focus';
 import { Icon, type IconName } from './icons';
 import { useContextMenuApi } from './ContextMenu';
 import { useToast } from './Toast';
@@ -217,6 +218,10 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
         },
       );
       dispatch({ type: 'view/select-session', sessionId: res.session.id });
+      // FOC-3:模板按钮点击后焦点漂在 button 上,挂载 TerminalView 后
+      // 自动把焦点送回 xterm。A4 的 selectedSessionId effect 也会兜底,
+      // 但显式 + rAF 让"立即可打字"语义更清晰。
+      focusTerminalDom();
     } catch (err) {
       console.error('[MainPane] create-session failed', err);
       toast.push({
@@ -326,6 +331,9 @@ function TabBar({ sessions, selectedSessionId, showBlankTab }: TabBarProps): JSX
     // 多数情况下 selectedSessionId 已经是非 mine 的 session id,这里只是让
     // dispatch 触发一次重算确保 view 一致。
     dispatch({ type: 'view/select-session', sessionId: null });
+    // 显式 blur 占位 tab 按钮 —EmptyPathState 没有 xterm 可以 focus,
+    // 但至少不应该让 button 一直 :focus 着,Tab 键导航变奇怪。
+    (document.activeElement as HTMLElement | null)?.blur();
   };
 
   // CP-3 勘误 #5:**彻底**移除"灰显抽到最右边"的分组逻辑。
@@ -527,11 +535,20 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
           }
           dispatch({ type: 'view/select-session', sessionId: prevOwnedId });
         });
+      // FOC-2:乐观接管成功路径也需要送焦点;rAF + 选择器在新 TerminalView
+      // 挂上后命中。失败 rollback 后 EmptyPathState 没 xterm,focusTerminalDom
+      // 会 no-op,无副作用。
+      focusTerminalDom();
       return;
     }
     // 本窗口持有 (mine):仅切换 view (新模型下其实 myTabs 至多 1 个,
     // 多数场景这就是当前 selected — no-op,但保留分支以防 race)
     dispatch({ type: 'view/select-session', sessionId: session.id });
+    // FOC-2:Tab click 后 button 默认接管 :focus,把焦点送回 xterm,
+    // 让用户敲键立即生效。orphan 接管分支已在前文 dispatch 后落到
+    // 同一 selectedSessionId 路径,A4 的 effect 会兜底;但显式调用
+    // 让"点 tab → 能打字"的契约不依赖 effect 触发时机。
+    focusTerminalDom();
   };
 
   const handleClose = (e: MouseEvent<HTMLSpanElement>): void => {
