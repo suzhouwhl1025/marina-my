@@ -258,6 +258,31 @@ interface TerminalViewProps {
   myWindowId: string;
 }
 
+/**
+ * 把焦点归还给 xterm 的 helper-textarea。
+ *
+ * 设计：xterm 的 `term.focus()` 在 search bar 可见时会和搜索 input 抢焦点
+ * (它一定会 focus 内部 helper-textarea)；用 ref + 简单 guard 保证只在
+ * "我们确实希望终端有焦点"的场景下生效。
+ *
+ * 调用时机：所有可能让焦点漂走的副作用末尾兜底调用一次：
+ * - paste / copy / clear (右键菜单或快捷键完成后)
+ * - drop (拖文件后)
+ * - tab / blank tab / template button / window chrome 按钮 click
+ * - ContextMenu / Toast / Modal 关闭后
+ * - TerminalView mount (FOC-1: 切 session 自动聚焦)
+ * - selectedSessionId 变化 (FOC-6: 托盘点击 / focus-requested)
+ *
+ * 不抢搜索栏的焦点 (searchVisibleRef.current=true 时跳过)。
+ */
+function focusTerminal(
+  termRef: { current: Terminal | null },
+  searchVisibleRef: { current: boolean },
+): void {
+  if (searchVisibleRef.current) return;
+  termRef.current?.focus();
+}
+
 export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -322,6 +347,9 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     if (sel) {
       void writeClipboardText(sel);
     }
+    // CPB-C1:复制完归还焦点 — 避免右键菜单选"复制"后菜单关闭 → 焦点
+    // 漂到 body → 用户敲键无反应的反馈
+    focusTerminal(termRef, searchVisibleRef);
   }, []);
 
   const handlePaste = useCallback(async () => {
@@ -353,6 +381,11 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       });
     } catch (err) {
       console.warn('[TerminalView] paste failed', err);
+    } finally {
+      // CPB-P1:粘贴完成无论成功失败都归还焦点 — 修复用户主诉"粘贴后
+      // 打不进字必须关窗口"。根因 = window.confirm/原生 modal/右键菜单
+      // 关闭后 Chromium 把焦点丢到 body,handlePaste 之前没人抢回来。
+      focusTerminal(termRef, searchVisibleRef);
     }
   }, [session.id]);
 
@@ -529,6 +562,13 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     } catch {
       /* 忽略极小窗口 fit 错误 */
     }
+
+    // FOC-1:mount 后立即抢焦点 — 修复"切 tab/创建 session/接管 orphan/
+    // 退出 settings 后必须再点一次终端区才能打字"。xterm 的 helper-textarea
+    // 在 open() 后才存在,所以 focus 必须在 open() 之后调。
+    // 不走 focusTerminal helper:searchVisibleRef 在 mount 时尚未与上层
+    // hook 绑定,直接 term.focus() 即可,且 mount 时不可能 search 是开的。
+    term.focus();
 
     const cols = term.cols;
     const rows = term.rows;
@@ -808,7 +848,10 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
           data: base64,
         })
         .catch((err) => console.error('[TerminalView] drop send-input failed', err));
-      termRef.current?.focus();
+      // CPB-DROP-1:统一走 focusTerminal helper(原 termRef.current?.focus()
+      // 是 paste/copy 之外开发者偶尔记得的不一致情况;现在所有副作用都走
+      // 同一接口,搜索栏可见时自动跳过)。
+      focusTerminal(termRef, searchVisibleRef);
     },
     [session.id],
   );
