@@ -356,6 +356,25 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       _e,
       envelope: CommandEnvelope<SendInputPayload>,
     ): SendInputResponse => {
+      // IPC-3:ownership 校验 — 防止 renderer 状态短暂落后于 main 时,
+      // 一个已不归本窗口的 session 仍接受写入(用户视觉上"打字了但没回显",
+      // 因为 sessionOutput 推给了真 owner)。
+      //
+      // 允许放行的情况:
+      //   - 调用方就是 owner — 正常情况
+      //   - session.ownerWindowId === null(orphan)— renderer 即将 claim,
+      //     允许写入避免乱码丢字符;一旦 claim 成功 sessionOutput 自然推回
+      //
+      // 拒绝的情况:
+      //   - session.ownerWindowId 是其他窗口 — 真的不该写,返回 not-owner
+      const sess = sessionManager.get(envelope.payload.sessionId);
+      if (
+        sess &&
+        sess.ownerWindowId !== null &&
+        sess.ownerWindowId !== envelope.windowId
+      ) {
+        return { accepted: false, reason: 'not-owner' };
+      }
       return sessionManager.sendInput(
         envelope.payload.sessionId,
         envelope.payload.data,

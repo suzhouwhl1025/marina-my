@@ -677,7 +677,21 @@ export class SessionManager extends EventEmitter {
     if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
     managed.inputQuietUntil = Date.now() + this.inputQuietMs;
-    managed.pty.write(text);
+    // TYP-2:pty.write 在 ConPTY pipe half-closed / 子进程已死但 onExit 还
+    // 没到达等 race 情况下会同步抛错。原来无 try/catch → IPC handle 把
+    // 异常包装成 promise reject → renderer .catch(console.error) 静默吞,
+    // 每次敲键都失败而用户毫无感知。这里抓住 + 返回 pty-write-failed,
+    // 让 renderer dataHandler 弹 toast。
+    try {
+      managed.pty.write(text);
+    } catch (err) {
+      console.warn(
+        `[SessionManager] pty.write failed sid=${sessionId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { accepted: false, reason: 'pty-write-failed' };
+    }
     return { accepted: true };
   }
 

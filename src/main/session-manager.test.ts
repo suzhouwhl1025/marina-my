@@ -68,7 +68,12 @@ class FakePty {
     this.exitListeners.push(listener);
     return { dispose: () => {} };
   }
+  /** 测试可设置:true → write 时抛错,模拟 ConPTY pipe half-closed */
+  public writeShouldThrow = false;
   write(data: string): void {
+    if (this.writeShouldThrow) {
+      throw new Error('FakePty: simulated write failure');
+    }
     this.written.push(data);
   }
   resize(cols: number, rows: number): void {
@@ -1072,6 +1077,26 @@ describe('SessionManager — sendInput / resize', () => {
     );
     expect(res.accepted).toBe(true);
     expect(res.reason).toBeUndefined();
+  });
+
+  // TYP-2:pty.write 同步抛错返回 pty-write-failed
+  it('sendInput 在 pty.write 抛错时返回 accepted=false reason=pty-write-failed', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.writeShouldThrow = true;
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('pty-write-failed');
   });
 
   it('resize 透传到 PTY', async () => {
