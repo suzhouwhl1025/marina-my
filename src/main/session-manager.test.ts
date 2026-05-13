@@ -241,6 +241,8 @@ function makeManager(
     startupGraceMs?: number;
     /** 抖动源 C/E:默认 0 — 测试不走 input echo quiet 窗口 */
     inputQuietMs?: number;
+    /** PER-2 / F1:默认 0 — 测试每个 chunk 立即 emit,保持现有时序断言 */
+    emitBatchMs?: number;
   } = {},
 ): {
   mgr: SessionManager;
@@ -259,6 +261,7 @@ function makeManager(
     resizeQuietMs: opts.resizeQuietMs ?? 0,
     startupGraceMs: opts.startupGraceMs ?? 0,
     inputQuietMs: opts.inputQuietMs ?? 0,
+    emitBatchMs: opts.emitBatchMs ?? 0,
     skipCwdValidation: true,
   });
   return { mgr, win, path };
@@ -1078,6 +1081,63 @@ describe('SessionManager — sendInput / resize', () => {
     );
     expect(res.accepted).toBe(true);
     expect(res.reason).toBeUndefined();
+  });
+
+  // PER-2 / F1:IPC chunk 聚合
+  it('emitBatchMs > 0 时多次 chunk 在窗口内合并成一条 sessionOutput', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push({ data: p.data, seq: p.seq });
+      });
+      fp.emitData('aaa');
+      fp.emitData('bbb');
+      fp.emitData('ccc');
+      // 同步内未 flush
+      expect(outputs.length).toBe(0);
+      // 8ms 后 flush 一次
+      vi.advanceTimersByTime(10);
+      expect(outputs.length).toBe(1);
+      // base64 解码后是 'aaabbbccc'
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe(
+        'aaabbbccc',
+      );
+      // seq 是最后一条 chunk 对应的(3 个 chunk → outputSeq 0,1,2)
+      expect(outputs[0]!.seq).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emitBatchMs=0(默认测试)时每个 chunk 立即 emit', async () => {
+    const { mgr } = makeManager(); // emitBatchMs=0
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    const outputs: Array<{ data: string; seq: number }> = [];
+    mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+      outputs.push({ data: p.data, seq: p.seq });
+    });
+    fp.emitData('a');
+    fp.emitData('b');
+    expect(outputs.length).toBe(2);
+    expect(outputs[0]!.seq).toBe(0);
+    expect(outputs[1]!.seq).toBe(1);
   });
 
   // TYP-2:pty.write 同步抛错返回 pty-write-failed

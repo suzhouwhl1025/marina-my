@@ -91,6 +91,13 @@ const CWD_POLL_INTERVAL_MS = 5000;
 const RESIZE_QUIET_MS = 500;
 
 /**
+ * PER-2 / F1:sessionOutput IPC 聚合窗口 (ms)。
+ * 8ms 在 125 FPS 频率 — 视觉上无延迟,但能把 burst 输出场景下每秒数百次
+ * IPC 压成 ~30-60 次,降低 renderer base64 解码 + xterm parse CPU 占用。
+ */
+const EMIT_BATCH_MS = 8;
+
+/**
  * 启动期 grace 窗口 (M1-I,P1-4)。
  *
  * 解决:PowerShell 启动横幅 + prompt 出现时 PTY 短暂喷字节,markActive 立即
@@ -251,6 +258,16 @@ interface ManagedSession {
    * Windows Terminal hostname 等会持续刷标题,不锁住会冲掉用户的命名)。
    */
   manuallyRenamed: boolean;
+  /**
+   * PER-2 / F1:IPC 聚合缓冲 — 8ms 窗口内积累的 sessionOutput,timer 到点
+   * 一次性 emit。降低高速 PTY 输出场景下 IPC 消息数,缓解 renderer 反压。
+   *
+   * 每条 emit 都带它代表的 seq 范围(开始 / 结束),但由于我们用"合并后
+   * 单条 payload",renderer 只看到一个 seq(最后一条字节对应的)。
+   * scrollback append 仍同步,scrollbackLastSeq 仍准。
+   */
+  pendingEmit: { bytes: Buffer; lastSeq: number } | null;
+  pendingEmitTimer: NodeJS.Timeout | null;
 }
 
 export interface CreateSessionInput {
@@ -317,6 +334,11 @@ export interface SessionManagerOptions {
    * 生产代码不显式传,默认 true。
    */
   skipCwdValidation?: boolean;
+  /**
+   * PER-2 / F1:sessionOutput IPC 聚合窗口 (ms)。生产 8;测试传 0 → 每个
+   * PTY chunk 立即 emit (保持现有断言的时序假设)。
+   */
+  emitBatchMs?: number;
 }
 
 export class SessionManager extends EventEmitter {
@@ -329,6 +351,7 @@ export class SessionManager extends EventEmitter {
   private readonly startupGraceMs: number;
   private readonly inputQuietMs: number;
   private readonly skipCwdValidation: boolean;
+  private readonly emitBatchMs: number;
 
   /**
    * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
@@ -354,6 +377,8 @@ export class SessionManager extends EventEmitter {
     this.startupGraceMs = options.startupGraceMs ?? STARTUP_GRACE_MS;
     this.inputQuietMs = options.inputQuietMs ?? INPUT_QUIET_MS;
     this.skipCwdValidation = options.skipCwdValidation ?? false;
+    // 测试缺省传 0(立即 emit,保持时序断言)
+    this.emitBatchMs = options.emitBatchMs ?? EMIT_BATCH_MS;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -476,6 +501,8 @@ export class SessionManager extends EventEmitter {
       startupGraceUntil: Date.now() + this.startupGraceMs,
       inputQuietUntil: 0,
       manuallyRenamed: false,
+      pendingEmit: null,
+      pendingEmitTimer: null,
     };
     this.sessions.set(sessionId, managed);
 
@@ -807,12 +834,17 @@ export class SessionManager extends EventEmitter {
       const seq = managed.outputSeq++;
       managed.scrollbackLastSeq = seq;
 
-      const payload: SessionOutputPayload = {
-        sessionId: managed.info.id,
-        data: parsed.passthrough.toString('base64'),
-        seq,
-      };
-      this.emit('sessionOutput', payload);
+      // PER-2 / F1:IPC chunk 聚合 — 8ms 窗口内多个 PTY chunk 合并成一个
+      // sessionOutput emit,降低 renderer 的 IPC 反压。
+      //
+      // burst 输出场景(find / / npm install)每秒可能产生 50-200 个小 chunk,
+      // 每个 chunk 独立 IPC 让 renderer base64 解码 + xterm parse 都跑成
+      // 100% CPU。8ms 窗口把这些合并到 ~125 帧/秒级别,既维持视觉流畅又减
+      // 少 IPC 调用数 ~5-10×。
+      //
+      // scrollback append 和 outputSeq 仍同步(scrollbackLastSeq 准确反映),
+      // 接管 / replay 协议依赖的 lastSeq 不受影响 — 只是 IPC 推送被合并。
+      this.queueEmit(managed, parsed.passthrough, seq);
 
       // 状态机:有输出 → active,重置 idle 计时器。
       // 跳过 markActive 的三种 quiet 窗口(scrollback / sessionOutput 仍正常,
@@ -834,6 +866,56 @@ export class SessionManager extends EventEmitter {
         this.markActive(managed);
       }
     }
+  }
+
+  /**
+   * PER-2 / F1:把一次 PTY chunk 入 pendingEmit 缓冲,8ms 后(或 destroy 时
+   * 立即)flush 为一个 sessionOutput event。
+   *
+   * 多次 queueEmit 在同一 8ms 窗口内调用 → bytes 累积,seq 取最大值;
+   * 一次 flush 出去的 payload data 是合并后的 base64,seq 是该窗口内最后
+   * 一条字节的 outputSeq。renderer 端 lastReplayedSeq 比较仍正确(只是
+   * 看不到中间 seq,跳号但单调递增不影响 replay 逻辑)。
+   *
+   * 测试用 EMIT_BATCH_MS=0 走"立即 flush",保持现有时序断言通过。
+   */
+  private queueEmit(managed: ManagedSession, bytes: Buffer, seq: number): void {
+    if (this.emitBatchMs <= 0) {
+      // 测试 / 关闭聚合 — 直接 emit
+      const payload: SessionOutputPayload = {
+        sessionId: managed.info.id,
+        data: bytes.toString('base64'),
+        seq,
+      };
+      this.emit('sessionOutput', payload);
+      return;
+    }
+    if (managed.pendingEmit === null) {
+      managed.pendingEmit = { bytes, lastSeq: seq };
+    } else {
+      managed.pendingEmit.bytes = Buffer.concat([
+        managed.pendingEmit.bytes,
+        bytes,
+      ]);
+      managed.pendingEmit.lastSeq = seq;
+    }
+    if (managed.pendingEmitTimer === null) {
+      managed.pendingEmitTimer = setTimeout(() => {
+        managed.pendingEmitTimer = null;
+        this.flushPendingEmit(managed);
+      }, this.emitBatchMs);
+    }
+  }
+
+  private flushPendingEmit(managed: ManagedSession): void {
+    if (!managed.pendingEmit) return;
+    const payload: SessionOutputPayload = {
+      sessionId: managed.info.id,
+      data: managed.pendingEmit.bytes.toString('base64'),
+      seq: managed.pendingEmit.lastSeq,
+    };
+    managed.pendingEmit = null;
+    this.emit('sessionOutput', payload);
   }
 
   private appendScrollback(managed: ManagedSession, bytes: Buffer): void {
@@ -889,6 +971,16 @@ export class SessionManager extends EventEmitter {
   ): void {
     const sid = managed.info.id;
     if (!this.sessions.has(sid)) return;
+
+    // PER-2:destroy 前 flush pending emit,让 owner 收到最后一段字节
+    // 之后再标记 destroyed。否则会丢掉 destroy 前 8ms 内的最后 burst。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
+    }
+    if (managed.pendingEmit) {
+      this.flushPendingEmit(managed);
+    }
 
     this.clearTimers(managed);
     for (const d of managed.disposables) {
