@@ -287,6 +287,52 @@ export class WindowsAdapter implements PlatformAdapter {
   }
 
   /**
+   * 仅在 HKCU 已经存在 Marina 经典右键菜单 key 时,把 command 字段刷成当前 exe 路径。
+   *
+   * 启动期幂等修复:用户卸载后重装、installer 把 Marina 装到新路径,旧 command
+   * 仍指向已删 exe → Explorer 右键弹"unable to find electron app at ...";我们
+   * 静默改 command 字段为当前 exe 即可。
+   *
+   * 与 registerFileManagerIntegration 的区别:这里不创建 key,只修复已存在的 key。
+   * 不存在 key = 用户没启用过 / 已主动关闭,不应被启动自动重新写回。
+   */
+  async syncFileManagerIntegrationIfPresent(appExePath: string): Promise<void> {
+    for (const { hive, argToken } of EXPLORER_INTEGRATION_KEYS) {
+      // reg query 不存在的 key:code=1 → runReg 抛错。捕获后跳过该 hive。
+      let exists = true;
+      try {
+        await runReg(['query', hive]);
+      } catch {
+        exists = false;
+      }
+      if (!exists) continue;
+      const commandValue = `"${appExePath}" --open-here "${argToken}"`;
+      await runReg([
+        'add',
+        `${hive}\\command`,
+        '/ve',
+        '/d',
+        commandValue,
+        '/f',
+      ]);
+    }
+  }
+
+  /**
+   * 现场查 HKCU 经典菜单是否已注册。两个 hive 都存在才算 enabled。
+   */
+  async isFileManagerIntegrationEnabled(): Promise<boolean> {
+    for (const { hive } of EXPLORER_INTEGRATION_KEYS) {
+      try {
+        await runReg(['query', hive]);
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
    * 查询进程 cwd 的兜底接口。
    *
    * Windows 上唯一可靠的方式是 NtQueryInformationProcess + 读 PEB 的

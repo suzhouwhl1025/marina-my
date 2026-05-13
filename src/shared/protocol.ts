@@ -91,6 +91,27 @@ export const COMMAND_CHANNELS = {
   SYSTEM_OPEN_DATA_DIR: 'cmd:system:open-data-dir',
   SYSTEM_OPEN_LOGS_DIR: 'cmd:system:open-logs-dir',
   SYSTEM_OPEN_EXTERNAL: 'cmd:system:open-external',
+  /** 当前构建形态 dev / portable / installed,供渲染端决定是否禁用系统集成 UI */
+  SYSTEM_GET_BUILD_TYPE: 'cmd:system:get-build-type',
+
+  // Explorer 集成域 —— 不进 settings.json,现场查 + 操作系统状态
+  /** 综合查询:buildType + Win 版本 + 经典菜单 + Win11 新菜单 + 证书 + MSIX 包 */
+  EXPLORER_INTEGRATION_GET_STATUS: 'cmd:explorer-integration:get-status',
+  /** 经典右键菜单(HKCU 注册表)开/关 */
+  EXPLORER_INTEGRATION_SET_CLASSIC: 'cmd:explorer-integration:set-classic',
+  /** Win11 新菜单(MSIX + 证书)安装/卸载 */
+  EXPLORER_INTEGRATION_SET_MODERN: 'cmd:explorer-integration:set-modern',
+  /** 取出当前会执行的 PowerShell 命令字符串(供「复制 PS 命令」按钮) */
+  EXPLORER_INTEGRATION_GET_PS_COMMANDS: 'cmd:explorer-integration:get-ps-commands',
+  /**
+   * 勘误第二轮:剪贴板 IPC。
+   * navigator.clipboard.* 在 Electron file:// 上下文需 web 权限,我们的
+   * permission handler 拒掉了 clipboard-write 导致写永远静默失败。走 IPC
+   * 调主进程的 Electron clipboard 模块,绕开所有 web 权限层 + dev/prod 行为
+   * 一致。preload 的 invoke 桥已经存在,这里只是新增 channel。
+   */
+  SYSTEM_CLIPBOARD_READ_TEXT: 'cmd:system:clipboard-read-text',
+  SYSTEM_CLIPBOARD_WRITE_TEXT: 'cmd:system:clipboard-write-text',
 } as const;
 
 export type CommandChannel = (typeof COMMAND_CHANNELS)[keyof typeof COMMAND_CHANNELS];
@@ -208,6 +229,12 @@ export interface CreateSessionPayload {
   pathId?: string;
   /** 启动模板 id。CP-2 仅 'shell',CP-3 起接 TemplateManager */
   templateId?: string;
+  /**
+   * 勘误第二轮 #3:可选 shell 覆盖。缺省走 settings.shell.defaultShellId,
+   * 给定时强制用该 shell 启动 (但仍走模板的 command/args)。EmptyPathState
+   * 的"检测到的 Shell"按钮通过它实现"用 Git Bash 起一个 shell"。
+   */
+  shellId?: string;
   /** 是否本窗口接管 ownership。默认 true */
   takeOwnership?: boolean;
   /** 终端尺寸初始值 */
@@ -446,6 +473,94 @@ export interface ShowInExplorerPayload {
 export interface OpenExternalPayload {
   /** http(s) URL — 文件 / file:// 协议拒绝 (安全) */
   url: string;
+}
+
+export interface ClipboardWriteTextPayload {
+  text: string;
+}
+
+export interface ClipboardReadTextResponse {
+  text: string;
+}
+
+export interface ClipboardWriteTextResponse {
+  ok: boolean;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Explorer 集成域
+// ──────────────────────────────────────────────────────────────────
+
+export type BuildType = 'dev' | 'portable' | 'installed';
+
+export interface GetBuildTypeResponse {
+  buildType: BuildType;
+}
+
+/**
+ * 三个状态值的语义:
+ * - `enabled`     当前系统状态已开启(经典 = HKCU key 存在;Win11 新菜单 = MSIX 已注册)
+ * - `disabled`    支持但未开启
+ * - `unsupported` 当前构建/系统不支持(dev / portable 一律 unsupported;经典菜单则在
+ *                 非 Windows 上 unsupported;Win11 新菜单还要求 build >= 22000)
+ */
+export type ExplorerIntegrationState = 'enabled' | 'disabled' | 'unsupported';
+
+export interface ExplorerIntegrationCertInfo {
+  thumbprint: string;
+  /** 证书 NotAfter,ISO 字符串 */
+  notAfter: string;
+  subject: string;
+  /** Cert:\CurrentUser\TrustedPeople 是否存在该 thumbprint */
+  trusted: boolean;
+}
+
+export interface ExplorerIntegrationPackageInfo {
+  /** Marina.ContextMenu 等包名 */
+  name: string;
+  version: string;
+  installLocation: string;
+}
+
+export interface ExplorerIntegrationStatus {
+  buildType: BuildType;
+  /** 例如 "10.0.22621";非 Windows 时为空字符串 */
+  windowsBuild: string;
+  /** Win11 22000+ 才支持 Modern 菜单(IExplorerCommand) */
+  win11ModernSupported: boolean;
+  classic: ExplorerIntegrationState;
+  modern: ExplorerIntegrationState;
+  /** 证书信息(Modern 菜单依赖,Modern 不支持时为 null) */
+  cert: ExplorerIntegrationCertInfo | null;
+  /** MSIX 包信息(modern=enabled 时存在) */
+  package: ExplorerIntegrationPackageInfo | null;
+  /** Modern 不支持的原因(展示给用户)。null = 支持 */
+  modernUnsupportedReason: string | null;
+  /** Classic 不支持的原因。null = 支持 */
+  classicUnsupportedReason: string | null;
+}
+
+export interface SetExplorerIntegrationPayload {
+  enabled: boolean;
+}
+
+export interface SetExplorerIntegrationResponse {
+  ok: boolean;
+  /** 失败时的可读消息;ok=true 时为空 */
+  message: string;
+  /** 操作后的最新状态(渲染端无需再单独调 GET_STATUS) */
+  status: ExplorerIntegrationStatus;
+}
+
+export interface GetPsCommandsResponse {
+  /** 安装 Win11 新菜单等价的 PowerShell 命令(供"复制" 按钮) */
+  installModern: string;
+  /** 卸载 Win11 新菜单 */
+  uninstallModern: string;
+  /** 注册经典菜单 */
+  installClassic: string;
+  /** 卸载经典菜单 */
+  uninstallClassic: string;
 }
 
 // ──────────────────────────────────────────────────────────────────

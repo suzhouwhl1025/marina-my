@@ -55,7 +55,6 @@ export const DEFAULT_SETTINGS: Settings = {
     terminalRightClick: 'menu',
   },
   systemIntegration: {
-    explorerContextMenu: false,
     explorerOpenIn: 'new-window',
   },
   advanced: {
@@ -102,8 +101,12 @@ export class SettingsManager extends EventEmitter {
    */
   async initialize(): Promise<'main' | 'bak' | 'default'> {
     const result = await this.store.load(DEFAULT_SETTINGS);
+    // v1.5+ 迁移:explorerContextMenu 从 settings 移到系统状态,如果老 settings.json
+    // 残留这个字段,静默剥掉(避免 deepMerge 原样带进运行时 settings 对象,污染
+    // 导入导出归档 + TS 类型断言失败)。
+    const migrated = stripUnknownLegacyFields(result.value);
     // 不论从哪加载,都要走一遍 deep merge 防止用户文件少字段
-    const merged = deepMerge(DEFAULT_SETTINGS, result.value as DeepPartial<Settings>);
+    const merged = deepMerge(DEFAULT_SETTINGS, migrated as DeepPartial<Settings>);
     // 版本不兼容直接拒绝 (CP-4 加迁移逻辑;CP-2 简单粗暴)
     if (merged.version !== 1) {
       throw new SettingsError(
@@ -172,7 +175,8 @@ export class SettingsManager extends EventEmitter {
    * 窗口通过 evt:settings:changed 立即同步,无需 app.relaunch。
    */
   replaceAll(newSettings: Partial<Settings>): void {
-    const merged = deepMerge(DEFAULT_SETTINGS, newSettings as DeepPartial<Settings>);
+    const cleaned = stripUnknownLegacyFields(newSettings);
+    const merged = deepMerge(DEFAULT_SETTINGS, cleaned as DeepPartial<Settings>);
     if (merged.version !== 1) {
       throw new SettingsError(
         'IncompatibleVersion',
@@ -210,6 +214,34 @@ export class SettingsManager extends EventEmitter {
  * 注:这里没用 structuredClone(target) 再 mutate,而是逐字段递归;为了
  * 保持函数纯净,target 不被修改。
  */
+/**
+ * 把已知应被剥除的"已迁移走"字段从读到的 settings 对象里清掉。
+ *
+ * v1.5+ 起 `systemIntegration.explorerContextMenu` 改为系统状态(查 HKCU/MSIX),
+ * 不再驻留 settings.json。老用户文件里残留该字段需在加载/导入时静默丢弃,否则
+ * deepMerge 会原样保留它(deepMerge 只看 partial 的键),污染运行时 Settings
+ * 对象 + 导出归档。
+ *
+ * 实现上做一个浅克隆 + 显式 delete,避免动到调用方传入的对象。
+ */
+export function stripUnknownLegacyFields<T>(raw: T): T {
+  if (!raw || typeof raw !== 'object') return raw;
+  const obj = raw as Record<string, unknown>;
+  if (
+    obj['systemIntegration'] &&
+    typeof obj['systemIntegration'] === 'object' &&
+    !Array.isArray(obj['systemIntegration'])
+  ) {
+    const si = obj['systemIntegration'] as Record<string, unknown>;
+    if ('explorerContextMenu' in si) {
+      const next = { ...obj, systemIntegration: { ...si } };
+      delete (next['systemIntegration'] as Record<string, unknown>)['explorerContextMenu'];
+      return next as T;
+    }
+  }
+  return raw;
+}
+
 export function deepMerge<T>(target: T, partial: DeepPartial<T> | undefined): T {
   if (partial === undefined || partial === null) return target;
   if (typeof target !== 'object' || target === null) {

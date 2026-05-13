@@ -18,7 +18,13 @@
  * 完整业务方法 (session/bookmark/template) 在 CP-2/3/4 加入。
  */
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
-import { COMMAND_CHANNELS, type CommandEnvelope } from '@shared/protocol';
+import {
+  COMMAND_CHANNELS,
+  type ClipboardReadTextResponse,
+  type ClipboardWriteTextPayload,
+  type ClipboardWriteTextResponse,
+  type CommandEnvelope,
+} from '@shared/protocol';
 
 /**
  * 从 URL query string 提取窗口元数据。
@@ -91,6 +97,47 @@ const api = {
   setUiZoom(factor: number): void {
     if (!Number.isFinite(factor) || factor <= 0) return;
     webFrame.setZoomFactor(factor);
+  },
+
+  /**
+   * 勘误第二轮:剪贴板桥(走 main IPC)。
+   *
+   * 原因:navigator.clipboard.* 在 Electron file:// 上下文需 web Permission
+   * 放行,我们的 setPermissionRequestHandler 早期把 clipboard-write 拒了 →
+   * 选中即复制 / 右键粘贴 / Ctrl+Shift+C/V 全部静默失败。
+   *
+   * 实现选择:走 ipcRenderer.invoke 调 main 端 Electron clipboard 模块,
+   * 而非直接在 preload import 'electron' 的 clipboard。原因:
+   *   1. dev 模式下 preload 不一定会被 electron-vite 立即重打包,本字段
+   *      可能是旧版而不存在;
+   *   2. main IPC 路径只要 main 重启就生效,electron-vite dev 在主进程文件
+   *      变化时会自动重启 Electron 进程,行为一致。
+   *
+   * 异步,但 onSelectionChange / handleCopy 都允许 fire-and-forget。
+   */
+  clipboard: {
+    async readText(): Promise<string> {
+      try {
+        const res = await invoke<undefined, ClipboardReadTextResponse>(
+          COMMAND_CHANNELS.SYSTEM_CLIPBOARD_READ_TEXT,
+          undefined,
+        );
+        return res.text;
+      } catch {
+        return '';
+      }
+    },
+    async writeText(text: string): Promise<boolean> {
+      try {
+        const res = await invoke<
+          ClipboardWriteTextPayload,
+          ClipboardWriteTextResponse
+        >(COMMAND_CHANNELS.SYSTEM_CLIPBOARD_WRITE_TEXT, { text });
+        return res.ok;
+      } catch {
+        return false;
+      }
+    },
   },
 } as const;
 

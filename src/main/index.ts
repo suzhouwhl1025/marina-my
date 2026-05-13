@@ -31,6 +31,7 @@ import { installIpcLayer } from './ipc';
 import { getPlatformAdapter } from './platform';
 import { WindowsAdapter } from './platform/windows';
 import { parseOpenHere } from './argv-utils';
+import { getBuildType } from './build-type';
 import { logger } from './logger';
 import type {
   BookmarksFile,
@@ -89,6 +90,15 @@ function bootstrap(): void {
   // 注:在 app.whenReady 之前调 app.getPath('userData') 是合法的,
   // Electron 31 在 ready 前就把它解析好了
   const dataDir = app.getPath('userData');
+
+  // 勘误第二轮:Chromium 启动期报 "Unable to move the cache: 拒绝访问 (0x5)"。
+  // 原因:Electron 默认 sessionData == userData,Chromium 把 HTTP/code/GPU 缓存
+  // 直接放进 userData 根。这会与 v1.5 改名前残留的目录、单实例锁文件、Backup-*
+  // 等结构冲突,Chromium 在迁移时遇到拒绝访问。
+  // 把 sessionData 显式指向 userData/session-data 子目录,与设置/书签文件隔离,
+  // Chromium 在该子目录里独立初始化缓存,旧目录的占用对它不再可见。
+  // 必须在 app.whenReady 之前调,否则 session 已用旧 path 初始化了。
+  app.setPath('sessionData', join(dataDir, 'session-data'));
 
   // M1-D:绑定日志目录 (fire-and-forget,在此之前的 logger 调用先缓存到内存)
   void logger.setLogDir(join(dataDir, 'logs'));
@@ -198,19 +208,24 @@ function bootstrap(): void {
       // 'local-fonts' 在 Electron 31 的 TS 类型里还未收录,但运行时是合法权限名
       // (Chromium 实现);用 string 比较绕开 TS 字面量收窄。
       const FONT_PERMISSION = 'local-fonts' as const;
+      // 勘误第二轮:补 'clipboard-sanitized-write' / 'clipboard-write'。
+      // 主路径已切到 preload 的 Electron clipboard 桥(window.api.clipboard),
+      // 不再依赖 navigator.clipboard;但保留这两个白名单,以防三方库 / 未来
+      // 代码用 navigator.clipboard 也能正常工作,而不是再次掉进"writeText
+      // 静默 reject"的坑。
+      const ALLOWED_PERMISSIONS = new Set<string>([
+        FONT_PERMISSION,
+        'clipboard-read',
+        'clipboard-write',
+        'clipboard-sanitized-write',
+      ]);
       electronSession.defaultSession.setPermissionRequestHandler(
         (_webContents, permission, callback) => {
-          const p = permission as string;
-          if (p === FONT_PERMISSION || p === 'clipboard-read') {
-            callback(true);
-            return;
-          }
-          callback(false);
+          callback(ALLOWED_PERMISSIONS.has(permission as string));
         },
       );
       electronSession.defaultSession.setPermissionCheckHandler((_wc, permission) => {
-        const p = permission as string;
-        return p === FONT_PERMISSION || p === 'clipboard-read';
+        return ALLOWED_PERMISSIONS.has(permission as string);
       });
 
       const isDev = !!process.env['ELECTRON_RENDERER_URL'];
@@ -275,23 +290,9 @@ function bootstrap(): void {
         if (e.changedKeys.includes('advanced.logLevel')) {
           logger.setLevel(e.settings.advanced.logLevel === 'DEBUG' ? 'debug' : 'info');
         }
-        // Explorer 右键集成:开/关即写/删 HKCU 注册表
-        if (
-          e.changedKeys.includes('systemIntegration.explorerContextMenu') &&
-          platformAdapter
-        ) {
-          const enabled = e.settings.systemIntegration.explorerContextMenu;
-          const op = enabled
-            ? platformAdapter.registerFileManagerIntegration(app.getPath('exe'))
-            : platformAdapter.unregisterFileManagerIntegration();
-          op.catch((err) =>
-            logger.warn(
-              'main',
-              `${enabled ? 'register' : 'unregister'}FileManagerIntegration failed`,
-              err,
-            ),
-          );
-        }
+        // Explorer 右键集成不再走 settings — 它的开关由
+        // cmd:explorer-integration:set-{classic,modern} 直接调用 platformAdapter,
+        // 系统状态 = HKCU key / MSIX 包是否存在(现场查,不持久化在 settings.json)。
       });
 
       // v1.5 改名遗留清理:EasyTerm 时代写入的右键菜单 key 若残留,会与 Marina
@@ -304,16 +305,17 @@ function bootstrap(): void {
           );
       }
 
-      // 启动期同步:用户上次留下 explorerContextMenu=true 时,确保 HKCU 注册表
-      // 项指向当前 exe(用户卸载重装、portable 模式改路径都会让旧 command 失效)。
+      // 启动期同步:如果 HKCU 经典菜单已存在但 exe 路径变了(用户卸载重装、
+      // 或从 portable/dev 路径切到 installed 路径),刷新 command 字段。
+      // 仅 installed 形态做此动作 —— dev/portable 不应在启动期写注册表。
       if (
-        platformAdapter &&
-        settingsManager.get().systemIntegration.explorerContextMenu
+        platformAdapter instanceof WindowsAdapter &&
+        getBuildType() === 'installed'
       ) {
         platformAdapter
-          .registerFileManagerIntegration(app.getPath('exe'))
+          .syncFileManagerIntegrationIfPresent(app.getPath('exe'))
           .catch((err) =>
-            logger.warn('main', 'startup re-register integration failed', err),
+            logger.warn('main', 'syncFileManagerIntegrationIfPresent failed', err),
           );
       }
 

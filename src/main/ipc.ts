@@ -21,7 +21,14 @@
  * - cmd:session:create / close / claim / release / focus-owner / send-input / resize
  * - 所有 evt:* 广播
  */
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, clipboard, ipcMain, dialog, shell } from 'electron';
+import { getBuildType } from './build-type';
+import {
+  getExplorerIntegrationStatus,
+  setClassicIntegration,
+  setModernIntegration,
+  getPsCommands,
+} from './explorer-integration';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -35,6 +42,9 @@ import {
   type BookmarksUpdatedPayload,
   type ClaimSessionPayload,
   type ClaimSessionResponse,
+  type ClipboardReadTextResponse,
+  type ClipboardWriteTextPayload,
+  type ClipboardWriteTextResponse,
   type CloseSessionPayload,
   type CommandEnvelope,
   type CreateSessionPayload,
@@ -245,7 +255,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       _e,
       envelope: CommandEnvelope<CreateSessionPayload>,
     ): Promise<CreateSessionResponse> => {
-      const { pathId, templateId, takeOwnership = true, cols, rows } = envelope.payload;
+      const { pathId, templateId, shellId, takeOwnership = true, cols, rows } = envelope.payload;
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
@@ -255,6 +265,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         ownerWindowId: takeOwnership ? envelope.windowId : '',
         cols,
         rows,
+        ...(shellId ? { shellIdOverride: shellId } : {}),
       });
       // 若不接管 ownership (罕见,默认接管),把 owner 改为 null
       if (!takeOwnership) {
@@ -515,6 +526,55 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
   );
 
   ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_GET_BUILD_TYPE,
+    (_e, _envelope: CommandEnvelope<undefined>) => {
+      return { buildType: getBuildType() };
+    },
+  );
+
+  // Explorer 集成 —— 不读 settings,现场查 + 操作系统状态
+  ipcMain.handle(
+    COMMAND_CHANNELS.EXPLORER_INTEGRATION_GET_STATUS,
+    async (_e, _envelope: CommandEnvelope<undefined>) => {
+      return await getExplorerIntegrationStatus();
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.EXPLORER_INTEGRATION_SET_CLASSIC,
+    async (
+      _e,
+      envelope: CommandEnvelope<{ enabled: boolean }>,
+    ) => {
+      const result = await setClassicIntegration(
+        envelope.payload.enabled,
+        app.getPath('exe'),
+      );
+      const status = await getExplorerIntegrationStatus();
+      return { ok: result.ok, message: result.message, status };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.EXPLORER_INTEGRATION_SET_MODERN,
+    async (
+      _e,
+      envelope: CommandEnvelope<{ enabled: boolean }>,
+    ) => {
+      const result = await setModernIntegration(envelope.payload.enabled);
+      const status = await getExplorerIntegrationStatus();
+      return { ok: result.ok, message: result.message, status };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.EXPLORER_INTEGRATION_GET_PS_COMMANDS,
+    (_e, _envelope: CommandEnvelope<undefined>) => {
+      return getPsCommands(app.getPath('exe'));
+    },
+  );
+
+  ipcMain.handle(
     COMMAND_CHANNELS.SYSTEM_OPEN_EXTERNAL,
     async (
       _e,
@@ -526,6 +586,39 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         throw makeIpcError('InvalidUrl', `不允许的 URL 协议: "${url}"`);
       }
       await shell.openExternal(url);
+    },
+  );
+
+  // 勘误第二轮:剪贴板 — main 端直接调 Electron clipboard。
+  // 不走 navigator.clipboard.* (web Permission API 拒掉 clipboard-write,
+  // 表现为选中即复制 / Ctrl+Shift+C / 右键粘贴全部静默失败,见 prelease 前
+  // 勘误第二轮工作记录)。Electron clipboard 模块没有权限层。
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_CLIPBOARD_READ_TEXT,
+    (
+      _e,
+      _envelope: CommandEnvelope<undefined>,
+    ): ClipboardReadTextResponse => {
+      try {
+        return { text: clipboard.readText() };
+      } catch {
+        return { text: '' };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_CLIPBOARD_WRITE_TEXT,
+    (
+      _e,
+      envelope: CommandEnvelope<ClipboardWriteTextPayload>,
+    ): ClipboardWriteTextResponse => {
+      try {
+        clipboard.writeText(envelope.payload.text);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
     },
   );
 

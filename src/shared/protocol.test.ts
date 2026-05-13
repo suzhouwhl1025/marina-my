@@ -27,7 +27,7 @@ describe('protocol constants', () => {
 
   it('all command channels start with cmd: prefix', () => {
     for (const channel of Object.values(COMMAND_CHANNELS)) {
-      expect(channel).toMatch(/^cmd:[a-z]+:[a-z-]+$/);
+      expect(channel).toMatch(/^cmd:[a-z-]+:[a-z-]+$/);
     }
   });
 

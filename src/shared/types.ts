@@ -224,12 +224,16 @@ export interface Settings {
   };
 
   systemIntegration: {
-    explorerContextMenu: boolean;
     /**
      * 从 Explorer 右键菜单触发 "在 Marina 终端中打开" 时,新 session 起在哪里。
      * - 'new-window': 始终开新窗口承载(默认,符合"右键 = 干净环境"直觉)
      * - 'recent-window-tab': 在最近活动窗口里新开 tab
      * 冷启动一律走 new-window 行为(没有可复用窗口),设置只在已开应用时生效。
+     *
+     * 注:**Explorer 右键集成是否已注册** 是系统状态,不是用户偏好,因此不在 settings 里。
+     * 通过 IPC `cmd:explorer-integration:get-status` 现场查 HKCU 注册表 + MSIX 包获得,
+     * 通过 `cmd:explorer-integration:set-{classic,modern}` 修改。导入导出归档时
+     * 不携带注册状态,跨机器导入只复用 explorerOpenIn 等纯偏好。
      */
     explorerOpenIn: 'new-window' | 'recent-window-tab';
   };
