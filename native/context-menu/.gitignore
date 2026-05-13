@@ -1,0 +1,6 @@
+target/
+build/staging/
+build/*.msix
+*.pfx
+*.cer
+Cargo.lock

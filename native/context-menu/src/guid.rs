@@ -1,0 +1,4 @@
+use windows_core::GUID;
+
+pub const CLSID_MARINA_CONTEXT_MENU: GUID =
+    GUID::from_u128(0x7AB57E23_EBC8_46C2_9DEC_3E88EE3C9865);

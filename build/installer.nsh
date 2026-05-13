@@ -15,9 +15,14 @@
 ; 它们了。
 
 !macro customUnInstall
+  ; 经典右键菜单 HKCU 项
   DeleteRegKey HKCU "Software\Classes\Directory\shell\Marina"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\Marina"
-  ; 顺便清掉 v1.5 改名前的 EasyTerm 残留(应用启动期也会清,这里是兜底)
+  ; v1.5 改名前的 EasyTerm 残留兜底
   DeleteRegKey HKCU "Software\Classes\Directory\shell\EasyTerm"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\EasyTerm"
+  ; Win11 新菜单 MSIX 包(用户可能没启用过,Get-AppxPackage 不存在直接跳过;
+  ;   证书保留不动,下次安装免 UAC)。-NonInteractive 防 PS 弹任何交互;
+  ;   不阻塞卸载 — 失败也只是残留,reg 项已经清完了。
+  ExecWait 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-AppxPackage -Name Marina.ContextMenu -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue"'
 !macroend
