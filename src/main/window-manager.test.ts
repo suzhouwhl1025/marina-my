@@ -29,6 +29,12 @@ const { MockBrowserWindow } = vi.hoisted(() => {
       openDevTools: () => void;
       toggleDevTools: () => void;
       on: (event: string, listener: MockListener) => unknown;
+      // J1:setWindowOpenHandler stub
+      setWindowOpenHandler: (
+        handler: (details: { url: string }) => { action: 'deny' | 'allow' },
+      ) => void;
+      reload: () => void;
+      send: (channel: string, payload: unknown) => void;
     };
     private listeners = new Map<string, MockListener[]>();
     private onceListeners = new Map<string, MockListener[]>();
@@ -43,6 +49,9 @@ const { MockBrowserWindow } = vi.hoisted(() => {
         openDevTools: vi.fn(),
         toggleDevTools: vi.fn(),
         on: vi.fn(),
+        setWindowOpenHandler: vi.fn(),
+        reload: vi.fn(),
+        send: vi.fn(),
       };
       MockBrowserWindow.instances.push(this);
     }
