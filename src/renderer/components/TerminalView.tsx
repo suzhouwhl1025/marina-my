@@ -62,6 +62,7 @@ import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import {
   COMMAND_CHANNELS,
   EVENT_CHANNELS,
@@ -557,6 +558,19 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     fitRef.current = fitAddon;
     searchRef.current = searchAddon;
 
+    // PER-1 / XTM-1:装 WebGL 渲染器替代默认 DOM renderer。
+    // 性能 10-50× 提升,长瀑布输出 (npm install / find / Claude Code 流式
+    // token) 主线程不再 100%、不再 frame drops。
+    //
+    // 必须在 term.open() 之后 loadAddon — WebGL 需要 canvas DOM 节点存在
+    // 才能初始化 GL context。
+    //
+    // onContextLoss 回退:GPU 被系统抢占 / 显卡驱动崩溃 → WebGL context
+    // lost,dispose addon 后 xterm 自动回退 DOM renderer。
+
+    // ↓ 这一段 effect 内部先占位,真正 load 放到 term.open 之后(见下面)
+    let webglAddon: WebglAddon | null = null;
+
     // CP-4 勘误 #6/#9:Ctrl+F、Esc 必须在 xterm 把它们转成 ^F / 0x1B 字节
     // 之前拦下来。React 在 wrapper div 上的 onKeyDown 优先级低 (xterm 内部
     // 直接读 keydown,转成字节写 PTY)。attachCustomKeyEventHandler 是 xterm
@@ -652,6 +666,25 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     );
 
     term.open(container);
+
+    // PER-1:term.open 之后才能 load WebGL addon(需 canvas DOM 节点)。
+    // try/catch 兜底:某些虚拟机 / 无 GPU 加速环境下 WebGL context 创建
+    // 失败,catch 后 xterm 自动用 DOM renderer。
+    try {
+      webglAddon = new WebglAddon();
+      webglAddon.onContextLoss(() => {
+        try {
+          webglAddon?.dispose();
+        } catch {
+          /* ignore */
+        }
+        webglAddon = null;
+      });
+      term.loadAddon(webglAddon);
+    } catch (err) {
+      console.warn('[TerminalView] WebGL renderer unavailable, falling back to DOM', err);
+      webglAddon = null;
+    }
 
     try {
       fitAddon.fit();
@@ -818,6 +851,13 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
       searchAddon.dispose();
+      // PER-1:WebGL addon 必须在 term.dispose 之前释放,否则 GL context
+      // 句柄泄漏(显存累积,大量切 session 后会触发显卡警告)
+      try {
+        webglAddon?.dispose();
+      } catch {
+        /* ignore */
+      }
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
