@@ -1027,6 +1027,53 @@ describe('SessionManager — sendInput / resize', () => {
     ).not.toThrow();
   });
 
+  // TYP-1 / IPC-4:sendInput 现在返回 { accepted, reason }
+  it('sendInput 在 exited session 上返回 accepted=false reason=pty-exited (TYP-1)', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitExit(0);
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('pty-exited');
+  });
+
+  it('sendInput 在不存在 session 上返回 accepted=false reason=session-not-found', () => {
+    const { mgr } = makeManager();
+    const res = mgr.sendInput(
+      'no-such-id',
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('session-not-found');
+  });
+
+  it('sendInput 正常路径返回 accepted=true', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(true);
+    expect(res.reason).toBeUndefined();
+  });
+
   it('resize 透传到 PTY', async () => {
     const { mgr } = makeManager();
     const info = await mgr.createSession({

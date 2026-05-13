@@ -67,6 +67,7 @@ import {
   EVENT_CHANNELS,
   type GetScrollbackPayload,
   type GetScrollbackResponse,
+  type SendInputResponse,
   type SessionOutputPayload,
 } from '@shared/protocol';
 import type { SessionInfo, ThemeId } from '@shared/types';
@@ -74,6 +75,7 @@ import { useAppDispatch, useAppState } from '../store';
 import { readClipboardText, writeClipboardText } from '../clipboard';
 import { Icon } from './icons';
 import { useContextMenuApi, type ContextMenuItem } from './ContextMenu';
+import { useToast } from './Toast';
 import '@xterm/xterm/css/xterm.css';
 
 /**
@@ -329,6 +331,14 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   // 右键菜单走全局 ContextMenuProvider (越界翻转 / Esc / 外部点击 / 滚轮关闭都
   // 在 Provider 里统一处理),这里只保留 handleContextMenu 一个调用点。
   const ctxApi = useContextMenuApi();
+  const toast = useToast();
+  // toast 引用镜像到 ref,让 mount effect 内长期闭包(dataHandler / paste 等)
+  // 能读最新 toast api(useToast 的返回 reference 在 ToastProvider 内是稳定的,
+  // 但走 ref 让"未来 push 实现替换"也免改下游)。
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  // 防 toast 刷屏:多次 sendInput 失败短时间内只弹一次。
+  const lastInputRejectToastAtRef = useRef(0);
 
   // ── 操作:复制 / 粘贴 / 清屏 / 搜索 ──
   //
@@ -647,13 +657,36 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         replayed = true;
       });
 
-    // 用户键盘输入 → 发回 PTY
+    // 用户键盘输入 → 发回 PTY。
+    //
+    // TYP-1 / IPC-4:main 现在返回 { accepted, reason }。accepted=false 时
+    // (session 已退出 / 已 destroy / 非 owner)给用户一个可见 toast,
+    // 避免"敲键无反应 → 关窗口重开"的体感主诉。
+    //
+    // 节流:5 秒内只弹一次 reject toast,避免一长串按键每个都触发一条。
     const dataHandler = term.onData((data) => {
       const base64 = encodeStringToBase64(data);
-      window.api
-        .invoke(COMMAND_CHANNELS.SESSION_SEND_INPUT, {
-          sessionId: session.id,
-          data: base64,
+      void window.api
+        .invoke<{ sessionId: string; data: string }, SendInputResponse>(
+          COMMAND_CHANNELS.SESSION_SEND_INPUT,
+          { sessionId: session.id, data: base64 },
+        )
+        .then((res) => {
+          if (res.accepted) return;
+          const now = Date.now();
+          if (now - lastInputRejectToastAtRef.current < 5000) return;
+          lastInputRejectToastAtRef.current = now;
+          const msg =
+            res.reason === 'pty-exited'
+              ? '会话已退出,请按 × 关闭标签或新建终端'
+              : res.reason === 'session-not-found'
+                ? '会话已不存在(可能被其他窗口关闭)'
+                : res.reason === 'not-owner'
+                  ? '此会话由其他窗口持有,输入未送达'
+                  : res.reason === 'pty-write-failed'
+                    ? 'PTY 写入失败,终端可能需要重启'
+                    : '输入未送达';
+          toastRef.current.push({ kind: 'warn', message: msg });
         })
         .catch((err) => console.error('[TerminalView] send-input failed', err));
     });

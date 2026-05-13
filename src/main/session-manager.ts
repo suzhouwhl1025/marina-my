@@ -655,31 +655,50 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * 把 base64 数据写到 PTY stdin。session 不存在 / 已 exited 时静默
-   * (cp1 修过的同样关闭/HMR 竞态)。
+   * 把 base64 数据写到 PTY stdin。返回 { accepted, reason } 让 renderer 据此
+   * 给用户可见反馈(此前 void 静默,用户看到的是"敲键没反应,关窗口重开"
+   * — TYP-1 / IPC-4 根因)。
    *
    * 顺手开 input echo quiet 窗口(抖动源 C/E):窗口期内 PTY 出来的字节
    * 视作按键自己的 echo / TUI 重绘回声,不触发 markActive,避免"敲键自己
    * 点亮状态点"。详见 INPUT_QUIET_MS。
+   *
+   * pty.write 同步抛错走 B2 加的 try/catch 返回 'pty-write-failed'。
    */
-  sendInput(sessionId: string, base64Data: string): void {
+  sendInput(
+    sessionId: string,
+    base64Data: string,
+  ): {
+    accepted: boolean;
+    reason?: 'session-not-found' | 'pty-exited' | 'pty-write-failed';
+  } {
     const managed = this.sessions.get(sessionId);
-    if (!managed || !managed.pty) return; // 静默
+    if (!managed) return { accepted: false, reason: 'session-not-found' };
+    if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
     managed.inputQuietUntil = Date.now() + this.inputQuietMs;
     managed.pty.write(text);
+    return { accepted: true };
   }
 
   /**
-   * 调整 PTY 终端尺寸。session 不存在 / exited 时静默。
+   * 调整 PTY 终端尺寸。返回 { accepted, reason } 与 sendInput 同款语义。
    *
    * 顺手开"resize quiet 窗口" (CP-3 勘误 #3 v2):窗口期内 PTY 出来的字节
    * 视作 ConPTY/SIGWINCH 重绘回声,不触发 markActive,避免 idle session 在
    * 切窗口/接管时 tab 状态点闪绿。详见 RESIZE_QUIET_MS。
    */
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(
+    sessionId: string,
+    cols: number,
+    rows: number,
+  ): {
+    accepted: boolean;
+    reason?: 'session-not-found' | 'pty-exited' | 'invalid-dimensions';
+  } {
     const managed = this.sessions.get(sessionId);
-    if (!managed || !managed.pty) return;
+    if (!managed) return { accepted: false, reason: 'session-not-found' };
+    if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const dims = validateDimensions(cols, rows);
     // 勘误第二轮:即便 no-op 也开 quiet 窗口。原因 — Claude Code 这类 TUI 在
     // 终端被"重新显示"时会自发整屏重绘(切 tab 后用户回到它,xterm 重挂
@@ -689,7 +708,7 @@ export class SessionManager extends EventEmitter {
     // 导致 idle session 闪绿。这里改为先开 quiet 窗口、再决定是否真 resize。
     managed.resizeQuietUntil = Date.now() + this.resizeQuietMs;
     if (dims.cols === managed.info.cols && dims.rows === managed.info.rows) {
-      return;
+      return { accepted: true };
     }
     managed.info.cols = dims.cols;
     managed.info.rows = dims.rows;
@@ -701,7 +720,12 @@ export class SessionManager extends EventEmitter {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      // resize 失败不阻塞 UI:dims 已写入 SessionInfo,xterm 端已经按新尺寸
+      // 渲染;PTY 端继续按旧尺寸工作只是 readline 折行可能轻微错位。
+      // 上抛 invalid-dimensions 给 renderer 提示。
+      return { accepted: false, reason: 'invalid-dimensions' };
     }
+    return { accepted: true };
   }
 
   // ──────────────────────────────────────────────────────────────────

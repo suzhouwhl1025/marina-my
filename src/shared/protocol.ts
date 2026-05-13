@@ -298,6 +298,36 @@ export interface SendInputPayload {
   data: string;
 }
 
+/**
+ * sendInput/resize 的反馈。
+ *
+ * 历史:CP-1/2/3 期间这两条 IPC 都是 void(成功 / 失败都静默,renderer
+ * 永远不知道键被丢了)。fix/robustness-pass(2026-05-13)起改为返回
+ * accepted + reason,renderer 据此 toast / 视觉降级。
+ *
+ * reason 取值:
+ *   - 'session-not-found' · sessionId 不在 SessionManager.sessions Map(已 destroy / 不存在)
+ *   - 'pty-exited'        · session 在 'exited' 状态,managed.pty===null
+ *   - 'not-owner'         · 调用方不是 session 的 ownerWindowId(只用于 sendInput)
+ *   - 'pty-write-failed'  · pty.write() 抛错(ConPTY pipe half-closed 等)
+ *   - 'invalid-dimensions'· cols/rows 不合规(只用于 resize)
+ *
+ * accepted=true 时 reason 一定不存在。
+ */
+export interface SendInputResponse {
+  accepted: boolean;
+  reason?:
+    | 'session-not-found'
+    | 'pty-exited'
+    | 'not-owner'
+    | 'pty-write-failed';
+}
+
+export interface ResizeSessionResponse {
+  accepted: boolean;
+  reason?: 'session-not-found' | 'pty-exited' | 'invalid-dimensions';
+}
+
 export interface ResizeSessionPayload {
   sessionId: string;
   cols: number;

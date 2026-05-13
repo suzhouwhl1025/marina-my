@@ -83,7 +83,9 @@ import {
   type RenameBookmarkPayload,
   type ReorderBookmarksPayload,
   type ResizeSessionPayload,
+  type ResizeSessionResponse,
   type SendInputPayload,
+  type SendInputResponse,
   type SessionCreatedPayload,
   type SessionDestroyedPayload,
   type SessionExitedPayload,
@@ -350,15 +352,24 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
 
   ipcMain.handle(
     COMMAND_CHANNELS.SESSION_SEND_INPUT,
-    (_e, envelope: CommandEnvelope<SendInputPayload>): void => {
-      sessionManager.sendInput(envelope.payload.sessionId, envelope.payload.data);
+    (
+      _e,
+      envelope: CommandEnvelope<SendInputPayload>,
+    ): SendInputResponse => {
+      return sessionManager.sendInput(
+        envelope.payload.sessionId,
+        envelope.payload.data,
+      );
     },
   );
 
   ipcMain.handle(
     COMMAND_CHANNELS.SESSION_RESIZE,
-    (_e, envelope: CommandEnvelope<ResizeSessionPayload>): void => {
-      sessionManager.resize(
+    (
+      _e,
+      envelope: CommandEnvelope<ResizeSessionPayload>,
+    ): ResizeSessionResponse => {
+      return sessionManager.resize(
         envelope.payload.sessionId,
         envelope.payload.cols,
         envelope.payload.rows,
