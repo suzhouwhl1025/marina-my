@@ -489,6 +489,14 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     // 这些拦截都返回 false,xterm 不再透传字节给 PTY。
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true;
+      // TYP-3 / FOC-7 / CPB-P9:IME composition 期间所有按键透传给 xterm
+      // (xterm helper-textarea 自己处理 composition,我们不要打断)。
+      // 检测两种信号:
+      //   - ev.isComposing(W3C composition state) — 现代浏览器
+      //   - ev.keyCode === 229(老式 IME 信号) — Chromium 兼容路径
+      // 拦截 IME 期间的 Ctrl+F / Ctrl+Shift+C / V 等组合会让 IME 状态机
+      // 卡死,用户报告"中文输入到一半敲空格 Enter 无反应"的根因。
+      if (ev.isComposing || ev.keyCode === 229) return true;
       const isMod = ev.ctrlKey || ev.metaKey;
       const key = ev.key.toLowerCase();
 
