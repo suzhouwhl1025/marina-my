@@ -1,3 +1,24 @@
+# !!! KEEP THIS FILE PURE ASCII -- DO NOT add non-ASCII characters !!!
+#
+# Windows PowerShell 5.1 reads .ps1 using the system ANSI code page when
+# no UTF-8 BOM is present. On a Chinese-locale machine that is CP936/GBK,
+# and our UTF-8 multi-byte sequences get mis-decoded into stray "}" / "{"
+# bytes that break the parser (real bug, v0.1.0-beta.1, see ENC-1).
+#
+# Marina prefers PowerShell 7 (which reads .ps1 as UTF-8 by default) but
+# falls back to powershell.exe 5.1 when 7 is not installed -- so the bug
+# hits every Chinese Windows user without pwsh 7. We do not ship a BOM
+# (it would force every editor + tooling step to preserve it). Pure ASCII
+# is the only stable solution.
+#
+# If you need to emit a Chinese string to the user, do it from the
+# TypeScript side and pass it in as a parameter. Node reads .ts as UTF-8
+# unambiguously; this file must stay ASCII.
+#
+# Regression guard: src/main/shipped-scripts-ascii.test.ts (vitest will
+# fail if any byte > 0x7F or a BOM appears in this file).
+#
+# ---------------------------------------------------------------------------
 # Marina PowerShell hook (formerly EasyTerm, renamed in v1.5).
 #
 # Emits an OSC 1337 sequence before every prompt so the main process can
@@ -12,11 +33,6 @@
 # - Injected by WindowsAdapter.buildShellLaunchParams via:
 #     pwsh -NoLogo -NoExit -Command ". 'pwsh.ps1'"
 #
-# IMPORTANT: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1
-# files using the system ANSI code page when no BOM is present. On a
-# Chinese-locale machine that is CP936/GBK, which mis-decodes UTF-8
-# multi-byte sequences and can produce stray "}" / "{" tokens, breaking
-# the parser. ASCII-only avoids the issue without forcing a BOM.
 # Corresponding docs: software-definition.md 5.1.8, 12.5; ADR-003, ADR-008.
 
 # Source the user's profile if it exists. -Force is intentional: even on

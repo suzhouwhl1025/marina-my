@@ -1,3 +1,10 @@
+# !!! KEEP THIS FILE PURE ASCII -- DO NOT add non-ASCII characters !!!
+# See src/shell-hooks/pwsh.ps1 header for the full rationale (ENC-1).
+# Short version: Windows PowerShell 5.1 mis-decodes UTF-8 .ps1 files as
+# CP936/GBK on Chinese-locale machines and the parser breaks.
+# Regression guard: src/main/shipped-scripts-ascii.test.ts.
+#
+# ---------------------------------------------------------------------------
 # scripts/install-context-menu.ps1
 #
 # Install the Marina Win11 new right-click menu (IExplorerCommand).
@@ -21,12 +28,6 @@
 # exists; we explicitly skip Add-AppxPackage when Get-AppxPackage already
 # reports the package, which is locale-independent (the previous version
 # matched error-message text, which broke on non-English Windows).
-#
-# IMPORTANT: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1
-# using the system ANSI code page when no BOM is present; on a Chinese
-# locale that is GBK/CP936, which mis-decodes UTF-8 and can produce stray
-# structural tokens, breaking the parser. ASCII-only avoids the issue
-# without forcing a BOM.
 
 [CmdletBinding()]
 param(

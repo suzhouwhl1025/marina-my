@@ -1,3 +1,8 @@
+# !!! KEEP THIS FILE PURE ASCII -- DO NOT add non-ASCII characters !!!
+# See src/shell-hooks/pwsh.ps1 header for the full rationale (ENC-1).
+# Regression guard: src/main/shipped-scripts-ascii.test.ts.
+#
+# ---------------------------------------------------------------------------
 # scripts/uninstall-context-menu.ps1
 #
 # Uninstall the Marina Win11 right-click menu. Removes the MSIX package
@@ -8,10 +13,6 @@
 #
 # Package-not-installed is treated as success (idempotent). Failures go
 # to stderr with non-zero exit.
-#
-# IMPORTANT: keep this file ASCII-only. See install-context-menu.ps1 for
-# the rationale (Windows PowerShell 5.1 + GBK locale mis-decodes UTF-8
-# without BOM, breaking the parser).
 
 [CmdletBinding()]
 param()
