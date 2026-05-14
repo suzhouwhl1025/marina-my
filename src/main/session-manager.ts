@@ -91,6 +91,13 @@ const CWD_POLL_INTERVAL_MS = 5000;
 const RESIZE_QUIET_MS = 500;
 
 /**
+ * PER-2 / F1:sessionOutput IPC 聚合窗口 (ms)。
+ * 8ms 在 125 FPS 频率 — 视觉上无延迟,但能把 burst 输出场景下每秒数百次
+ * IPC 压成 ~30-60 次,降低 renderer base64 解码 + xterm parse CPU 占用。
+ */
+const EMIT_BATCH_MS = 8;
+
+/**
  * 启动期 grace 窗口 (M1-I,P1-4)。
  *
  * 解决:PowerShell 启动横幅 + prompt 出现时 PTY 短暂喷字节,markActive 立即
@@ -251,6 +258,16 @@ interface ManagedSession {
    * Windows Terminal hostname 等会持续刷标题,不锁住会冲掉用户的命名)。
    */
   manuallyRenamed: boolean;
+  /**
+   * PER-2 / F1:IPC 聚合缓冲 — 8ms 窗口内积累的 sessionOutput,timer 到点
+   * 一次性 emit。降低高速 PTY 输出场景下 IPC 消息数,缓解 renderer 反压。
+   *
+   * 每条 emit 都带它代表的 seq 范围(开始 / 结束),但由于我们用"合并后
+   * 单条 payload",renderer 只看到一个 seq(最后一条字节对应的)。
+   * scrollback append 仍同步,scrollbackLastSeq 仍准。
+   */
+  pendingEmit: { bytes: Buffer; lastSeq: number } | null;
+  pendingEmitTimer: NodeJS.Timeout | null;
 }
 
 export interface CreateSessionInput {
@@ -317,6 +334,11 @@ export interface SessionManagerOptions {
    * 生产代码不显式传,默认 true。
    */
   skipCwdValidation?: boolean;
+  /**
+   * PER-2 / F1:sessionOutput IPC 聚合窗口 (ms)。生产 8;测试传 0 → 每个
+   * PTY chunk 立即 emit (保持现有断言的时序假设)。
+   */
+  emitBatchMs?: number;
 }
 
 export class SessionManager extends EventEmitter {
@@ -329,11 +351,19 @@ export class SessionManager extends EventEmitter {
   private readonly startupGraceMs: number;
   private readonly inputQuietMs: number;
   private readonly skipCwdValidation: boolean;
+  private readonly emitBatchMs: number;
 
   /**
    * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
+   *
+   * PER-4:加 30s TTL — 用户装 / 卸载 PowerShell 7、改 PATH 后不必重启
+   * Marina 也能在 EmptyPathState 的"检测到的 Shell"刷出新结果。30s 既给
+   * 用户主动重新检测的及时性,又把热路径 createSession 的 detectShells
+   * 调用数压到很低。
    */
   private cachedShells: ShellInfo[] | null = null;
+  private cachedShellsAt = 0;
+  private static readonly SHELL_CACHE_TTL_MS = 30_000;
 
   constructor(
     private readonly _windowManager: WindowManager,
@@ -354,6 +384,8 @@ export class SessionManager extends EventEmitter {
     this.startupGraceMs = options.startupGraceMs ?? STARTUP_GRACE_MS;
     this.inputQuietMs = options.inputQuietMs ?? INPUT_QUIET_MS;
     this.skipCwdValidation = options.skipCwdValidation ?? false;
+    // 测试缺省传 0(立即 emit,保持时序断言)
+    this.emitBatchMs = options.emitBatchMs ?? EMIT_BATCH_MS;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -476,6 +508,8 @@ export class SessionManager extends EventEmitter {
       startupGraceUntil: Date.now() + this.startupGraceMs,
       inputQuietUntil: 0,
       manuallyRenamed: false,
+      pendingEmit: null,
+      pendingEmitTimer: null,
     };
     this.sessions.set(sessionId, managed);
 
@@ -534,6 +568,18 @@ export class SessionManager extends EventEmitter {
     if (managed.info.displayName === trimmed) return;
     managed.info.displayName = trimmed;
     this.emitStateChanged(managed, { displayName: trimmed });
+  }
+
+  /**
+   * STM-3:清除 manuallyRenamed 标记,让 OSC 0/1/2 标题事件重新覆盖
+   * displayName。用户主动放弃手动命名以恢复 Claude Code 等持续刷新的
+   * 自动标题。幂等(标记本来就 false 时 no-op)。
+   * 不存在的 sessionId 静默(与 sendInput / resize 一致)。
+   */
+  clearManualRename(sessionId: string): void {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return;
+    managed.manuallyRenamed = false;
   }
 
   /**
@@ -655,31 +701,73 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * 把 base64 数据写到 PTY stdin。session 不存在 / 已 exited 时静默
-   * (cp1 修过的同样关闭/HMR 竞态)。
+   * 把 base64 数据写到 PTY stdin。返回 { accepted, reason } 让 renderer 据此
+   * 给用户可见反馈(此前 void 静默,用户看到的是"敲键没反应,关窗口重开"
+   * — TYP-1 / IPC-4 根因)。
    *
    * 顺手开 input echo quiet 窗口(抖动源 C/E):窗口期内 PTY 出来的字节
    * 视作按键自己的 echo / TUI 重绘回声,不触发 markActive,避免"敲键自己
    * 点亮状态点"。详见 INPUT_QUIET_MS。
+   *
+   * pty.write 同步抛错走 B2 加的 try/catch 返回 'pty-write-failed'。
    */
-  sendInput(sessionId: string, base64Data: string): void {
+  sendInput(
+    sessionId: string,
+    base64Data: string,
+  ): {
+    accepted: boolean;
+    reason?: 'session-not-found' | 'pty-exited' | 'pty-write-failed';
+  } {
     const managed = this.sessions.get(sessionId);
-    if (!managed || !managed.pty) return; // 静默
+    if (!managed) return { accepted: false, reason: 'session-not-found' };
+    if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
-    managed.inputQuietUntil = Date.now() + this.inputQuietMs;
-    managed.pty.write(text);
+    // CUR-1:用户按 Enter (\r 或 \n) → 关闭 input quiet 窗口,让紧随的
+    // 真实命令输出立即触发 markActive。否则 200ms 内的真输出被压成
+    // "状态点保持 idle 黄色",直到 200ms 后才变绿 — 用户视角"按 Enter
+    // 后命令延迟一拍才显示在跑"。
+    // 普通按键(非 Enter)仍走原逻辑顺延 quiet 窗口。
+    if (text.includes('\r') || text.includes('\n')) {
+      managed.inputQuietUntil = 0;
+    } else {
+      managed.inputQuietUntil = Date.now() + this.inputQuietMs;
+    }
+    // TYP-2:pty.write 在 ConPTY pipe half-closed / 子进程已死但 onExit 还
+    // 没到达等 race 情况下会同步抛错。原来无 try/catch → IPC handle 把
+    // 异常包装成 promise reject → renderer .catch(console.error) 静默吞,
+    // 每次敲键都失败而用户毫无感知。这里抓住 + 返回 pty-write-failed,
+    // 让 renderer dataHandler 弹 toast。
+    try {
+      managed.pty.write(text);
+    } catch (err) {
+      console.warn(
+        `[SessionManager] pty.write failed sid=${sessionId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { accepted: false, reason: 'pty-write-failed' };
+    }
+    return { accepted: true };
   }
 
   /**
-   * 调整 PTY 终端尺寸。session 不存在 / exited 时静默。
+   * 调整 PTY 终端尺寸。返回 { accepted, reason } 与 sendInput 同款语义。
    *
    * 顺手开"resize quiet 窗口" (CP-3 勘误 #3 v2):窗口期内 PTY 出来的字节
    * 视作 ConPTY/SIGWINCH 重绘回声,不触发 markActive,避免 idle session 在
    * 切窗口/接管时 tab 状态点闪绿。详见 RESIZE_QUIET_MS。
    */
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(
+    sessionId: string,
+    cols: number,
+    rows: number,
+  ): {
+    accepted: boolean;
+    reason?: 'session-not-found' | 'pty-exited' | 'invalid-dimensions';
+  } {
     const managed = this.sessions.get(sessionId);
-    if (!managed || !managed.pty) return;
+    if (!managed) return { accepted: false, reason: 'session-not-found' };
+    if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const dims = validateDimensions(cols, rows);
     // 勘误第二轮:即便 no-op 也开 quiet 窗口。原因 — Claude Code 这类 TUI 在
     // 终端被"重新显示"时会自发整屏重绘(切 tab 后用户回到它,xterm 重挂
@@ -689,7 +777,7 @@ export class SessionManager extends EventEmitter {
     // 导致 idle session 闪绿。这里改为先开 quiet 窗口、再决定是否真 resize。
     managed.resizeQuietUntil = Date.now() + this.resizeQuietMs;
     if (dims.cols === managed.info.cols && dims.rows === managed.info.rows) {
-      return;
+      return { accepted: true };
     }
     managed.info.cols = dims.cols;
     managed.info.rows = dims.rows;
@@ -701,7 +789,12 @@ export class SessionManager extends EventEmitter {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      // resize 失败不阻塞 UI:dims 已写入 SessionInfo,xterm 端已经按新尺寸
+      // 渲染;PTY 端继续按旧尺寸工作只是 readline 折行可能轻微错位。
+      // 上抛 invalid-dimensions 给 renderer 提示。
+      return { accepted: false, reason: 'invalid-dimensions' };
     }
+    return { accepted: true };
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -744,6 +837,11 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   private handlePtyData(managed: ManagedSession, data: string): void {
+    // CPT-3:ConPTY 异步关闭时仍可能 emit 一次 onData,此时 managed 可能已
+    // 从 sessions Map 删除(destroySession 走完)或 pty 已置 null(handlePtyExit
+    // 已走完但 disposable 还没完全 dispose)。早 return 显式 guard,避免依赖
+    // 下游 ipc.ts 巧合兜住的脆弱链路。
+    if (!this.sessions.has(managed.info.id) || !managed.pty) return;
     const bytes = Buffer.from(data, 'utf8');
     const parsed = managed.parser.parse(bytes);
 
@@ -759,17 +857,20 @@ export class SessionManager extends EventEmitter {
 
     // 透传字节流入 scrollback + emit sessionOutput
     if (parsed.passthrough.length > 0) {
-      this.appendScrollback(managed, parsed.passthrough);
-
+      // PER-2 修复(2026-05-14):scrollback append + scrollbackLastSeq 不
+      // 在此处立即推进,而是与 emit 一起在 flushPendingEmit 里原子前进。
+      //
+      // 历史问题:51ab975 第一版 PER-2 在此处立即 appendScrollback +
+      // 更新 scrollbackLastSeq,但 emit 延迟 8ms。renderer 在 pendingEmit
+      // 窗口内调 getScrollback 会拿到含 pendingEmit 字节的快照 + 旧 lastSeq;
+      // 后续 emit flush 出来的合并 payload seq > 快照 lastSeq → renderer
+      // write 整段 → scrollback 已包含的字节被双写。
+      //
+      // 修复后语义:scrollbackLastSeq 始终 ==(已 emit 的最后 seq),
+      // scrollback buffer 内容始终 == (已 emit 的字节累计);
+      // pendingEmit 中尚未 flush 的字节对 renderer 不可见。
       const seq = managed.outputSeq++;
-      managed.scrollbackLastSeq = seq;
-
-      const payload: SessionOutputPayload = {
-        sessionId: managed.info.id,
-        data: parsed.passthrough.toString('base64'),
-        seq,
-      };
-      this.emit('sessionOutput', payload);
+      this.queueEmit(managed, parsed.passthrough, seq);
 
       // 状态机:有输出 → active,重置 idle 计时器。
       // 跳过 markActive 的三种 quiet 窗口(scrollback / sessionOutput 仍正常,
@@ -789,8 +890,76 @@ export class SessionManager extends EventEmitter {
         now >= managed.inputQuietUntil
       ) {
         this.markActive(managed);
+      } else if (now < managed.startupGraceUntil) {
+        // STM-4:grace 期内有字节流入,虽然跳过 markActive(避免抖动),
+        // 但仍重置 idle timer — 否则 banner 在 1.49s 才结束的极端 case
+        // 下,createSession 起的 idle timer 2s 到点 fire → "刚结束 banner
+        // 就 idle"。重置后 idle timer 顺延,grace 后实际进 idle 的时机
+        // = 最后一条 banner 字节 + activeIdleThresholdSeconds(默认 2s),
+        // 符合用户预期。
+        this.scheduleIdleCheck(managed);
       }
     }
+  }
+
+  /**
+   * PER-2:把一次 PTY chunk 入 pendingEmit 缓冲,8ms 后(或 destroy 前)
+   * 通过 flushPendingEmit 一起 append 进 scrollback、推 scrollbackLastSeq、
+   * 发 sessionOutput event。
+   *
+   * 关键不变量:在 pendingEmit 窗口内,scrollback 内容和 scrollbackLastSeq
+   * 都不变;getScrollback 看到的快照永远等于"已 emit 的全部历史",pending
+   * 字节对 renderer 不可见。flush 之后三者一起原子前进。
+   *
+   * emitBatchMs <= 0 路径(测试用):立即同步 append + emit,保留与历史
+   * 单测的时序断言一致。
+   */
+  private queueEmit(managed: ManagedSession, bytes: Buffer, seq: number): void {
+    if (this.emitBatchMs <= 0) {
+      // 立即路径 — append + 推 lastSeq + emit 在同一同步块内完成,
+      // 与延迟路径在 flush 时的原子性等价。
+      this.appendScrollback(managed, bytes);
+      managed.scrollbackLastSeq = seq;
+      const payload: SessionOutputPayload = {
+        sessionId: managed.info.id,
+        data: bytes.toString('base64'),
+        seq,
+      };
+      this.emit('sessionOutput', payload);
+      return;
+    }
+    if (managed.pendingEmit === null) {
+      managed.pendingEmit = { bytes, lastSeq: seq };
+    } else {
+      managed.pendingEmit.bytes = Buffer.concat([
+        managed.pendingEmit.bytes,
+        bytes,
+      ]);
+      managed.pendingEmit.lastSeq = seq;
+    }
+    if (managed.pendingEmitTimer === null) {
+      managed.pendingEmitTimer = setTimeout(() => {
+        managed.pendingEmitTimer = null;
+        this.flushPendingEmit(managed);
+      }, this.emitBatchMs);
+    }
+  }
+
+  private flushPendingEmit(managed: ManagedSession): void {
+    if (!managed.pendingEmit) return;
+    const { bytes, lastSeq } = managed.pendingEmit;
+    managed.pendingEmit = null;
+    // 原子前进顺序:先 scrollback append,再 scrollbackLastSeq,再 emit。
+    // 这三步在 Node 单线程下同步完成,中间不会被 IPC 调用 getScrollback
+    // 打断 — 任何观察者看到的都是一致状态。
+    this.appendScrollback(managed, bytes);
+    managed.scrollbackLastSeq = lastSeq;
+    const payload: SessionOutputPayload = {
+      sessionId: managed.info.id,
+      data: bytes.toString('base64'),
+      seq: lastSeq,
+    };
+    this.emit('sessionOutput', payload);
   }
 
   private appendScrollback(managed: ManagedSession, bytes: Buffer): void {
@@ -800,9 +969,23 @@ export class SessionManager extends EventEmitter {
       managed.scrollback = Buffer.concat([managed.scrollback, bytes]);
     }
     if (managed.scrollback.length > SCROLLBACK_LIMIT) {
-      managed.scrollback = managed.scrollback.subarray(
-        managed.scrollback.length - SCROLLBACK_LIMIT,
+      // OSC-2:尾部裁切对齐 ESC/换行边界,避免接管首屏乱码。
+      //
+      // 历史:`subarray(length - LIMIT)` 在裸字节上做裁切,落点可能在:
+      //   - 多字节 UTF-8 序列中间 → 首字符 U+FFFD(轻微)
+      //   - CSI/OSC/DCS 转义序列中间 → xterm 进 OSC parse 状态吞数十-数百
+      //     字节直到下一个 BEL/ST(严重,首屏大段隐形或状态污染)
+      //   - SGR 颜色序列中间 → 颜色错位直到下一个完整 SGR
+      //
+      // 修复:findSafeTruncationBoundary 从目标偏移向前找最近的 \n,把
+      // 实际裁切点对齐到完整 ANSI 行的边界。最多回退 4KB(防极端 case
+      // 整段没换行时永远回退)。
+      const minStart = managed.scrollback.length - SCROLLBACK_LIMIT;
+      const safeStart = findSafeTruncationBoundary(
+        managed.scrollback,
+        minStart,
       );
+      managed.scrollback = managed.scrollback.subarray(safeStart);
     }
   }
 
@@ -846,6 +1029,16 @@ export class SessionManager extends EventEmitter {
   ): void {
     const sid = managed.info.id;
     if (!this.sessions.has(sid)) return;
+
+    // PER-2:destroy 前 flush pending emit,让 owner 收到最后一段字节
+    // 之后再标记 destroyed。否则会丢掉 destroy 前 8ms 内的最后 burst。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
+    }
+    if (managed.pendingEmit) {
+      this.flushPendingEmit(managed);
+    }
 
     this.clearTimers(managed);
     for (const d of managed.disposables) {
@@ -1014,8 +1207,15 @@ export class SessionManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   private async getShells(): Promise<ShellInfo[]> {
-    if (this.cachedShells) return this.cachedShells;
+    const now = Date.now();
+    if (
+      this.cachedShells &&
+      now - this.cachedShellsAt < SessionManager.SHELL_CACHE_TTL_MS
+    ) {
+      return this.cachedShells;
+    }
     this.cachedShells = await this.platformAdapter.detectShells();
+    this.cachedShellsAt = now;
     return this.cachedShells;
   }
 
@@ -1072,16 +1272,36 @@ function pickDisplayName(template: Template, shell: ShellInfo): string {
 }
 
 /**
- * OSC 0/1/2 标题规范化:控制字符替成空格、合并连续空格、trim、截到 100 字符。
+ * OSC 0/1/2 标题规范化:
+ *   - 控制字符(C0 + DEL)替成空格
+ *   - OSC-6:Unicode 双向重写字符也替成空格(防 RTL override 视觉欺骗)
+ *   - 合并连续空格、trim、截到 100 字符
+ *
  * 空串返回 ''(调用方据此跳过)。
  */
 const TITLE_MAX_LEN = 100;
 function sanitizeTitle(raw: string): string {
-  // 把 \r \n \t \v \f 与其他 C0 控制字符(<0x20)替为空格;DEL (0x7F) 同处理
   let s = '';
   for (const ch of raw) {
     const code = ch.codePointAt(0)!;
-    s += code < 0x20 || code === 0x7f ? ' ' : ch;
+    if (code < 0x20 || code === 0x7f) {
+      s += ' ';
+      continue;
+    }
+    // OSC-6:Unicode 双向重写字符 — 防止恶意 OSC 通过 RTL override 让
+    // tab 标题视觉上反转("safe.txt exe.live" 看上去像 "evil.exe safe.txt"
+    // 反向版)。U+200B / U+200E / U+200F / U+202A-202E / U+2066-2069。
+    if (
+      code === 0x200b ||
+      code === 0x200e ||
+      code === 0x200f ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      s += ' ';
+      continue;
+    }
+    s += ch;
   }
   s = s.replace(/\s+/g, ' ').trim();
   if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN);
@@ -1089,20 +1309,62 @@ function sanitizeTitle(raw: string): string {
 }
 
 /**
- * 把 OSC 1337 报告的 cwd 规范化:trim、~ 展开、转绝对。失败时原样返回。
+ * OSC-2:scrollback 尾部裁切对齐 ANSI/UTF-8 边界。
+ *
+ * 从 minStart 开始向后扫描,找到最近的 `\n`(0x0A)作为安全起点。
+ * 没找到时最多向后扫 4KB,仍没找到 → 用 minStart 兜底(整段无换行的
+ * 极端 case,只能接受可能的 ANSI 半截);防止扫遍整段 buffer。
+ *
+ * 为什么找 \n 而不是找 ESC 边界:
+ *   - 找 ESC 边界更精确(任何完整 SGR/CSI 之后都是安全的),但实现复杂
+ *     (需识别完整 vt 状态机)
+ *   - \n 总是 ANSI 行边界,xterm 解析时一定回到 ground state,简单可靠
+ *   - 4KB 上限保证最坏情况下损失数十行,远好过乱码风险
+ *
+ * 测试覆盖:OSC-2 test case 见 session-manager.test.ts。
+ */
+export function findSafeTruncationBoundary(
+  buf: Buffer,
+  minStart: number,
+): number {
+  if (minStart <= 0) return 0;
+  const maxScanEnd = Math.min(buf.length, minStart + 4096);
+  for (let i = minStart; i < maxScanEnd; i++) {
+    if (buf[i] === 0x0a /* \n */) {
+      return i + 1; // \n 后的下一个字节才是安全起点
+    }
+  }
+  // 没找到合理边界 — 用 minStart 兜底,接受可能的 ANSI 半截
+  return minStart;
+}
+
+/**
+ * 把 OSC 1337 报告的 cwd 规范化:trim、~ 展开、PSDrive 前缀剥离、转绝对。
+ * 失败时原样返回。
+ *
+ * FLK-9:PowerShell 在某些 PSDrive(自定义、PSProvider 加载)上下文里
+ * 会发 `Microsoft.PowerShell.Core\FileSystem::C:\foo` 这种全限定形式,
+ * normalize 不一致让 cwdDrifted 比较抖动 — 每个 prompt 都"变 → 复原"
+ * 让 statusbar ⚠️ 图标闪一下。剥离 PSDrive 前缀让等价路径归一。
  */
 function normalizeCwd(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return trimmed;
+  let value = raw.trim();
+  if (!value) return value;
+  // FLK-9:剥 PSDrive PSProvider 前缀(模式 `<Provider>::<path>`)
+  // PowerShell 标准模式:Microsoft.PowerShell.Core\FileSystem::C:\xxx
+  // 通用模式:任何 `\w+\.[\w.]+\\\w+::` 后跟实际路径
+  const psDriveMatch = value.match(/^[\w.]+\\[\w.]+::(.+)$/);
+  if (psDriveMatch) {
+    value = psDriveMatch[1]!;
+  }
   // ~ 展开 (有的 shell hook 在 git-bash 下可能会发 ~/...)
-  let value = trimmed;
   if (value.startsWith('~')) {
     value = value.replace(/^~/, homedir());
   }
   try {
     return resolvePath(value);
   } catch {
-    return trimmed;
+    return value;
   }
 }
 

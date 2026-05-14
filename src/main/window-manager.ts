@@ -25,7 +25,7 @@
  * getByElectronId / getMostRecentlyActive。
  * CP-1 还不需要 session-window 的关系管理,该功能在 CP-3 加入。
  */
-import { BrowserWindow, screen } from 'electron';
+import { BrowserWindow, screen, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -136,7 +136,18 @@ export class WindowManager implements IWindowManager {
         preload: resolve(__dirname, '../preload/index.mjs'),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false, // node-pty 等原生模块需要
+        // SEC-1 回退(2026-05-14):sandbox 暂留 false。
+        //
+        // SEC-1(4d245f7)曾尝试启用 sandbox=true,但运行时 preload 立刻
+        // 报 "Cannot use import statement outside a module" — Electron
+        // sandboxed preload 只支持 CommonJS,而当前 electron-vite 把
+        // preload 打成 ESM(index.mjs)。这不是 node API 依赖问题,而是
+        // preload 产物格式问题。
+        //
+        // 后续重启 SEC-1 的正路:让 preload rollup 输出 cjs 格式 + 改这里
+        // 的 preload 路径为 index.js。当前 preload 源码没有 top-level
+        // await 等纯 ESM 特性,转 CJS 没有阻塞。
+        sandbox: false,
       },
     });
 
@@ -257,12 +268,30 @@ export class WindowManager implements IWindowManager {
       win.webContents.openDevTools({ mode: 'detach' });
     }
 
-    // 主动捕获 renderer 进程崩溃 / 未捕获错误,印到 main stderr。
-    // 用户从 PowerShell 启动 packed exe 时能看到诊断信息,无需 DevTools。
+    // CRA-1:renderer 进程崩溃自动 reload + 记录日志。
+    //
+    // 历史:监听器只 console.error,窗口看着像活的(最后一帧画面)但所有
+    // 交互无反应,用户必须关掉窗口重开。
+    //
+    // 现在:reason 非 clean-exit(crashed/oom/killed/launch-failed/...)时
+    // 主动 webContents.reload() — 拉回干净 renderer + handshake + IPC sync。
+    // 用户感知"窗口闪一下重新加载",但所有 session(在 main 端)继续活,
+    // PTY 不受影响,scrollback 通过 get-scrollback 重新拉到新 renderer。
     win.webContents.on('render-process-gone', (_e, details) => {
       console.error(
         `[WindowManager] renderer process gone (window ${windowNumber}): reason=${details.reason} exitCode=${details.exitCode}`,
       );
+      if (details.reason === 'clean-exit' || win.isDestroyed()) return;
+      // 防御:reload 自身可能失败(罕见,通常 renderer 进程刚崩 reload
+      // 立即拉一个新的);try/catch 保护避免主进程被异常终止。
+      try {
+        win.webContents.reload();
+      } catch (err) {
+        console.error(
+          `[WindowManager] reload after crash failed (window ${windowNumber}):`,
+          err,
+        );
+      }
     });
     win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
       console.error(
@@ -274,6 +303,19 @@ export class WindowManager implements IWindowManager {
         `[WindowManager] preload-error (window ${windowNumber}): preload="${preloadPath}"`,
         error,
       );
+    });
+
+    // OSC-5 / SEC-4:WebLinksAddon + OSC 8 超链接的点击触发 window.open,
+    // Electron 默认拦截。这里装 setWindowOpenHandler 把白名单协议路由到
+    // shell.openExternal 用系统默认浏览器打开。
+    //
+    // 白名单:http / https / mailto。拒绝 file:// / javascript: / chrome: 等
+    // 本地协议(防 OSC 8 注入打开本地文件 / 触发 webview 漏洞)。
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^(https?|mailto):/i.test(url)) {
+        void shell.openExternal(url);
+      }
+      return { action: 'deny' };
     });
 
     for (const handler of this.onCreatedHandlers) {

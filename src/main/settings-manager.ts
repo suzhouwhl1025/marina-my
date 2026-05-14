@@ -53,6 +53,9 @@ export const DEFAULT_SETTINGS: Settings = {
     confirmOnQuit: true,
     selectOnCopy: true,
     terminalRightClick: 'menu',
+    // fix/robustness-pass-20260513 / CPB-P8:默认开 bracketed paste
+    // (Marina 默认 shell 是 PowerShell,7+ ReadLine 默认识别 ?2004)。
+    bracketedPaste: true,
   },
   systemIntegration: {
     explorerOpenIn: 'new-window',

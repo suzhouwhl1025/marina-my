@@ -67,10 +67,49 @@ export function ContextMenuProvider({ children }: { children: ReactNode }): JSX.
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
-  const close = useCallback(() => setMenu(null), []);
+  // FOC-5:打开菜单前记录当前焦点 element,关闭时归还。
+  //
+  // 没有这个保护:用户右键终端 → 弹菜单 → 选/不选关闭 → 菜单 button
+  // 接管了 :focus → 菜单 unmount 后焦点漂到 body → 用户敲键无反应。
+  // 用户反馈"复制后打不进字 / 右键关菜单后打不进字"的根因。
+  //
+  // 设计:rAF 内做归还,且只在 activeElement 已落回 body / 已 unmount
+  // 时归还 — 避免覆盖菜单项 onSelect 内主动改的焦点(如 Sidebar
+  // beginRename 把焦点送给重命名输入框)。
+  const previousActiveElementRef = useRef<Element | null>(null);
+
+  const close = useCallback(() => {
+    setMenu(null);
+    const prev = previousActiveElementRef.current;
+    previousActiveElementRef.current = null;
+    if (!prev) return;
+    requestAnimationFrame(() => {
+      const cur = document.activeElement;
+      // 当前焦点已被 onSelect 内的 action 接管(如重命名 input)→ 不打扰
+      if (cur && cur !== document.body && cur !== document.documentElement) {
+        return;
+      }
+      // prev 可能在菜单关闭过程中被 unmount (如 xterm 重挂),验证仍在 DOM
+      if (prev instanceof HTMLElement && document.body.contains(prev)) {
+        prev.focus();
+      } else {
+        // prev 已不在 DOM,fallback 到 xterm helper-textarea(若仍存在)
+        const ta = document.querySelector<HTMLTextAreaElement>(
+          '.xterm-helper-textarea',
+        );
+        ta?.focus();
+      }
+    });
+  }, []);
+
   const api = useMemo<ContextMenuApi>(
     () => ({
       open: (s) => {
+        // 仅在首次打开时捕获(连开菜单 / 嵌套场景不要把上一个菜单的
+        // ctx-menu-item 错存为 previous)
+        if (!previousActiveElementRef.current) {
+          previousActiveElementRef.current = document.activeElement;
+        }
         setPos(null);
         setMenu(s);
       },

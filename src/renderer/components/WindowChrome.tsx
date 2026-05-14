@@ -27,6 +27,7 @@ import {
 import type { WindowStyle } from '@shared/types';
 import { Minimize2, Minus, Square, Copy as RestoreIcon, X } from 'lucide-react';
 import { useAppState } from '../store';
+import { focusTerminalDom } from '../focus';
 
 void Minimize2; // 暂未使用,保留 import 防止 tree-shake 误删
 
@@ -63,11 +64,18 @@ export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element 
 
   const callMin = (): void => {
     void window.api.invoke(COMMAND_CHANNELS.WINDOW_MINIMIZE, undefined);
+    // FOC-3:最小化不需要立刻归还(窗口都缩了),但用户从托盘点回来后
+    // (最小化 → 任务栏点回来)Chromium 焦点会落在最后聚焦的 button。
+    // 立即归还 — Win 重新显示时 xterm 已经有焦点。
+    focusTerminalDom();
   };
   const callToggleMax = (): void => {
     void window.api.invoke(COMMAND_CHANNELS.WINDOW_TOGGLE_MAXIMIZE, undefined);
+    // FOC-3:切最大化后焦点应该回 xterm,让用户立即可打字。
+    focusTerminalDom();
   };
   const callClose = (): void => {
+    // 关闭按钮不归还焦点 — 窗口都关了,无意义。
     void window.api.invoke(COMMAND_CHANNELS.WINDOW_CLOSE_SELF, undefined);
   };
 

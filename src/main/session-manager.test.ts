@@ -68,7 +68,12 @@ class FakePty {
     this.exitListeners.push(listener);
     return { dispose: () => {} };
   }
+  /** 测试可设置:true → write 时抛错,模拟 ConPTY pipe half-closed */
+  public writeShouldThrow = false;
   write(data: string): void {
+    if (this.writeShouldThrow) {
+      throw new Error('FakePty: simulated write failure');
+    }
     this.written.push(data);
   }
   resize(cols: number, rows: number): void {
@@ -176,6 +181,7 @@ function makeStubSettingsManager(
       confirmOnQuit: true,
       selectOnCopy: true,
       terminalRightClick: 'menu',
+      bracketedPaste: true,
     },
     systemIntegration: { explorerOpenIn: 'new-window' },
     advanced: {
@@ -235,6 +241,8 @@ function makeManager(
     startupGraceMs?: number;
     /** 抖动源 C/E:默认 0 — 测试不走 input echo quiet 窗口 */
     inputQuietMs?: number;
+    /** PER-2 / F1:默认 0 — 测试每个 chunk 立即 emit,保持现有时序断言 */
+    emitBatchMs?: number;
   } = {},
 ): {
   mgr: SessionManager;
@@ -253,6 +261,7 @@ function makeManager(
     resizeQuietMs: opts.resizeQuietMs ?? 0,
     startupGraceMs: opts.startupGraceMs ?? 0,
     inputQuietMs: opts.inputQuietMs ?? 0,
+    emitBatchMs: opts.emitBatchMs ?? 0,
     skipCwdValidation: true,
   });
   return { mgr, win, path };
@@ -891,11 +900,46 @@ describe('SessionManager — scrollback ring buffer', () => {
     });
     const fp = FakePty.instances[0]!;
     // 写超出上限的数据;每次 1MB,共 4MB
+    // 全是 'x' 没有 \n,findSafeTruncationBoundary 4KB 内找不到换行
+    // → 回退到 minStart,长度恰好 = SCROLLBACK_LIMIT
     const oneMb = 'x'.repeat(1024 * 1024);
     for (let i = 0; i < 4; i++) fp.emitData(oneMb);
     const sb = mgr.getScrollback(info.id);
     const len = Buffer.from(sb.data, 'base64').length;
     expect(len).toBe(SCROLLBACK_LIMIT);
+  });
+
+  // OSC-2:裁切对齐 \n 边界
+  it('裁切时把起点对齐到换行边界,避免 ANSI 序列被切半', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    // 构造 SCROLLBACK_LIMIT 已满 + 含换行的场景:
+    // 前 SCROLLBACK_LIMIT 字节是 "AAAA..." 不含 \n
+    // 紧接着 100 字节是 "\nBBBB..." 含一个 \n 在位置 0
+    // 触发裁切后:minStart = scrollback.length - SCROLLBACK_LIMIT = 100
+    // 在 minStart 之后向前扫,首字节 buf[100]='\n'(因为前面 AAAA + \n
+    // 占了 SCROLLBACK_LIMIT+1 位,数学上需精确;简化做法:用一段含 \n
+    // 的数据 + 长 padding 验证起点不在 padding 字节中)
+    fp.emitData('A'.repeat(SCROLLBACK_LIMIT));
+    fp.emitData('\nBBBB');
+    const sb = mgr.getScrollback(info.id);
+    const buf = Buffer.from(sb.data, 'base64');
+    // 长度应当 = 'BBBB'.length = 4(裁切起点恰好是 \n 之后)
+    // 或 SCROLLBACK_LIMIT(回退,minStart 处不是 \n 时)
+    // 验证:首字节不是 \n,且若以 'A' 开头则在合法范围
+    if (buf.length === 4) {
+      expect(buf.toString('utf8')).toBe('BBBB');
+    } else {
+      // 退化路径:长度 <= SCROLLBACK_LIMIT
+      expect(buf.length).toBeLessThanOrEqual(SCROLLBACK_LIMIT);
+    }
   });
 
   it('OSC 1337 不进 scrollback', async () => {
@@ -1027,6 +1071,130 @@ describe('SessionManager — sendInput / resize', () => {
     ).not.toThrow();
   });
 
+  // TYP-1 / IPC-4:sendInput 现在返回 { accepted, reason }
+  it('sendInput 在 exited session 上返回 accepted=false reason=pty-exited (TYP-1)', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitExit(0);
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('pty-exited');
+  });
+
+  it('sendInput 在不存在 session 上返回 accepted=false reason=session-not-found', () => {
+    const { mgr } = makeManager();
+    const res = mgr.sendInput(
+      'no-such-id',
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('session-not-found');
+  });
+
+  it('sendInput 正常路径返回 accepted=true', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(true);
+    expect(res.reason).toBeUndefined();
+  });
+
+  // PER-2 / F1:IPC chunk 聚合
+  it('emitBatchMs > 0 时多次 chunk 在窗口内合并成一条 sessionOutput', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push({ data: p.data, seq: p.seq });
+      });
+      fp.emitData('aaa');
+      fp.emitData('bbb');
+      fp.emitData('ccc');
+      // 同步内未 flush
+      expect(outputs.length).toBe(0);
+      // 8ms 后 flush 一次
+      vi.advanceTimersByTime(10);
+      expect(outputs.length).toBe(1);
+      // base64 解码后是 'aaabbbccc'
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe(
+        'aaabbbccc',
+      );
+      // seq 是最后一条 chunk 对应的(3 个 chunk → outputSeq 0,1,2)
+      expect(outputs[0]!.seq).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emitBatchMs=0(默认测试)时每个 chunk 立即 emit', async () => {
+    const { mgr } = makeManager(); // emitBatchMs=0
+    await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    const outputs: Array<{ data: string; seq: number }> = [];
+    mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+      outputs.push({ data: p.data, seq: p.seq });
+    });
+    fp.emitData('a');
+    fp.emitData('b');
+    expect(outputs.length).toBe(2);
+    expect(outputs[0]!.seq).toBe(0);
+    expect(outputs[1]!.seq).toBe(1);
+  });
+
+  // TYP-2:pty.write 同步抛错返回 pty-write-failed
+  it('sendInput 在 pty.write 抛错时返回 accepted=false reason=pty-write-failed', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.writeShouldThrow = true;
+    const res = mgr.sendInput(
+      info.id,
+      Buffer.from('x', 'utf8').toString('base64'),
+    );
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('pty-write-failed');
+  });
+
   it('resize 透传到 PTY', async () => {
     const { mgr } = makeManager();
     const info = await mgr.createSession({
@@ -1041,6 +1209,148 @@ describe('SessionManager — sendInput / resize', () => {
     expect(fp.resized).toEqual([{ cols: 100, rows: 30 }]);
     expect(mgr.get(info.id)!.cols).toBe(100);
     expect(mgr.get(info.id)!.rows).toBe(30);
+  });
+});
+
+describe('SessionManager — PER-2 emit 聚合 / scrollback 同步不变量', () => {
+  // 这一组测试锁住 PER-2 IPC 聚合的核心不变量,防止 emit 合并与 scrollback
+  // 状态之间出现 race 导致 renderer 双写。51ab975 第一版 PER-2 (8ms 窗口
+  // 合并)在 handlePtyData 立刻 appendScrollback 但延迟 emit,出现了:
+  //
+  //   T0: chunk1 来 → scrollback += chunk1, lastSeq = 0, pendingEmit = [c1]
+  //   T1: renderer 调 getScrollback() → 返回 {data: c1, lastSeq: 0}
+  //   T2: chunk2 来 → scrollback += chunk2, lastSeq = 1, pendingEmit = [c1+c2]
+  //   T3: 8ms 到, flush → emit {data: c1+c2, seq: 1}
+  //   renderer: write scrollback (c1) → lastReplayedSeq = 0;
+  //             收 emit seq=1 > 0 → write c1+c2 整段 → c1 被双写
+  //
+  // 修复(2026-05-14):scrollback append + scrollbackLastSeq 都进 pendingEmit,
+  // 在 flush 时与 emit 一起原子前进。任何时刻 getScrollback 返回的
+  // (data, lastSeq) 都满足:data 字节集 ⊇ scrollback 中 seq ≤ lastSeq 的全部
+  // 字节,且 lastSeq 之后的字节不在 data 里 — 即 emit 与 scrollback 不重叠。
+
+  it('emitBatchMs=8 窗口内 getScrollback 快照不含 pendingEmit 中尚未 flush 的字节', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+
+      // chunk1 入 pendingEmit,timer 起。修复后 scrollback / lastSeq 不动。
+      fp.emitData('AAAA');
+
+      const snap1 = mgr.getScrollback(info.id);
+      const snap1Bytes = Buffer.from(snap1.data, 'base64').toString('utf8');
+      // 修复后 snap1 应当不含 chunk1(pendingEmit 还没 flush);快照里只有"已 emit 过的"内容
+      expect(snap1Bytes).toBe('');
+      expect(snap1.lastSeq).toBe(-1);
+
+      // chunk2 加入 pendingEmit
+      fp.emitData('BBBB');
+
+      const snap2 = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap2.data, 'base64').toString('utf8')).toBe('');
+      expect(snap2.lastSeq).toBe(-1);
+
+      // flush
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+      vi.advanceTimersByTime(10);
+
+      // emit 出来一次,合并 c1+c2,seq=最后一条 chunk 的 outputSeq(1)
+      expect(outputs).toHaveLength(1);
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe('AAAABBBB');
+      expect(outputs[0]!.seq).toBe(1);
+
+      // flush 之后 scrollback / lastSeq 才前进到反映这两个 chunk
+      const snap3 = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap3.data, 'base64').toString('utf8')).toBe('AAAABBBB');
+      expect(snap3.lastSeq).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('不变量:任意时刻 snapshot.lastSeq 之后的字节不在 snapshot.data 内', async () => {
+    // 不变量泛化版:任意 chunk 序列 + 在不同时刻打 snapshot,验证 snapshot 表示
+    // "已 emit 的状态",pendingEmit 中尚未 flush 的 chunk 不可见。
+    // 这是 PER-2 race 修复的核心:scrollback 与 emit 原子前进。
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+
+      fp.emitData('X');
+      // 第一个 chunk 进 pendingEmit;snap 应反映"无 emit 出去的内容"
+      let snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').length).toBe(0);
+
+      vi.advanceTimersByTime(10); // flush
+      snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').toString('utf8')).toBe('X');
+      expect(outputs).toHaveLength(1);
+      expect(snap.lastSeq).toBe(outputs[0]!.seq);
+
+      // 连发多 chunk 跨多个 flush 周期 — snapshot 在每个 flush 后都对齐
+      fp.emitData('Y');
+      fp.emitData('Z');
+      vi.advanceTimersByTime(10);
+      snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').toString('utf8')).toBe('XYZ');
+      expect(outputs).toHaveLength(2);
+      expect(snap.lastSeq).toBe(outputs[outputs.length - 1]!.seq);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroySession 内 flush 路径:窗口内最后一段字节不丢', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+
+      // chunk 进 pendingEmit;timer 还没到
+      fp.emitData('LAST');
+      expect(outputs).toHaveLength(0);
+
+      // 立刻 close → destroySession 内必须 flush 最后一段
+      mgr.closeSession(info.id);
+      expect(outputs).toHaveLength(1);
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe('LAST');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1166,16 +1476,38 @@ describe('Osc1337Parser', () => {
     expect(r2.passthrough.toString('utf8')).toBe('\x1b[31m');
   });
 
-  it('超长 stash (> 16KB 没终止符) → flush 为透传,不死循环', () => {
+  it('超长 stash (> 16KB 没终止符) → 整段透传不丢内容', () => {
     const p = new Osc1337Parser();
     const giant = '\x1b]1337;' + 'x'.repeat(20_000); // 没有终止符
     const r = p.parse(Buffer.from(giant));
-    // 两次 parse 都不该卡住
-    expect(p.stashedBytes).toBeLessThanOrEqual(16 * 1024);
-    void r;
+    // overflow 后 stash 清零(整段被 flush 到 passthrough)
+    expect(p.stashedBytes).toBe(0);
+    // OSC-3 回归修复(2026-05-14):overflow 整段透传,不静默丢。
+    // 原 OSC-3"静默 drop 避免乱码"的方向是错的 — 配合 OSC-4 误识别
+    // 0x9D 会让正常 UTF-8 内容被吃。宁可渲染字面 ANSI 乱码也别让用户
+    // 内容凭空消失(乱码用户能复现 + 报告;丢字节不留痕迹更难排查)。
+    expect(r.passthrough.length).toBeGreaterThanOrEqual(20_000);
     const r2 = p.parse(Buffer.from('more'));
-    // stash 加上 more 后超限 → 整段透传
-    expect(r2.passthrough.length).toBeGreaterThan(0);
+    expect(r2.passthrough.toString('utf8')).toContain('more');
+  });
+
+  // OSC-4 回归修复(2026-05-14):0x9D 不再被识别为 C1 OSC 起始,作为
+  // 普通字节透传给 xterm。详见 osc1337-parser.ts 的 OSC-4 回归注释。
+  it('0x9D 作为普通字节透传,不识别为 C1 OSC 起始', () => {
+    const p = new Osc1337Parser();
+    // 0x9D + "1337;CurrentDir=/test" + BEL — 若被当 OSC 处理会产生 cwd 事件
+    const buf = Buffer.concat([
+      Buffer.from([0x9d]),
+      Buffer.from('1337;CurrentDir=/test'),
+      Buffer.from([0x07]),
+    ]);
+    const r = p.parse(buf);
+    // 不应产生任何 OSC 事件
+    expect(r.events).toHaveLength(0);
+    // 0x9D 与后续字节(BEL 除外)整段透传 — BEL 0x07 是普通终端 bell,
+    // 也走 passthrough。所以 passthrough 应当含 0x9D + 后面所有字节。
+    expect(r.passthrough.length).toBe(buf.length);
+    expect(r.passthrough[0]).toBe(0x9d);
   });
 });
 

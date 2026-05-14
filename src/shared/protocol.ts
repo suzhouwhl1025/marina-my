@@ -61,6 +61,12 @@ export const COMMAND_CHANNELS = {
   SESSION_GET_SCROLLBACK: 'cmd:session:get-scrollback',
   /** M1-C:重命名 session(只改 displayName,内部仍由 sessionId 标识) */
   SESSION_RENAME: 'cmd:session:rename',
+  /**
+   * STM-3:清除手动重命名标记,让 OSC 0/1/2 标题事件重新覆盖 displayName。
+   * 用户右键"恢复自动标题"调,典型场景是用户希望 Claude Code 持续刷新
+   * 的任务进度标题重新生效。
+   */
+  SESSION_CLEAR_MANUAL_RENAME: 'cmd:session:clear-manual-rename',
 
   // Bookmark / Path 域
   BOOKMARK_ADD: 'cmd:bookmark:add',
@@ -296,6 +302,36 @@ export interface SendInputPayload {
   sessionId: string;
   /** 字节流,base64 编码 */
   data: string;
+}
+
+/**
+ * sendInput/resize 的反馈。
+ *
+ * 历史:CP-1/2/3 期间这两条 IPC 都是 void(成功 / 失败都静默,renderer
+ * 永远不知道键被丢了)。fix/robustness-pass(2026-05-13)起改为返回
+ * accepted + reason,renderer 据此 toast / 视觉降级。
+ *
+ * reason 取值:
+ *   - 'session-not-found' · sessionId 不在 SessionManager.sessions Map(已 destroy / 不存在)
+ *   - 'pty-exited'        · session 在 'exited' 状态,managed.pty===null
+ *   - 'not-owner'         · 调用方不是 session 的 ownerWindowId(只用于 sendInput)
+ *   - 'pty-write-failed'  · pty.write() 抛错(ConPTY pipe half-closed 等)
+ *   - 'invalid-dimensions'· cols/rows 不合规(只用于 resize)
+ *
+ * accepted=true 时 reason 一定不存在。
+ */
+export interface SendInputResponse {
+  accepted: boolean;
+  reason?:
+    | 'session-not-found'
+    | 'pty-exited'
+    | 'not-owner'
+    | 'pty-write-failed';
+}
+
+export interface ResizeSessionResponse {
+  accepted: boolean;
+  reason?: 'session-not-found' | 'pty-exited' | 'invalid-dimensions';
 }
 
 export interface ResizeSessionPayload {

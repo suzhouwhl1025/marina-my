@@ -41,9 +41,11 @@ import {
 } from '../store';
 import { TerminalView } from './TerminalView';
 import { writeClipboardText } from '../clipboard';
+import { focusTerminalDom } from '../focus';
 import { Icon, type IconName } from './icons';
 import { useContextMenuApi } from './ContextMenu';
 import { useToast } from './Toast';
+import { useModal } from './Modal';
 
 interface DetectedShell {
   id: string;
@@ -101,35 +103,49 @@ export function MainPane(): JSX.Element {
   const fontSize = state.settings.appearance?.terminalFontSize ?? 13;
   const lineHeight = state.settings.appearance?.terminalLineHeight ?? 1.2;
 
+  // FOC-6:selectedSessionId 变化时(托盘点击 / 跨窗口聚焦 /
+  // evt:window:focus-requested / view/select-session 等任意路径)
+  // 把焦点送到新 session 的 xterm。
+  //
+  // 与 A1/A2 的关系:
+  // - A1 在 TerminalView mount 时 term.focus() — 覆盖新建 + 切 session(key 重建)
+  // - A2 在 Tab / Chrome / Template button click 末尾 focusTerminalDom — 显式
+  // - A4 此 effect 兜底所有 dispatch 路径(reducer 改 selectedSessionId 但
+  //   没人显式 focus 的场景,如 sessions/created reducer 自动 select)
+  //
+  // displayable 为 null(EmptyPathState)时不送焦点 — xterm 不存在,
+  // focusTerminalDom 内部 querySelector 会 no-op 安全。
+  useEffect(() => {
+    if (state.selectedSessionId) focusTerminalDom();
+  }, [state.selectedSessionId]);
+
   // 勘误第二轮:移除"拖文件夹到主区 → 新建终端"自定义。原 M1-B 的 onDragOver
   // preventDefault 把整个 main-pane 变成 droptarget,xterm 元素接不到 drop
   // 事件,Windows Terminal-风格的"拖文件到终端 → 粘贴路径"默认行为被吃掉。
   // 现在:主区不处理 drop 事件,事件穿透到 .terminal-host,xterm 沿用默认行为。
   // 加文件夹到收藏仍由 Sidebar 处理。
 
-  // ResizeObserver:把主区容器尺寸 + 字号 → 估算 cols/rows → 写入 store。
-  // SESSION_CREATE 调用点统一读 store.lastTerminalDims,确保 spawn PTY 时
-  // 尺寸接近 xterm fit 后的值,避免 ConPTY 重画 banner 重复进 ring buffer。
+  // FLK-2:把主区容器尺寸 + 字号 → 估算 cols/rows → 写入 store。
+  //
+  // 历史:原版本挂 ResizeObserver 持续 dispatch dims,会和 TerminalView
+  // 内部的 RO 双写抖动 — 拖窗时 chrome 每帧 layout 更新但 xterm 网格滞后
+  // 150ms,体感"周边在跳但终端慢半拍"。
+  //
+  // 现在:只在 mount 时算一次,作为"PTY spawn 前的兜底估算"用,后续真实
+  // 尺寸完全由 TerminalView mount 后的 fitAddon.fit() 写回 store
+  // (TerminalView 是单一权威)。
+  //
+  // 字号 / 行高变化触发重算 — 用户改字号后再新建 session 时尺寸更准。
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return undefined;
-    const update = (): void => {
-      // monospace 字宽 ≈ 字号 × 0.6;cell 高 = 字号 × lineHeight。
-      // 这是粗估 (xterm 真实算法考虑 letterSpacing 等),首次创建时差几列
-      // 不致命;TerminalView 一旦 mount 会用 fit 后的精确值覆盖。
-      const charWidth = fontSize * 0.6;
-      const cellHeight = fontSize * lineHeight;
-      // 主区扣掉 statusbar (约 24px) 和 padding (8px*2),保留有效区域
-      const usableW = Math.max(0, el.clientWidth - 16);
-      const usableH = Math.max(0, el.clientHeight - 56);
-      const cols = Math.max(20, Math.floor(usableW / charWidth));
-      const rows = Math.max(5, Math.floor(usableH / cellHeight));
-      dispatch({ type: 'view/update-terminal-dims', dims: { cols, rows } });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
+    if (!el) return;
+    const charWidth = fontSize * 0.6;
+    const cellHeight = fontSize * lineHeight;
+    const usableW = Math.max(0, el.clientWidth - 16);
+    const usableH = Math.max(0, el.clientHeight - 56);
+    const cols = Math.max(20, Math.floor(usableW / charWidth));
+    const rows = Math.max(5, Math.floor(usableH / cellHeight));
+    dispatch({ type: 'view/update-terminal-dims', dims: { cols, rows } });
   }, [dispatch, fontSize, lineHeight]);
 
   if (!state.selectedPathId) {
@@ -217,6 +233,10 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
         },
       );
       dispatch({ type: 'view/select-session', sessionId: res.session.id });
+      // FOC-3:模板按钮点击后焦点漂在 button 上,挂载 TerminalView 后
+      // 自动把焦点送回 xterm。A4 的 selectedSessionId effect 也会兜底,
+      // 但显式 + rAF 让"立即可打字"语义更清晰。
+      focusTerminalDom();
     } catch (err) {
       console.error('[MainPane] create-session failed', err);
       toast.push({
@@ -326,6 +346,9 @@ function TabBar({ sessions, selectedSessionId, showBlankTab }: TabBarProps): JSX
     // 多数情况下 selectedSessionId 已经是非 mine 的 session id,这里只是让
     // dispatch 触发一次重算确保 view 一致。
     dispatch({ type: 'view/select-session', sessionId: null });
+    // 显式 blur 占位 tab 按钮 —EmptyPathState 没有 xterm 可以 focus,
+    // 但至少不应该让 button 一直 :focus 着,Tab 键导航变奇怪。
+    (document.activeElement as HTMLElement | null)?.blur();
   };
 
   // CP-3 勘误 #5:**彻底**移除"灰显抽到最右边"的分组逻辑。
@@ -373,6 +396,7 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
   const dispatch = useAppDispatch();
   const ctxMenu = useContextMenuApi();
   const toast = useToast();
+  const modal = useModal();
 
   // Variant 由 session.ownerWindowId 自决,不再由父级分组传入。这样 tab
   // 即使移动 (虽然现在不再重排) 也不会丢 variant。
@@ -416,18 +440,55 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
           label: '重命名…',
           disabled: variant === 'other',
           ...(variant === 'other' ? { hint: '其他窗口持有,无法重命名' } : {}),
-          onSelect: () => {
-            const next = window.prompt('新名称', session.displayName);
-            if (!next) return;
+          onSelect: async () => {
+            // CPB-P2 同款改造:window.prompt → 自绘 Modal.prompt。
+            // 原生 prompt 关闭后焦点漂到 body,这里 Modal.prompt 内置
+            // previousActiveElement 归还。
+            const next = await modal.prompt({
+              title: '重命名会话',
+              message: '为此会话指定新的显示名(不影响 sessionId)',
+              defaultValue: session.displayName,
+              confirmLabel: '保存',
+            });
+            if (next === null) return;
+            const trimmed = next.trim();
+            if (!trimmed) return;
             window.api
               .invoke(COMMAND_CHANNELS.SESSION_RENAME, {
                 sessionId: session.id,
-                newDisplayName: next,
+                newDisplayName: trimmed,
               })
               .catch((err: unknown) =>
                 toast.push({
                   kind: 'error',
                   message: `重命名失败:${err instanceof Error ? err.message : String(err)}`,
+                }),
+              );
+          },
+        },
+        {
+          // STM-3:恢复 OSC 标题自动更新 — 用户手改名后,Claude Code 等
+          // 持续刷标题的程序被锁(manuallyRenamed=true),此项重置标志位
+          // 让 OSC 0/1/2 标题事件再次生效。仅在 'mine' / 'orphan' 显示
+          // (与 '重命名' 同条件)。
+          label: '恢复自动标题',
+          disabled: variant === 'other',
+          ...(variant === 'other' ? { hint: '其他窗口持有,无法修改' } : {}),
+          onSelect: () => {
+            window.api
+              .invoke(COMMAND_CHANNELS.SESSION_CLEAR_MANUAL_RENAME, {
+                sessionId: session.id,
+              })
+              .then(() => {
+                toast.push({
+                  kind: 'info',
+                  message: '已恢复 — shell / agent 的标题将再次自动更新',
+                });
+              })
+              .catch((err: unknown) =>
+                toast.push({
+                  kind: 'error',
+                  message: `恢复失败:${err instanceof Error ? err.message : String(err)}`,
                 }),
               );
           },
@@ -527,11 +588,20 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
           }
           dispatch({ type: 'view/select-session', sessionId: prevOwnedId });
         });
+      // FOC-2:乐观接管成功路径也需要送焦点;rAF + 选择器在新 TerminalView
+      // 挂上后命中。失败 rollback 后 EmptyPathState 没 xterm,focusTerminalDom
+      // 会 no-op,无副作用。
+      focusTerminalDom();
       return;
     }
     // 本窗口持有 (mine):仅切换 view (新模型下其实 myTabs 至多 1 个,
     // 多数场景这就是当前 selected — no-op,但保留分支以防 race)
     dispatch({ type: 'view/select-session', sessionId: session.id });
+    // FOC-2:Tab click 后 button 默认接管 :focus,把焦点送回 xterm,
+    // 让用户敲键立即生效。orphan 接管分支已在前文 dispatch 后落到
+    // 同一 selectedSessionId 路径,A4 的 effect 会兜底;但显式调用
+    // 让"点 tab → 能打字"的契约不依赖 effect 触发时机。
+    focusTerminalDom();
   };
 
   const handleClose = (e: MouseEvent<HTMLSpanElement>): void => {

@@ -94,9 +94,20 @@ export class Osc1337Parser {
 
     let cursor = 0;
     while (cursor < input.length) {
+      // OSC-4 回归修复(2026-05-14):仅识别 ESC ](0x1B 0x5D)7-bit 形式。
+      //
+      // 历史:51ab975 曾加了 0x9D 单字节 C1 OSC 形式识别,但 0x9D 在
+      // UTF-8 多字节字符的尾字节中碰撞概率极高(任何 Unicode 字符 UTF-8
+      // 编码末字节 = 0x9D 都会被误抓)。Claude Code 等 TUI 输出大量
+      // box drawing / 状态文字一旦含此类字符,后续字节被当 OSC payload
+      // 吞掉直至 BEL/ST 或 stash overflow,大段内容丢失。bisect 锁定为
+      // marina-app 渲染回归根因。
+      //
+      // 取舍:不识别 C1 OSC 时,极少数发 C1 OSC 的程序的 OSC 序列会被
+      // xterm 直接渲染(因为 xterm 自己识别 C1 OSC),最多多一个无害的
+      // 状态字符;识别 C1 OSC 但误判则丢用户内容 — 风险不对称,放弃识别。
       const escIdx = input.indexOf(0x1b, cursor);
       if (escIdx < 0) {
-        // 剩余全是普通字节
         passthroughChunks.push(input.subarray(cursor));
         cursor = input.length;
         break;
@@ -124,7 +135,12 @@ export class Osc1337Parser {
         // 未完结,全部存 stash 等下次
         const tail = input.subarray(escIdx);
         if (tail.length > STASH_LIMIT) {
-          // 超长不像合法 OSC,放弃 — 整段透传 (避免内存堆积)
+          // OSC-3 回归修复(2026-05-14):超长 stash 整段透传,不再静默
+          // drop。原 OSC-3 静默丢弃的初衷是"避免 xterm 渲染字面
+          // \x1b]1337;... 乱码",但配合上方 OSC-4 的 0x9D 误识别,会让
+          // 正常 UTF-8 流被当 OSC + overflow + 整段丢失。即便误识别,
+          // 也以"宁可乱码也别丢内容"为原则:乱码用户能复现 + 报告;
+          // 内容丢失不留痕迹更难排查。
           passthroughChunks.push(tail);
           cursor = input.length;
           break;

@@ -21,6 +21,7 @@ import {
   type ReactNode,
 } from 'react';
 import { Icon } from './icons';
+import { focusTerminalDom } from '../focus';
 
 export type ToastKind = 'info' | 'success' | 'warn' | 'error';
 
@@ -55,8 +56,16 @@ export function ToastProvider({ children }: { children: ReactNode }): JSX.Elemen
   const pausedIds = useRef<Set<number>>(new Set());
 
   const dismiss = useCallback((id: number): void => {
+    // FOC-5:若 dismiss 由用户点击 toast 体 / 关闭按钮触发,activeElement
+    // 会是 toast button → toast 立即 unmount → 焦点漂到 body。
+    // 检测 active 是否在 .toast 内,是的话 dismiss 后归还焦点给 xterm。
+    // 自动 ticker dismiss 时 activeElement 不在 toast,focus.ts 工具会
+    // no-op(只在 body / null 时才动)。
+    const active = document.activeElement;
+    const triggeredByUser = !!(active && active.closest('.toast'));
     setItems((prev) => prev.filter((t) => t.id !== id));
     pausedIds.current.delete(id);
+    if (triggeredByUser) focusTerminalDom();
   }, []);
 
   const push = useCallback((t: ToastInput): void => {
