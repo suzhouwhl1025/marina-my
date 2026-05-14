@@ -35,6 +35,7 @@ import type {
   RecentFile,
 } from '@shared/types';
 import type { JsonStore } from './persistence';
+import { logger } from './logger';
 
 const RECENT_CAPACITY = 30;
 
@@ -318,16 +319,20 @@ export class PathManager extends EventEmitter {
     if (previousPath === normalized) return; // 无变化 (重复调用)
     if (previousPath !== undefined) {
       // 防御:理论上 ADR-008 后不会到这。若到了,说明上层有 bug,记一条 warn。
-      console.warn(
-        `[PathManager] attachSession 不一致: sessionId="${sessionId}" 旧 path="${previousPath}" 新 path="${normalized}"。` +
+      logger.warn(
+        'PathManager',
+        `attachSession 不一致: sessionId="${sessionId}" 旧 path="${previousPath}" 新 path="${normalized}"。` +
           `ADR-008 之后 session.pathId 应永久不变,这是 bug。`,
       );
       this.detachSessionInternal(sessionId, /* emit */ false);
     }
     this.sessionToPath.set(sessionId, normalized);
-    // 如果新 path 之前在最近列表,移除 (它现在在临时了)
-    this.removeRecentInternal(normalized);
-    this.touchRecentTimestamp(normalized); // 更新 useCount/lastUsedAt 以便后来回到最近时排序正确
+    // STM-3:不再 removeRecentInternal — 旧写法先删后 unshift 会把已有 entry 的
+    // useCount 重置为 1,daily-driver "开终端 → 关终端 → 开终端" 循环下,useCount
+    // 永远在 1↔2 之间震荡而不真实累加。新写法:只 touch(存在则 ++,不存在则新建),
+    // 让 useCount 真实记录使用次数。getTree() 已经按 sessionPaths 过滤,recent
+    // 数组里"暂时归在临时分类"的 entry 不会重复显示,无需先 remove。
+    this.touchRecentTimestamp(normalized);
     this.persistRecent();
     this.emitChange();
   }
@@ -500,15 +505,110 @@ export class PathManager extends EventEmitter {
    * 替代"写盘后 app.relaunch"模式 — 直接 in-memory 替换并 emit,renderer
    * 通过 evt:path:tree-updated / evt:bookmarks:updated 即时刷新,无需重启。
    *
+   * TYP-2 / SEC-4(v1.3):入参视为「外部不可信数据」(用户导入的 JSON 归档
+   * 可能跨版本、可能损坏、可能含 path traversal 段)。先 type guard 把每条
+   * entry 的形状校验一遍,再把 path 字段统一 normalize。任一条违规 → 抛
+   * PathManagerError,**不**部分应用(原状态保留)。
+   *
+   * 不做存在性校验(addBookmark 也只在 path 存在时才接受,但 import 场景
+   * 用户的 bookmark 路径可能临时不可达 — 比如插了 U 盘后又拔了。这种是
+   * 用户数据,留着就好,使用时再校验)。
+   *
    * @param input.bookmarks 新的收藏列表 (顺序保留)
    * @param input.recent 新的最近列表 (按当前数组顺序;内部仍会再 sortRecent)
+   * @throws PathManagerError('InvalidName') 任一 entry 形状不合规
    */
   replaceAll(input: { bookmarks: Bookmark[]; recent: RecentEntry[] }): void {
-    this.bookmarks = input.bookmarks.slice();
-    this.recent = input.recent.slice();
+    const bookmarks = validateBookmarksArray(input.bookmarks);
+    const recent = validateRecentArray(input.recent);
+    this.bookmarks = bookmarks;
+    this.recent = recent;
     this.sortRecent();
     this.persistBookmarks();
     this.persistRecent();
     this.emitChange();
   }
+}
+
+/**
+ * TYP-2 / SEC-4:Bookmark 数组形状校验 + path normalize。
+ *
+ * 必需字段:`id: string` / `path: string` / `addedAt: number`
+ * 可选字段:`displayName?: string` / `defaultTemplateId?: string`
+ *
+ * 任一条违规(类型不符 / 必需字段缺失 / 不是对象)整体拒绝,抛
+ * PathManagerError。caller(ipc.ts applyArchiveInMemory)捕获后让 import
+ * 失败,内部状态保留。
+ */
+function validateBookmarksArray(input: unknown): Bookmark[] {
+  if (!Array.isArray(input)) {
+    throw new PathManagerError('InvalidName', 'bookmarks 必须是数组');
+  }
+  const out: Bookmark[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const b = input[i];
+    if (typeof b !== 'object' || b === null) {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}] 不是对象`);
+    }
+    const r = b as Record<string, unknown>;
+    if (typeof r['id'] !== 'string' || !r['id']) {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}].id 非法`);
+    }
+    if (typeof r['path'] !== 'string' || !r['path']) {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}].path 非法`);
+    }
+    if (typeof r['addedAt'] !== 'number' || !Number.isFinite(r['addedAt'])) {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}].addedAt 非法`);
+    }
+    if (r['displayName'] !== undefined && typeof r['displayName'] !== 'string') {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}].displayName 非法`);
+    }
+    if (r['defaultTemplateId'] !== undefined && typeof r['defaultTemplateId'] !== 'string') {
+      throw new PathManagerError('InvalidName', `bookmarks[${i}].defaultTemplateId 非法`);
+    }
+    const normalized = normalizePath(r['path']);
+    const entry: Bookmark = {
+      id: r['id'],
+      path: normalized,
+      addedAt: r['addedAt'],
+    };
+    if (typeof r['displayName'] === 'string') entry.displayName = r['displayName'];
+    if (typeof r['defaultTemplateId'] === 'string') entry.defaultTemplateId = r['defaultTemplateId'];
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * RecentEntry 数组形状校验 + path normalize。
+ *
+ * 必需字段:`path: string` / `lastUsedAt: number` / `useCount: number`
+ */
+function validateRecentArray(input: unknown): RecentEntry[] {
+  if (!Array.isArray(input)) {
+    throw new PathManagerError('InvalidName', 'recent 必须是数组');
+  }
+  const out: RecentEntry[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const r = input[i];
+    if (typeof r !== 'object' || r === null) {
+      throw new PathManagerError('InvalidName', `recent[${i}] 不是对象`);
+    }
+    const o = r as Record<string, unknown>;
+    if (typeof o['path'] !== 'string' || !o['path']) {
+      throw new PathManagerError('InvalidName', `recent[${i}].path 非法`);
+    }
+    if (typeof o['lastUsedAt'] !== 'number' || !Number.isFinite(o['lastUsedAt'])) {
+      throw new PathManagerError('InvalidName', `recent[${i}].lastUsedAt 非法`);
+    }
+    if (typeof o['useCount'] !== 'number' || !Number.isFinite(o['useCount'])) {
+      throw new PathManagerError('InvalidName', `recent[${i}].useCount 非法`);
+    }
+    out.push({
+      path: normalizePath(o['path']),
+      lastUsedAt: o['lastUsedAt'],
+      useCount: o['useCount'],
+    });
+  }
+  return out;
 }
