@@ -23,6 +23,7 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { logger } from './logger';
 
 /**
  * 单个 JSON 文件的存储抽象。每个持久化的 schema (settings/bookmarks/recent/
@@ -84,7 +85,7 @@ export class JsonStore<T> {
   /**
    * 标记一个新值,在 debounceMs 后落盘。多次调用合并,以最后一次的值为准。
    *
-   * 不抛错:磁盘错误会被 catch 后 console.error,因为 set 是 fire-and-forget。
+   * 不抛错:磁盘错误会被 catch 后 logger.error,因为 set 是 fire-and-forget。
    * 真要等待落盘完成,调 flush()。
    */
   set(value: T): void {
@@ -94,7 +95,7 @@ export class JsonStore<T> {
     this.writeTimer = setTimeout(() => {
       this.writeTimer = null;
       void this.flushInternal().catch((err) => {
-        console.error(`[JsonStore] flush failed for ${this.filePath}:`, err);
+        logger.error('JsonStore', `flush failed for ${this.filePath}`, err);
       });
     }, this.debounceMs);
   }
@@ -138,21 +139,19 @@ export class JsonStore<T> {
     if (this.writeInFlight) {
       await this.writeInFlight.catch(() => {}); // 上一个失败也别阻塞下一次
     }
-    if (this.pendingValue === null) return;
-
-    const valueToWrite = this.pendingValue;
-    this.pendingValue = null;
-
-    this.writeInFlight = this.atomicWrite(valueToWrite);
-    try {
-      await this.writeInFlight;
-    } finally {
-      this.writeInFlight = null;
-    }
-
-    // flush 期间又有 set 进来,递归处理 (避免丢更新)
-    if (this.pendingValue !== null) {
-      await this.flushInternal();
+    // CON-1:flush 期间又有 set 进来时,原写法用尾递归 `await this.flushInternal()`
+    // 重新进入。JS 没有尾调用优化,N 层递归 = N 层调用栈;高频 set 节奏快于
+    // 磁盘写时(daily-driver 极端如 Ctrl+滚轮快速调字号)有概率栈溢出。
+    // 改 while:同等语义,无栈深问题。
+    while (this.pendingValue !== null) {
+      const valueToWrite = this.pendingValue;
+      this.pendingValue = null;
+      this.writeInFlight = this.atomicWrite(valueToWrite);
+      try {
+        await this.writeInFlight;
+      } finally {
+        this.writeInFlight = null;
+      }
     }
   }
 
@@ -178,7 +177,7 @@ export class JsonStore<T> {
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         // 真正的 I/O 错误 (权限等),记录但继续 — 没 .bak 总比写不进去好
-        console.warn(`[JsonStore] backup copy failed for ${this.filePath}:`, err);
+        logger.warn('JsonStore', `backup copy failed for ${this.filePath}`, err);
       }
     }
 
@@ -207,8 +206,9 @@ export class JsonStore<T> {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return null; // 文件不存在,正常情况之一
       // 解析失败或 I/O 错误,日志一下让开发者知道
-      console.warn(
-        `[JsonStore] read failed for ${path}: ${
+      logger.warn(
+        'JsonStore',
+        `read failed for ${path}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

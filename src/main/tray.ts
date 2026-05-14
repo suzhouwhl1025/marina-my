@@ -214,7 +214,7 @@ export class TrayManager {
     try {
       this.windowManager.createWindowFromFactory();
     } catch (err) {
-      console.error('[TrayManager] handleSingleClick: createWindow failed', err);
+      logger.error('TrayManager', 'handleSingleClick: createWindow failed', err);
     }
   }
 

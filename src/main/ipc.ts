@@ -261,6 +261,10 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
+      // takeOwnership=false 时直接传空 owner — createSession 内部
+      // `input.ownerWindowId || null` 会落到 info.ownerWindowId = null。
+      // 不要先创建带 owner 再 releaseOwner:那条路径在 owner=='' 时已被
+      // 折叠为 null,后续 releaseOwner 会因 null !== envelope.windowId 抛 NotOwner。
       const session = await sessionManager.createSession({
         pathId: pathId ?? '',
         templateId: effectiveTemplateId,
@@ -269,10 +273,6 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         rows,
         ...(shellId ? { shellIdOverride: shellId } : {}),
       });
-      // 若不接管 ownership (罕见,默认接管),把 owner 改为 null
-      if (!takeOwnership) {
-        sessionManager.releaseOwner(session.id, envelope.windowId);
-      }
       const pathTreeChanged =
         JSON.stringify(pathManager.getTree()) !== oldTreeJson;
       return { session, pathTreeChanged };
