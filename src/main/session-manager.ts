@@ -857,21 +857,19 @@ export class SessionManager extends EventEmitter {
 
     // 透传字节流入 scrollback + emit sessionOutput
     if (parsed.passthrough.length > 0) {
-      this.appendScrollback(managed, parsed.passthrough);
-
+      // PER-2 修复(2026-05-14):scrollback append + scrollbackLastSeq 不
+      // 在此处立即推进,而是与 emit 一起在 flushPendingEmit 里原子前进。
+      //
+      // 历史问题:51ab975 第一版 PER-2 在此处立即 appendScrollback +
+      // 更新 scrollbackLastSeq,但 emit 延迟 8ms。renderer 在 pendingEmit
+      // 窗口内调 getScrollback 会拿到含 pendingEmit 字节的快照 + 旧 lastSeq;
+      // 后续 emit flush 出来的合并 payload seq > 快照 lastSeq → renderer
+      // write 整段 → scrollback 已包含的字节被双写。
+      //
+      // 修复后语义:scrollbackLastSeq 始终 ==(已 emit 的最后 seq),
+      // scrollback buffer 内容始终 == (已 emit 的字节累计);
+      // pendingEmit 中尚未 flush 的字节对 renderer 不可见。
       const seq = managed.outputSeq++;
-      managed.scrollbackLastSeq = seq;
-
-      // PER-2 / F1:IPC chunk 聚合 — 8ms 窗口内多个 PTY chunk 合并成一个
-      // sessionOutput emit,降低 renderer 的 IPC 反压。
-      //
-      // burst 输出场景(find / / npm install)每秒可能产生 50-200 个小 chunk,
-      // 每个 chunk 独立 IPC 让 renderer base64 解码 + xterm parse 都跑成
-      // 100% CPU。8ms 窗口把这些合并到 ~125 帧/秒级别,既维持视觉流畅又减
-      // 少 IPC 调用数 ~5-10×。
-      //
-      // scrollback append 和 outputSeq 仍同步(scrollbackLastSeq 准确反映),
-      // 接管 / replay 协议依赖的 lastSeq 不受影响 — 只是 IPC 推送被合并。
       this.queueEmit(managed, parsed.passthrough, seq);
 
       // 状态机:有输出 → active,重置 idle 计时器。
@@ -905,19 +903,23 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * PER-2 / F1:把一次 PTY chunk 入 pendingEmit 缓冲,8ms 后(或 destroy 时
-   * 立即)flush 为一个 sessionOutput event。
+   * PER-2:把一次 PTY chunk 入 pendingEmit 缓冲,8ms 后(或 destroy 前)
+   * 通过 flushPendingEmit 一起 append 进 scrollback、推 scrollbackLastSeq、
+   * 发 sessionOutput event。
    *
-   * 多次 queueEmit 在同一 8ms 窗口内调用 → bytes 累积,seq 取最大值;
-   * 一次 flush 出去的 payload data 是合并后的 base64,seq 是该窗口内最后
-   * 一条字节的 outputSeq。renderer 端 lastReplayedSeq 比较仍正确(只是
-   * 看不到中间 seq,跳号但单调递增不影响 replay 逻辑)。
+   * 关键不变量:在 pendingEmit 窗口内,scrollback 内容和 scrollbackLastSeq
+   * 都不变;getScrollback 看到的快照永远等于"已 emit 的全部历史",pending
+   * 字节对 renderer 不可见。flush 之后三者一起原子前进。
    *
-   * 测试用 EMIT_BATCH_MS=0 走"立即 flush",保持现有时序断言通过。
+   * emitBatchMs <= 0 路径(测试用):立即同步 append + emit,保留与历史
+   * 单测的时序断言一致。
    */
   private queueEmit(managed: ManagedSession, bytes: Buffer, seq: number): void {
     if (this.emitBatchMs <= 0) {
-      // 测试 / 关闭聚合 — 直接 emit
+      // 立即路径 — append + 推 lastSeq + emit 在同一同步块内完成,
+      // 与延迟路径在 flush 时的原子性等价。
+      this.appendScrollback(managed, bytes);
+      managed.scrollbackLastSeq = seq;
       const payload: SessionOutputPayload = {
         sessionId: managed.info.id,
         data: bytes.toString('base64'),
@@ -945,12 +947,18 @@ export class SessionManager extends EventEmitter {
 
   private flushPendingEmit(managed: ManagedSession): void {
     if (!managed.pendingEmit) return;
+    const { bytes, lastSeq } = managed.pendingEmit;
+    managed.pendingEmit = null;
+    // 原子前进顺序:先 scrollback append,再 scrollbackLastSeq,再 emit。
+    // 这三步在 Node 单线程下同步完成,中间不会被 IPC 调用 getScrollback
+    // 打断 — 任何观察者看到的都是一致状态。
+    this.appendScrollback(managed, bytes);
+    managed.scrollbackLastSeq = lastSeq;
     const payload: SessionOutputPayload = {
       sessionId: managed.info.id,
-      data: managed.pendingEmit.bytes.toString('base64'),
-      seq: managed.pendingEmit.lastSeq,
+      data: bytes.toString('base64'),
+      seq: lastSeq,
     };
-    managed.pendingEmit = null;
     this.emit('sessionOutput', payload);
   }
 

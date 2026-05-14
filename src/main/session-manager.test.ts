@@ -1212,6 +1212,148 @@ describe('SessionManager — sendInput / resize', () => {
   });
 });
 
+describe('SessionManager — PER-2 emit 聚合 / scrollback 同步不变量', () => {
+  // 这一组测试锁住 PER-2 IPC 聚合的核心不变量,防止 emit 合并与 scrollback
+  // 状态之间出现 race 导致 renderer 双写。51ab975 第一版 PER-2 (8ms 窗口
+  // 合并)在 handlePtyData 立刻 appendScrollback 但延迟 emit,出现了:
+  //
+  //   T0: chunk1 来 → scrollback += chunk1, lastSeq = 0, pendingEmit = [c1]
+  //   T1: renderer 调 getScrollback() → 返回 {data: c1, lastSeq: 0}
+  //   T2: chunk2 来 → scrollback += chunk2, lastSeq = 1, pendingEmit = [c1+c2]
+  //   T3: 8ms 到, flush → emit {data: c1+c2, seq: 1}
+  //   renderer: write scrollback (c1) → lastReplayedSeq = 0;
+  //             收 emit seq=1 > 0 → write c1+c2 整段 → c1 被双写
+  //
+  // 修复(2026-05-14):scrollback append + scrollbackLastSeq 都进 pendingEmit,
+  // 在 flush 时与 emit 一起原子前进。任何时刻 getScrollback 返回的
+  // (data, lastSeq) 都满足:data 字节集 ⊇ scrollback 中 seq ≤ lastSeq 的全部
+  // 字节,且 lastSeq 之后的字节不在 data 里 — 即 emit 与 scrollback 不重叠。
+
+  it('emitBatchMs=8 窗口内 getScrollback 快照不含 pendingEmit 中尚未 flush 的字节', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+
+      // chunk1 入 pendingEmit,timer 起。修复后 scrollback / lastSeq 不动。
+      fp.emitData('AAAA');
+
+      const snap1 = mgr.getScrollback(info.id);
+      const snap1Bytes = Buffer.from(snap1.data, 'base64').toString('utf8');
+      // 修复后 snap1 应当不含 chunk1(pendingEmit 还没 flush);快照里只有"已 emit 过的"内容
+      expect(snap1Bytes).toBe('');
+      expect(snap1.lastSeq).toBe(-1);
+
+      // chunk2 加入 pendingEmit
+      fp.emitData('BBBB');
+
+      const snap2 = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap2.data, 'base64').toString('utf8')).toBe('');
+      expect(snap2.lastSeq).toBe(-1);
+
+      // flush
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+      vi.advanceTimersByTime(10);
+
+      // emit 出来一次,合并 c1+c2,seq=最后一条 chunk 的 outputSeq(1)
+      expect(outputs).toHaveLength(1);
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe('AAAABBBB');
+      expect(outputs[0]!.seq).toBe(1);
+
+      // flush 之后 scrollback / lastSeq 才前进到反映这两个 chunk
+      const snap3 = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap3.data, 'base64').toString('utf8')).toBe('AAAABBBB');
+      expect(snap3.lastSeq).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('不变量:任意时刻 snapshot.lastSeq 之后的字节不在 snapshot.data 内', async () => {
+    // 不变量泛化版:任意 chunk 序列 + 在不同时刻打 snapshot,验证 snapshot 表示
+    // "已 emit 的状态",pendingEmit 中尚未 flush 的 chunk 不可见。
+    // 这是 PER-2 race 修复的核心:scrollback 与 emit 原子前进。
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+
+      fp.emitData('X');
+      // 第一个 chunk 进 pendingEmit;snap 应反映"无 emit 出去的内容"
+      let snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').length).toBe(0);
+
+      vi.advanceTimersByTime(10); // flush
+      snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').toString('utf8')).toBe('X');
+      expect(outputs).toHaveLength(1);
+      expect(snap.lastSeq).toBe(outputs[0]!.seq);
+
+      // 连发多 chunk 跨多个 flush 周期 — snapshot 在每个 flush 后都对齐
+      fp.emitData('Y');
+      fp.emitData('Z');
+      vi.advanceTimersByTime(10);
+      snap = mgr.getScrollback(info.id);
+      expect(Buffer.from(snap.data, 'base64').toString('utf8')).toBe('XYZ');
+      expect(outputs).toHaveLength(2);
+      expect(snap.lastSeq).toBe(outputs[outputs.length - 1]!.seq);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroySession 内 flush 路径:窗口内最后一段字节不丢', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr } = makeManager({ emitBatchMs: 8 });
+      const info = await mgr.createSession({
+        pathId: '/p',
+        templateId: 'shell',
+        ownerWindowId: 'w',
+        cols: 80,
+        rows: 24,
+      });
+      const fp = FakePty.instances[0]!;
+      const outputs: Array<{ data: string; seq: number }> = [];
+      mgr.on('sessionOutput', (p: { data: string; seq: number }) => {
+        outputs.push(p);
+      });
+
+      // chunk 进 pendingEmit;timer 还没到
+      fp.emitData('LAST');
+      expect(outputs).toHaveLength(0);
+
+      // 立刻 close → destroySession 内必须 flush 最后一段
+      mgr.closeSession(info.id);
+      expect(outputs).toHaveLength(1);
+      expect(Buffer.from(outputs[0]!.data, 'base64').toString('utf8')).toBe('LAST');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('SessionManager — shutdown', () => {
   it('销毁所有 session', async () => {
     const { mgr } = makeManager();
