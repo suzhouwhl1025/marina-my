@@ -1334,33 +1334,38 @@ describe('Osc1337Parser', () => {
     expect(r2.passthrough.toString('utf8')).toBe('\x1b[31m');
   });
 
-  it('超长 stash (> 16KB 没终止符) → 静默丢弃,不死循环不渲染乱码 (OSC-3)', () => {
+  it('超长 stash (> 16KB 没终止符) → 整段透传不丢内容', () => {
     const p = new Osc1337Parser();
     const giant = '\x1b]1337;' + 'x'.repeat(20_000); // 没有终止符
     const r = p.parse(Buffer.from(giant));
-    // 两次 parse 都不该卡住
-    expect(p.stashedBytes).toBeLessThanOrEqual(16 * 1024);
-    void r;
+    // overflow 后 stash 清零(整段被 flush 到 passthrough)
+    expect(p.stashedBytes).toBe(0);
+    // OSC-3 回归修复(2026-05-14):overflow 整段透传,不静默丢。
+    // 原 OSC-3"静默 drop 避免乱码"的方向是错的 — 配合 OSC-4 误识别
+    // 0x9D 会让正常 UTF-8 内容被吃。宁可渲染字面 ANSI 乱码也别让用户
+    // 内容凭空消失(乱码用户能复现 + 报告;丢字节不留痕迹更难排查)。
+    expect(r.passthrough.length).toBeGreaterThanOrEqual(20_000);
     const r2 = p.parse(Buffer.from('more'));
-    // OSC-3:超长 stash 后改为静默丢弃(不再 push 到 passthrough),
-    // 否则 xterm 会渲染字面 \x1b]1337;... 乱码。
-    // 第二次 parse 的 'more' 是在 stash 已 drop 后到来,作为新的"普通字节"
-    // 走 passthrough。所以 r2.passthrough 应当至少包含 'more'。
     expect(r2.passthrough.toString('utf8')).toContain('more');
   });
 
-  // OSC-4:C1 单字节 OSC 起始 (0x9D) 识别
-  it('识别 C1 单字节 OSC 起始 0x9D', () => {
+  // OSC-4 回归修复(2026-05-14):0x9D 不再被识别为 C1 OSC 起始,作为
+  // 普通字节透传给 xterm。详见 osc1337-parser.ts 的 OSC-4 回归注释。
+  it('0x9D 作为普通字节透传,不识别为 C1 OSC 起始', () => {
     const p = new Osc1337Parser();
-    // 0x9D + "1337;CurrentDir=/test" + BEL
+    // 0x9D + "1337;CurrentDir=/test" + BEL — 若被当 OSC 处理会产生 cwd 事件
     const buf = Buffer.concat([
       Buffer.from([0x9d]),
       Buffer.from('1337;CurrentDir=/test'),
       Buffer.from([0x07]),
     ]);
     const r = p.parse(buf);
-    expect(r.events).toHaveLength(1);
-    expect(r.events[0]).toEqual({ kind: 'cwd', value: '/test' });
+    // 不应产生任何 OSC 事件
+    expect(r.events).toHaveLength(0);
+    // 0x9D 与后续字节(BEL 除外)整段透传 — BEL 0x07 是普通终端 bell,
+    // 也走 passthrough。所以 passthrough 应当含 0x9D + 后面所有字节。
+    expect(r.passthrough.length).toBe(buf.length);
+    expect(r.passthrough[0]).toBe(0x9d);
   });
 });
 

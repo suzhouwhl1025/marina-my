@@ -94,50 +94,54 @@ export class Osc1337Parser {
 
     let cursor = 0;
     while (cursor < input.length) {
-      // OSC-4:识别两种 OSC 起始:
-      //   - ESC ] (0x1B 0x5D) — 标准 7-bit 形式,主流 shell 都用
-      //   - 0x9D — C1 单字节形式,少数 CJK 终端 / 某些跨平台二进制使用
-      // 找两者中最靠前的一个作为下一个候选起始点。oscPayloadStart 是
-      // payload 第一字节的下标(ESC ] → escIdx+2;0x9D → escIdx+1)。
-      const oscStart = findNextOscStart(input, cursor);
-      if (oscStart === null) {
-        // 剩余全是普通字节
+      // OSC-4 回归修复(2026-05-14):仅识别 ESC ](0x1B 0x5D)7-bit 形式。
+      //
+      // 历史:51ab975 曾加了 0x9D 单字节 C1 OSC 形式识别,但 0x9D 在
+      // UTF-8 多字节字符的尾字节中碰撞概率极高(任何 Unicode 字符 UTF-8
+      // 编码末字节 = 0x9D 都会被误抓)。Claude Code 等 TUI 输出大量
+      // box drawing / 状态文字一旦含此类字符,后续字节被当 OSC payload
+      // 吞掉直至 BEL/ST 或 stash overflow,大段内容丢失。bisect 锁定为
+      // marina-app 渲染回归根因。
+      //
+      // 取舍:不识别 C1 OSC 时,极少数发 C1 OSC 的程序的 OSC 序列会被
+      // xterm 直接渲染(因为 xterm 自己识别 C1 OSC),最多多一个无害的
+      // 状态字符;识别 C1 OSC 但误判则丢用户内容 — 风险不对称,放弃识别。
+      const escIdx = input.indexOf(0x1b, cursor);
+      if (escIdx < 0) {
         passthroughChunks.push(input.subarray(cursor));
         cursor = input.length;
         break;
       }
-      const { idx: escIdx, payloadStart: oscPayloadStart, isC1 } = oscStart;
-      // OSC 起始之前的普通字节透传
+      // ESC 之前的普通字节透传
       if (escIdx > cursor) {
         passthroughChunks.push(input.subarray(cursor, escIdx));
       }
-      // ESC ] 形式:ESC 之后没字节了 → 孤立 ESC 存 stash 等下次
-      if (!isC1 && escIdx + 1 >= input.length) {
+      // ESC 之后没字节了 → 孤立 ESC 存 stash 等下次
+      if (escIdx + 1 >= input.length) {
         this.stash = input.subarray(escIdx);
         cursor = input.length;
         break;
       }
-      // ESC 之后不是 ']' → ESC 当普通字节透传(C1 形式直接走 OSC,不走这里)
-      if (!isC1) {
-        const next = input[escIdx + 1]!;
-        if (next !== 0x5d /* ']' */) {
-          passthroughChunks.push(input.subarray(escIdx, escIdx + 1));
-          cursor = escIdx + 1;
-          continue;
-        }
+      const next = input[escIdx + 1]!;
+      if (next !== 0x5d /* ']' */) {
+        // 不是 OSC 起始,ESC 当普通字节透传,继续从 escIdx+1 扫描
+        passthroughChunks.push(input.subarray(escIdx, escIdx + 1));
+        cursor = escIdx + 1;
+        continue;
       }
-      // OSC 起始,寻找 BEL 或 ST 终止
-      const terminatorInfo = findOscTerminator(input, oscPayloadStart);
+      // ESC ] OSC 起始,寻找 BEL 或 ST 终止
+      const terminatorInfo = findOscTerminator(input, escIdx + 2);
       if (!terminatorInfo) {
         // 未完结,全部存 stash 等下次
         const tail = input.subarray(escIdx);
         if (tail.length > STASH_LIMIT) {
-          // OSC-3:超长不像合法 OSC — 静默丢弃(不再 push 到 passthrough,
-          // 否则 xterm 会渲染出字面 `\x1b]1337;...` 乱码)。同时 console.warn
-          // 记录用于排查 broken sequence 的来源。
-          console.warn(
-            `[Osc1337Parser] OSC stash overflow ${tail.length} bytes — dropped to avoid memory累积`,
-          );
+          // OSC-3 回归修复(2026-05-14):超长 stash 整段透传,不再静默
+          // drop。原 OSC-3 静默丢弃的初衷是"避免 xterm 渲染字面
+          // \x1b]1337;... 乱码",但配合上方 OSC-4 的 0x9D 误识别,会让
+          // 正常 UTF-8 流被当 OSC + overflow + 整段丢失。即便误识别,
+          // 也以"宁可乱码也别丢内容"为原则:乱码用户能复现 + 报告;
+          // 内容丢失不留痕迹更难排查。
+          passthroughChunks.push(tail);
           cursor = input.length;
           break;
         }
@@ -145,8 +149,8 @@ export class Osc1337Parser {
         cursor = input.length;
         break;
       }
-      // OSC 完整: <start> payload TERM
-      const payload = input.subarray(oscPayloadStart, terminatorInfo.payloadEnd);
+      // OSC 完整: ESC ] payload TERM
+      const payload = input.subarray(escIdx + 2, terminatorInfo.payloadEnd);
       const titleSeq = parseTitleOscPayload(payload);
       const isOsc1337 =
         payload.length >= 5 && payload.subarray(0, 5).equals(Buffer.from('1337;'));
@@ -189,28 +193,6 @@ export class Osc1337Parser {
   get stashedBytes(): number {
     return this.stash.length;
   }
-}
-
-/**
- * OSC-4:在 buf[start..] 范围找下一个 OSC 起始点。
- *
- * 同时识别:
- *   - ESC ] (0x1B 0x5D) — 7-bit 标准形式
- *   - 0x9D — C1 单字节形式(等价于 ESC ])
- *
- * 取两者中最靠前的命中点。返回 payload 起点(给 findOscTerminator 用)。
- */
-function findNextOscStart(
-  buf: Buffer,
-  start: number,
-): { idx: number; payloadStart: number; isC1: boolean } | null {
-  const idx7 = buf.indexOf(0x1b, start);
-  const idx8 = buf.indexOf(0x9d, start);
-  if (idx7 < 0 && idx8 < 0) return null;
-  if (idx7 < 0) return { idx: idx8, payloadStart: idx8 + 1, isC1: true };
-  if (idx8 < 0) return { idx: idx7, payloadStart: idx7 + 2, isC1: false };
-  if (idx7 < idx8) return { idx: idx7, payloadStart: idx7 + 2, isC1: false };
-  return { idx: idx8, payloadStart: idx8 + 1, isC1: true };
 }
 
 /**
