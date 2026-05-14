@@ -55,6 +55,7 @@ import type { SettingsManager } from './settings-manager';
 import { Osc1337Parser } from './osc1337-parser';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
+import { logger } from './logger';
 
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
 
@@ -740,8 +741,9 @@ export class SessionManager extends EventEmitter {
     try {
       managed.pty.write(text);
     } catch (err) {
-      console.warn(
-        `[SessionManager] pty.write failed sid=${sessionId}: ${
+      logger.warn(
+        'SessionManager',
+        `pty.write failed sid=${sessionId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -784,8 +786,9 @@ export class SessionManager extends EventEmitter {
     try {
       managed.pty.resize(dims.cols, dims.rows);
     } catch (err) {
-      console.warn(
-        `[SessionManager] resize ignored sid=${sessionId} ${dims.cols}x${dims.rows}: ${
+      logger.warn(
+        'SessionManager',
+        `resize ignored sid=${sessionId} ${dims.cols}x${dims.rows}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -997,6 +1000,18 @@ export class SessionManager extends EventEmitter {
     if (!this.sessions.has(managed.info.id)) return; // 已被 closeSession 清理过
     if (managed.info.state === 'exited') return; // 防御性:不双发
 
+    // STM-1:在 emit sessionExited 之前把 pending 字节段先 flush 出去,
+    // 保证 renderer 看到的因果序是"最后一段输出 → exited",而不是相反。
+    // 否则 PER-2 引入的 8ms 聚合窗口可能含 PTY 退出前最后一波字节,等到
+    // exited 已发出后才 fire → renderer 收到"已退出 session 的延迟输出"。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
+    }
+    if (managed.pendingEmit) {
+      this.flushPendingEmit(managed);
+    }
+
     // emit session-exited 事件 (用于通知 renderer 显示 exitCode 等)
     const payload: SessionExitedPayload = {
       sessionId: managed.info.id,
@@ -1052,8 +1067,9 @@ export class SessionManager extends EventEmitter {
       try {
         managed.pty.kill();
       } catch (err) {
-        console.warn(
-          `[SessionManager] kill failed sid=${sid}: ${
+        logger.warn(
+          'SessionManager',
+          `kill failed sid=${sid}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -1187,6 +1203,14 @@ export class SessionManager extends EventEmitter {
     if (managed.cwdPollTimer) {
       clearInterval(managed.cwdPollTimer);
       managed.cwdPollTimer = null;
+    }
+    // STM-2:pendingEmitTimer 也是 session 生命周期内的计时器,clearTimers
+    // 必须一并清理。否则 session 已 exited 但 timer 还在 8ms 后 fire,
+    // 走 flushPendingEmit emit 一段 sessionOutput,renderer 收到"已退出 session
+    // 的延迟输出"。调用方若需要在清理前先 flush,应在调 clearTimers 之前自行 flush。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
     }
   }
 
