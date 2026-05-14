@@ -146,7 +146,7 @@ function bootstrap(): void {
             },
           });
         } catch (err) {
-          console.warn('[main] persist windowDefaults failed:', err);
+          logger.warn('main', 'persist windowDefaults failed', err);
         }
       },
     };
@@ -176,7 +176,7 @@ function bootstrap(): void {
         windowManager.createWindowFromFactory();
       }
     } catch (err) {
-      console.error('[main] second-instance handler failed', err);
+      logger.error('main', 'second-instance handler failed', err);
     }
   });
 
