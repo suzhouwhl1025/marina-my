@@ -1142,11 +1142,17 @@ export class SessionManager extends EventEmitter {
    *   也防恶意 OSC 注入超长字符串
    * - 去前后空白后为空 → 忽略(有的 shell 启动期会发空标题清屏,不动当前名)
    * - 与现有 displayName 相同 → no-op,不发广播
+   * - TIT-1:整段就是 shell exe 路径 / MINGW prefix 的"启动垃圾"标题 →
+   *   忽略,不让 powershell.exe / cmd.exe / Git Bash 把 sidebar 里的友好名
+   *   ("PowerShell" / "Bash")覆盖成 "C:\Windows\System32\cmd.exe"。
+   *   合法 CLI 工具标题(vim / claude / make ...)前后有描述性内容,
+   *   不会被 looksLikeShellStartupGarbage 误判,详见该函数注释。
    */
   private handleOscTitle(managed: ManagedSession, rawTitle: string): void {
     if (managed.manuallyRenamed) return;
     const cleaned = sanitizeTitle(rawTitle);
     if (!cleaned) return;
+    if (looksLikeShellStartupGarbage(cleaned)) return;
     if (cleaned === managed.info.displayName) return;
     managed.info.displayName = cleaned;
     this.emitStateChanged(managed, { displayName: cleaned });
@@ -1293,6 +1299,48 @@ function pickShell(
 function pickDisplayName(template: Template, shell: ShellInfo): string {
   if (template.command) return template.name;
   return inferDisplayName(shell.executablePath);
+}
+
+/**
+ * OSC 标题"启动垃圾"识别(TIT-1):
+ *
+ * Windows 上 powershell.exe / cmd.exe 启动时调 Win32 SetConsoleTitle()
+ * 把窗口标题设成自己的 exe 路径,ConPTY 把这次调用翻译成 OSC 0 序列发给
+ * xterm 消费者;Git Bash 默认 PS1 又在每次 prompt 时主动发
+ * `\e]0;MINGW64:<cwd>\a`。这些"shell 启动 / 内置 prompt"产出的标题对
+ * Marina 用户而言全是噪声 — 他们希望 tab 显示的是 "PowerShell" / "Bash"
+ * 或自己跑的工具名(vim / claude / node ...),不是 shell 自己的 exe 路径
+ * 或 cwd 重复。
+ *
+ * 但绝不能误杀 CLI 工具的合法标题。CLI 工具(vim / claude / make ...)
+ * 的标题特征是 **路径只是更长描述的一部分** —— "vim /etc/hosts" /
+ * "✻ Claude · ~/p (working…)" / "make -j4"。所以判别规则是:
+ *
+ *   整段标题 *本身就是* 一个裸路径 → 启动垃圾 → 拒
+ *   标题里 *包含* 路径但前后有别的内容 → 合法 → 放行
+ *
+ * 用 ^...$ 完整匹配实现这一区分。
+ */
+export function looksLikeShellStartupGarbage(title: string): boolean {
+  // 关键判别:整段标题 *以路径前缀起手* 即视为垃圾 —— 不要求剩余部分无
+  // 空格,因为 "C:\Program Files\..." 这种合法 Windows 路径含空格。
+  // 真实 CLI 工具的标题永远是 verb-leading("vim C:\foo" / "nano /etc/hosts"
+  // / "✻ Claude ..."),不会以裸盘符或裸 "/" 起手,所以 ^ 锚就够区分。
+
+  // 1. Windows 盘符路径起手 — "C:\..." / "C:/..." / "D:\Program Files\..."
+  if (/^[A-Za-z]:[\\/]/.test(title)) return true;
+  // 2. UNC 路径起手 — "\\server\share\..."
+  if (/^\\\\/.test(title)) return true;
+  // 3. Unix 绝对路径起手 — "/usr/bin/bash"
+  if (title.startsWith('/')) return true;
+  // 4. Git Bash / MSYS2 默认 PS1 前缀 — 每次 prompt 重复发
+  //    "MINGW64:<cwd>" / "MINGW32:..." / "MSYS:..." / "MSYS2:..."
+  if (/^(MINGW(32|64|ARM)?|MSYS\d?):/i.test(title)) return true;
+  // 5. 裸 exe 文件名(无空格,以 .exe 结尾)— "cmd.exe" / "pwsh.exe"
+  //    "Visual Studio Code.exe" 等空格 exe 名作为 *启动期* 标题极其罕见,
+  //    放过比误杀稳。
+  if (/^\S+\.exe$/i.test(title)) return true;
+  return false;
 }
 
 /**
