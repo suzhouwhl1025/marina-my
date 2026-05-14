@@ -1,22 +1,32 @@
 # scripts/install-context-menu.ps1
 #
-# 安装 Marina Win11 新右键菜单(IExplorerCommand)。Marina 设置页面的
-# "Win11 新菜单 → 启用" 触发此脚本(主进程通过 powershell.exe 调起)。
+# Install the Marina Win11 new right-click menu (IExplorerCommand).
+# Triggered by Settings -> "Win11 new menu -> Enable" via the main
+# process invoking powershell.exe.
 #
-# 步骤:
-#   1) 导入自签证书到 Cert:\CurrentUser\TrustedPeople(MSIX 包签名链
-#      只有这里能信任。CurrentUser store 无需管理员;Add-AppxPackage 后
-#      Windows 验证 MSIX 时会读到)。
-#   2) Add-AppxPackage -Path <msix>(注册 sparse package + IExplorerCommand)。
+# Steps:
+#   1) Import the self-signed cert into Cert:\CurrentUser\TrustedPeople
+#      (MSIX signature chain only trusts certs here; CurrentUser store
+#      requires no admin; Windows reads it when validating the MSIX).
+#   2) Add-AppxPackage -Path <msix> (registers sparse package + IExplorerCommand).
 #
-# 失败信息打到 stderr,exit 非 0,Marina 主进程会展示给用户。
+# Failures go to stderr with non-zero exit; the main process surfaces
+# them to the user.
 #
-# 入参:
-#   -MsixPath  <abs>   MSIX 包绝对路径(由 Marina 主进程从 extraResources 解出)
-#   -CertPath  <abs>   .cer 文件绝对路径(同上)
+# Parameters:
+#   -MsixPath  <abs>   Absolute MSIX path (resolved from extraResources by main)
+#   -CertPath  <abs>   Absolute .cer path (same)
 #
-# 幂等性:Import-Certificate 在 thumbprint 已存在时 Windows 自动跳过;
-#         Add-AppxPackage 在同版本已注册时返回错误,我们捕获后判断是否真的成功。
+# Idempotency: Import-Certificate is a no-op when the thumbprint already
+# exists; we explicitly skip Add-AppxPackage when Get-AppxPackage already
+# reports the package, which is locale-independent (the previous version
+# matched error-message text, which broke on non-English Windows).
+#
+# IMPORTANT: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1
+# using the system ANSI code page when no BOM is present; on a Chinese
+# locale that is GBK/CP936, which mis-decodes UTF-8 and can produce stray
+# structural tokens, breaking the parser. ASCII-only avoids the issue
+# without forcing a BOM.
 
 [CmdletBinding()]
 param(
@@ -30,37 +40,36 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path -LiteralPath $MsixPath)) {
-    Write-Error "MSIX 包不存在:$MsixPath"
+    Write-Error "MSIX package not found: $MsixPath"
     exit 2
 }
 if (-not (Test-Path -LiteralPath $CertPath)) {
-    Write-Error "证书文件不存在:$CertPath"
+    Write-Error "Certificate file not found: $CertPath"
     exit 2
 }
 
-Write-Output "[1/2] 导入证书到 Cert:\CurrentUser\TrustedPeople"
+Write-Output "[1/2] Importing certificate to Cert:\CurrentUser\TrustedPeople"
 try {
     $imported = Import-Certificate -FilePath $CertPath -CertStoreLocation Cert:\CurrentUser\TrustedPeople -ErrorAction Stop
-    Write-Output "    已导入 thumbprint=$($imported.Thumbprint)"
+    Write-Output "    Imported thumbprint=$($imported.Thumbprint)"
 } catch {
-    Write-Error "导入证书失败:$($_.Exception.Message)"
+    Write-Error "Import-Certificate failed: $($_.Exception.Message)"
     exit 3
 }
 
-Write-Output "[2/2] 注册 MSIX 包"
-try {
-    Add-AppxPackage -Path $MsixPath -ErrorAction Stop
-    Write-Output "    已注册 Marina.ContextMenu"
-} catch {
-    # 已存在(同版本)走另一条路径
-    $msg = $_.Exception.Message
-    if ($msg -match 'is already installed' -or $msg -match '已安装') {
-        Write-Output "    已存在,跳过"
-    } else {
-        Write-Error "注册 MSIX 失败:$msg"
+Write-Output "[2/2] Registering MSIX package"
+$existing = Get-AppxPackage -Name 'Marina.ContextMenu' -ErrorAction SilentlyContinue
+if ($null -ne $existing) {
+    Write-Output "    Already installed ($($existing.Version)), skipping Add-AppxPackage"
+} else {
+    try {
+        Add-AppxPackage -Path $MsixPath -ErrorAction Stop
+        Write-Output "    Registered Marina.ContextMenu"
+    } catch {
+        Write-Error "Add-AppxPackage failed: $($_.Exception.Message)"
         exit 4
     }
 }
 
-Write-Output "完成。新菜单将在数秒内对 Explorer 生效;若未生效请重启 Explorer 进程。"
+Write-Output "Done. The new menu should appear in Explorer within seconds; restart Explorer if it does not."
 exit 0
