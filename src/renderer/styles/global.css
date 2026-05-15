@@ -592,6 +592,24 @@ button:disabled {
   border-radius: 50%;
   flex: 0 0 auto;
   margin-left: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-state-dot-icon {
+  /* 叠在灰色 dot 之上,稍微溢出边界以保证可读 */
+  pointer-events: none;
+}
+
+.session-state-dot-icon.ok {
+  color: var(--pine, #f0f);
+  stroke-width: 3;
+}
+
+.session-state-dot-icon.fail {
+  color: var(--love, #f0f);
+  stroke-width: 3;
 }
 
 .session-name {
@@ -1041,6 +1059,23 @@ button:disabled {
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-dot-icon {
+  pointer-events: none;
+}
+
+.status-dot-icon.ok {
+  color: var(--pine, #f0f);
+  stroke-width: 3;
+}
+
+.status-dot-icon.fail {
+  color: var(--love, #f0f);
+  stroke-width: 3;
 }
 
 .status-dot.active {

@@ -23,7 +23,7 @@ import {
   type DragEvent,
   type MouseEvent,
 } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
   type AddBookmarkResponse,
@@ -732,7 +732,16 @@ function SessionItemImpl({
         className="session-state-dot"
         style={{ backgroundColor: STATE_DOT_COLOR[session.state] }}
         aria-label={`状态: ${session.state}`}
-      />
+      >
+        {session.state === 'exited' && session.exitCode === 0 && (
+          <Check size={9} className="session-state-dot-icon ok" />
+        )}
+        {session.state === 'exited' &&
+          typeof session.exitCode === 'number' &&
+          session.exitCode !== 0 && (
+            <X size={9} className="session-state-dot-icon fail" />
+          )}
+      </span>
       {renaming ? (
         <input
           ref={renameInputRef}
