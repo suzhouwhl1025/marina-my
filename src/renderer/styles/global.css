@@ -443,6 +443,9 @@ button:disabled {
   padding: 0;
   cursor: pointer;
   transition: filter 80ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .titlebar-traffic-btn.close {
@@ -459,6 +462,22 @@ button:disabled {
 
 .titlebar-traffic-btn:hover {
   filter: brightness(0.92);
+}
+
+/* BETA-023:macOS 红绿灯悬浮符号 — 默认关,setting 开启时 hover 显示 ×/−/+ */
+.titlebar-traffic-btn .traffic-symbol {
+  opacity: 0;
+  color: rgb(0 0 0 / 75%);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  user-select: none;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+}
+
+.app-titlebar-macos.show-hover-symbols .titlebar-traffic:hover .titlebar-traffic-btn .traffic-symbol {
+  opacity: 1;
 }
 
 .app-body {

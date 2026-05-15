@@ -27,6 +27,7 @@ import {
 import type { WindowStyle } from '@shared/types';
 import { Minus, Square, Copy as RestoreIcon, X } from 'lucide-react';
 import { focusTerminalDom } from '../focus';
+import { useAppState } from '../store';
 
 interface Props {
   windowStyle: WindowStyle;
@@ -90,43 +91,15 @@ export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element 
 
   if (windowStyle === 'macos') {
     return (
-      <div
-        className="app-titlebar app-titlebar-macos"
-        onDoubleClick={handleDragRegionDblClick}
-      >
-        {/*
-          勘误第二轮:红绿灯按钮内部不再渲染图标。原 macOS-style hover 时显示
-          ×/−/⤢ 视觉过重且与 Marina 自身的极简风格不一致;用户明确要求"不显
-          示悬浮图标"。三圆点纯色 + tooltip 已能传达足够信息。
-        */}
-        <div className="titlebar-traffic" aria-label="窗口控制(macOS 风格)">
-          <button
-            type="button"
-            className="titlebar-traffic-btn close"
-            onClick={callClose}
-            title="关闭"
-            aria-label="关闭窗口"
-          />
-          <button
-            type="button"
-            className="titlebar-traffic-btn min"
-            onClick={callMin}
-            title="最小化"
-            aria-label="最小化窗口"
-          />
-          <button
-            type="button"
-            className="titlebar-traffic-btn max"
-            onClick={callToggleMax}
-            title={maximized ? '还原' : '最大化'}
-            aria-label={maximized ? '还原窗口' : '最大化窗口'}
-          />
-        </div>
-        <div className="titlebar-spacer titlebar-drag" />
-        <div className="titlebar-title titlebar-drag">{title}</div>
-        <div className="titlebar-spacer titlebar-drag" />
-        <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
-      </div>
+      <MacosTitlebar
+        buildVersion={buildVersion}
+        title={title}
+        maximized={maximized}
+        callMin={callMin}
+        callClose={callClose}
+        callToggleMax={callToggleMax}
+        handleDragRegionDblClick={handleDragRegionDblClick}
+      />
     );
   }
 
@@ -171,6 +144,90 @@ export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element 
           <X size={15} strokeWidth={1.6} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * macOS 风格标题栏(BETA-023 起从主组件抽出 — 需要读 settings)。
+ *
+ * 红绿灯按钮的内部符号:
+ * - 默认(macOSTrafficLightHoverSymbols=false)hover 不显示符号,保 CP-4 勘误第二轮决定的"极简"观感
+ * - 用户开启该 setting 后,hover 时按钮内显示 ×/−/+(对齐原生 macOS)
+ *
+ * 反转记录:CP-4 勘误第二轮砍掉了 hover 符号,BETA-023(beta 用户反馈)
+ * 又把它做成开关,默认仍关。两派(极简派 vs 原生派)都能用。
+ */
+function MacosTitlebar({
+  buildVersion,
+  title,
+  maximized,
+  callMin,
+  callClose,
+  callToggleMax,
+  handleDragRegionDblClick,
+}: {
+  buildVersion: string;
+  title: string;
+  maximized: boolean;
+  callMin: () => void;
+  callClose: () => void;
+  callToggleMax: () => void;
+  handleDragRegionDblClick: (e: ReactMouseEvent<HTMLDivElement>) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const hoverSymbols = state.settings.appearance?.macOSTrafficLightHoverSymbols ?? false;
+  void maximized; // 当前 UI 中 max 按钮不区分图标,标记 used
+  return (
+    <div
+      className={`app-titlebar app-titlebar-macos${hoverSymbols ? ' show-hover-symbols' : ''}`}
+      onDoubleClick={handleDragRegionDblClick}
+    >
+      <div className="titlebar-traffic" aria-label="窗口控制(macOS 风格)">
+        <button
+          type="button"
+          className="titlebar-traffic-btn close"
+          onClick={callClose}
+          title="关闭"
+          aria-label="关闭窗口"
+        >
+          {hoverSymbols && (
+            <span className="traffic-symbol" aria-hidden="true">
+              ×
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          className="titlebar-traffic-btn min"
+          onClick={callMin}
+          title="最小化"
+          aria-label="最小化窗口"
+        >
+          {hoverSymbols && (
+            <span className="traffic-symbol" aria-hidden="true">
+              −
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          className="titlebar-traffic-btn max"
+          onClick={callToggleMax}
+          title={maximized ? '还原' : '最大化'}
+          aria-label={maximized ? '还原窗口' : '最大化窗口'}
+        >
+          {hoverSymbols && (
+            <span className="traffic-symbol" aria-hidden="true">
+              +
+            </span>
+          )}
+        </button>
+      </div>
+      <div className="titlebar-spacer titlebar-drag" />
+      <div className="titlebar-title titlebar-drag">{title}</div>
+      <div className="titlebar-spacer titlebar-drag" />
+      <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
     </div>
   );
 }

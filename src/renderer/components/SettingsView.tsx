@@ -63,6 +63,7 @@ import {
 import { Icon, type IconName } from './icons';
 import { useModal } from './Modal';
 import { TemplateIcon } from './TemplateIcon';
+import { useToast } from './Toast';
 
 type CategoryId =
   | 'appearance'
@@ -1249,6 +1250,7 @@ function SystemIntegrationPanel({
   const state = useAppState();
   const sys = state.settings?.systemIntegration;
   const openIn = sys?.explorerOpenIn ?? 'new-window';
+  const toast = useToast();
 
   const [status, setStatus] = useState<ExplorerIntegrationStatus | null>(null);
   const [busy, setBusy] = useState<'classic' | 'modern' | null>(null);
@@ -1287,6 +1289,14 @@ function SystemIntegrationPanel({
       setStatus(res.status);
       if (!res.ok) {
         setError(res.message || `操作失败 (${kind})`);
+      } else if (kind === 'modern') {
+        // BETA-044:Win11 新菜单 install/uninstall 后,MSIX 加载有 OS 级延迟
+        // (不是 Marina bug)。提示用户重启电脑确保生效;不做"一键重启 Explorer"
+        // 按钮(用户选了最保守的方案)。详见 docs/known-issues.md。
+        toast.push({
+          kind: 'info',
+          message: '右键菜单已更新,确保设置生效请重启计算机',
+        });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
