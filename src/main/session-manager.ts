@@ -52,6 +52,7 @@ import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { SettingsManager } from './settings-manager';
+import type { AIClient } from './ai-client';
 import { Osc1337Parser } from './osc1337-parser';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
@@ -1178,10 +1179,10 @@ export class SessionManager extends EventEmitter {
    * BETA-031:bootstrap 启动后注入 AIClient,供 BETA-006 状态复核使用。
    * 可空(测试场景不注入);需要后从 settings.ai 现读配置。
    */
-  setAiClient(client: import('./ai-client').AIClient | null): void {
+  setAiClient(client: AIClient | null): void {
     this.aiClient = client;
   }
-  private aiClient: import('./ai-client').AIClient | null = null;
+  private aiClient: AIClient | null = null;
 
   // ──────────────────────────────────────────────────────────────────
   // 内部:OSC 1337 cwd 处理
