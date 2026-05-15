@@ -94,7 +94,12 @@ export interface AppState {
   lastTerminalDims: { cols: number; rows: number };
 }
 
-const EMPTY_TREE: PathTree = { bookmarks: [], temporary: [], recent: [] };
+const EMPTY_TREE: PathTree = {
+  bookmarks: [],
+  temporary: [],
+  recent: [],
+  systemPaths: [],
+};
 
 // ──────────────────────────────────────────────────────────────────
 // Action

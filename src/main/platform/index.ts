@@ -76,6 +76,36 @@ export interface PlatformAdapter {
    * 直接返回 process.env.PATH 即可。
    */
   getRefreshedPath(): string;
+
+  /**
+   * 返回当前平台的系统路径条目(BETA-011),用于 Sidebar 第 4 栏"系统"。
+   * 不持久化,每次启动从此处派生。
+   *
+   * Windows:%USERPROFILE%\Desktop / %USERPROFILE% / %TEMP%
+   * Linux:  ~/Desktop / ~ / /tmp
+   * macOS:  ~/Desktop / ~ / /tmp
+   *
+   * id 是稳定的逻辑名(`system:desktop` / `system:home` / `system:temp`),
+   * 用于和 settings.appearance.systemPaths 的逐项开关对齐;不参与
+   * PathManager 的 UUID id 体系。
+   */
+  getSystemPaths(): SystemPathEntry[];
+}
+
+/**
+ * 系统路径条目(BETA-011)。区别于普通 PathNode:
+ * - 没有 UUID(系统路径每次启动重派,id 走稳定逻辑名)
+ * - 不持有 session(显示时复用 PathNode 渲染逻辑,sessionIds 始终为空)
+ */
+export interface SystemPathEntry {
+  /** 稳定逻辑名:'system:desktop' / 'system:home' / 'system:temp' */
+  id: string;
+  /** 显示名,如 "桌面" / "主目录" / "临时" */
+  label: string;
+  /** 文件系统绝对路径(平台决定具体值) */
+  path: string;
+  /** 对应 settings.appearance.systemPaths 里的开关字段名 */
+  toggleKey: 'desktop' | 'home' | 'temp';
 }
 
 /**

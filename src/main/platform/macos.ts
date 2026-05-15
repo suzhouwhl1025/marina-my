@@ -16,7 +16,9 @@
  *
  * @AGENTS.md 8.2: 不要"顺手"实现 macOS,V1 只 Windows。
  */
-import type { PlatformAdapter, ShellInfo } from './index';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { PlatformAdapter, ShellInfo, SystemPathEntry } from './index';
 
 const NOT_IMPLEMENTED =
   '[MacOSAdapter] macOS support not implemented yet. ' +
@@ -48,5 +50,13 @@ export class MacOSAdapter implements PlatformAdapter {
     // macOS 子进程从 launchd / login shell 继承 env;BETA-001 的 Windows-only
     // 注册表广播痛点不存在,直接返回 process.env.PATH。
     return process.env.PATH ?? '';
+  }
+  getSystemPaths(): SystemPathEntry[] {
+    const home = homedir();
+    return [
+      { id: 'system:desktop', label: '桌面', path: join(home, 'Desktop'), toggleKey: 'desktop' },
+      { id: 'system:home', label: '主目录', path: home, toggleKey: 'home' },
+      { id: 'system:temp', label: '临时', path: '/tmp', toggleKey: 'temp' },
+    ];
   }
 }

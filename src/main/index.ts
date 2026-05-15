@@ -28,7 +28,7 @@ import { SettingsManager, DEFAULT_SETTINGS } from './settings-manager';
 import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
-import { getPlatformAdapter } from './platform';
+import { getPlatformAdapter, type SystemPathEntry } from './platform';
 import { WindowsAdapter } from './platform/windows';
 import { parseOpenHere } from './argv-utils';
 import { getBuildType } from './build-type';
@@ -48,6 +48,20 @@ export function setQuitting(): void {
 
 export function getIsQuitting(): boolean {
   return isQuitting;
+}
+
+/**
+ * BETA-011:按 settings 把 PlatformAdapter 返回的系统路径过滤一遍。
+ * - showSystemPaths = false → 整体清空(Sidebar 不渲染第 4 栏)
+ * - 各 toggle 控制对应条目是否进入数组
+ */
+function filterSystemPaths(
+  entries: readonly SystemPathEntry[],
+  settings: Settings,
+): SystemPathEntry[] {
+  if (!settings.appearance.showSystemPaths) return [];
+  const flags = settings.appearance.systemPaths;
+  return entries.filter((e) => flags[e.toggleKey]);
 }
 
 function bootstrap(): void {
@@ -307,10 +321,30 @@ function bootstrap(): void {
         if (e.changedKeys.includes('advanced.logLevel')) {
           logger.setLevel(e.settings.advanced.logLevel === 'DEBUG' ? 'debug' : 'info');
         }
+        // BETA-011:系统路径分组开关变化即刻反映到 PathTree
+        if (
+          platformAdapter &&
+          e.changedKeys.some(
+            (k) =>
+              k === 'appearance.showSystemPaths' ||
+              k.startsWith('appearance.systemPaths'),
+          )
+        ) {
+          pathManager.setSystemPaths(
+            filterSystemPaths(platformAdapter.getSystemPaths(), e.settings),
+          );
+        }
         // Explorer 右键集成不再走 settings — 它的开关由
         // cmd:explorer-integration:set-{classic,modern} 直接调用 platformAdapter,
         // 系统状态 = HKCU key / MSIX 包是否存在(现场查,不持久化在 settings.json)。
       });
+
+      // BETA-011:启动后立刻把系统路径派生进 PathTree
+      if (platformAdapter) {
+        pathManager.setSystemPaths(
+          filterSystemPaths(platformAdapter.getSystemPaths(), settingsManager.get()),
+        );
+      }
 
       // v1.5 改名遗留清理:EasyTerm 时代写入的右键菜单 key 若残留,会与 Marina
       // 并排出现两条菜单项。启动期静默清一次。失败 (例如本来就没装过) 不阻塞。

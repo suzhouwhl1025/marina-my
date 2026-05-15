@@ -42,6 +42,15 @@ export const DEFAULT_SETTINGS: Settings = {
     terminalLineHeight: 1.2,
     uiFontFamily: "'LXGW WenKai', system-ui, sans-serif",
     uiZoom: 1.0,
+    // BETA-011 系统路径分组,默认全开
+    showSystemPaths: true,
+    systemPaths: {
+      desktop: true,
+      home: true,
+      temp: true,
+    },
+    // BETA-023 macOS 红绿灯悬浮符号,默认关(与 CP-4 勘误第二轮决策一致)
+    macOSTrafficLightHoverSymbols: false,
   },
   shell: {
     defaultShellId: '',

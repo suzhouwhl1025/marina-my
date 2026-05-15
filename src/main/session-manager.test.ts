@@ -174,6 +174,9 @@ function makeStubSettingsManager(
       terminalLineHeight: 1.2,
       uiFontFamily: '',
       uiZoom: 1,
+      showSystemPaths: true,
+      systemPaths: { desktop: true, home: true, temp: true },
+      macOSTrafficLightHoverSymbols: false,
     },
     shell: { defaultShellId: '', newTerminalShellPolicy: 'default' },
     behavior: {
@@ -231,6 +234,9 @@ function makeFakeAdapter(opts: FakeAdapterOpts = {}): PlatformAdapter {
     getRefreshedPath() {
       // 测试默认走 process.env.PATH,不触发 reg query。
       return process.env.PATH ?? '';
+    },
+    getSystemPaths() {
+      return [];
     },
   };
 }

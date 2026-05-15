@@ -20,10 +20,11 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { logger } from '../logger';
-import type { PlatformAdapter, ShellInfo } from './index';
+import type { PlatformAdapter, ShellInfo, SystemPathEntry } from './index';
 
 const execFileAsync = promisify(execFile);
 
@@ -486,6 +487,34 @@ export class WindowsAdapter implements PlatformAdapter {
       );
       return fallback;
     }
+  }
+
+  /**
+   * BETA-011:Windows 系统路径(每次启动派生,不持久化)。
+   * USERPROFILE 兜底用 homedir(),Windows 上正常存在。
+   */
+  getSystemPaths(): SystemPathEntry[] {
+    const userProfile = process.env.USERPROFILE || homedir();
+    return [
+      {
+        id: 'system:desktop',
+        label: '桌面',
+        path: join(userProfile, 'Desktop'),
+        toggleKey: 'desktop',
+      },
+      {
+        id: 'system:home',
+        label: '主目录',
+        path: userProfile,
+        toggleKey: 'home',
+      },
+      {
+        id: 'system:temp',
+        label: '临时',
+        path: tmpdir(),
+        toggleKey: 'temp',
+      },
+    ];
   }
 }
 

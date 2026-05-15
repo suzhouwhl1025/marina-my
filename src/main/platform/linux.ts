@@ -17,7 +17,9 @@
  *
  * @AGENTS.md 8.2: 不要"顺手"实现 Linux,V1 只 Windows。
  */
-import type { PlatformAdapter, ShellInfo } from './index';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { PlatformAdapter, ShellInfo, SystemPathEntry } from './index';
 
 const NOT_IMPLEMENTED =
   '[LinuxAdapter] Linux support not implemented yet. ' +
@@ -49,5 +51,13 @@ export class LinuxAdapter implements PlatformAdapter {
     // Linux 一般不需要从注册表读 — 子进程会继承调用者(login shell)完整 env。
     // 直接返回 process.env.PATH 即可,BETA-001 的 Windows-only 痛点不存在。
     return process.env.PATH ?? '';
+  }
+  getSystemPaths(): SystemPathEntry[] {
+    const home = homedir();
+    return [
+      { id: 'system:desktop', label: '桌面', path: join(home, 'Desktop'), toggleKey: 'desktop' },
+      { id: 'system:home', label: '主目录', path: home, toggleKey: 'home' },
+      { id: 'system:temp', label: '临时', path: '/tmp', toggleKey: 'temp' },
+    ];
   }
 }

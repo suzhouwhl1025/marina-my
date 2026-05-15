@@ -35,6 +35,7 @@ import type {
   RecentFile,
 } from '@shared/types';
 import type { JsonStore } from './persistence';
+import type { SystemPathEntry } from './platform';
 import { logger } from './logger';
 
 const RECENT_CAPACITY = 30;
@@ -116,6 +117,20 @@ export class PathManager extends EventEmitter {
    * recent,按 lastUsedAt 降序;最大 RECENT_CAPACITY 项。
    */
   private recent: RecentEntry[] = [];
+
+  /**
+   * BETA-011:Sidebar 第 4 栏"系统"路径。每次启动由 PlatformAdapter 派生,
+   * 经 settings.appearance.{showSystemPaths, systemPaths} 过滤后由 bootstrap
+   * 调 setSystemPaths() 注入。不持久化。
+   */
+  private systemPaths: SystemPathEntry[] = [];
+
+  /**
+   * BETA-043:启动期扫描发现的"不可访问"路径集合(normalized)。
+   * getTree() 用于把对应 PathNode 标 invalid。bootstrap 启动末尾填一次,
+   * 不做后台周期扫(资源考虑)。
+   */
+  private invalidPaths = new Set<string>();
 
   constructor(
     private readonly bookmarksStore: JsonStore<BookmarksFile>,
@@ -363,11 +378,18 @@ export class PathManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * 获取完整 PathTree,三个分类无重叠 (优先级:收藏 > 临时 > 最近)。
+   * 获取完整 PathTree,四个分类无重叠
+   * (优先级:收藏 > 临时 > 最近;系统栏自成体系,不去重)。
+   *
+   * BETA-011:systemPaths 来自 PlatformAdapter,bootstrap 已按 settings 过滤;
+   * 这里不持久化、不参与去重(系统栏本来就是入口快捷方式)。
+   * BETA-043:invalidPaths 集合里的路径会被标 invalid: true。
    */
   getTree(): PathTree {
     const bookmarkPaths = new Set(this.bookmarks.map((b) => b.path));
     const sessionPaths = new Set(this.sessionToPath.values());
+    const markInvalid = (p: string): { invalid?: true } =>
+      this.invalidPaths.has(normalizePath(p)) ? { invalid: true } : {};
 
     const bookmarks: PathNode[] = this.bookmarks.map((b) => ({
       id: b.path,
@@ -376,6 +398,7 @@ export class PathManager extends EventEmitter {
       category: 'bookmarked',
       sessionIds: this.sessionsForPath(b.path),
       ...(b.defaultTemplateId ? { defaultTemplateId: b.defaultTemplateId } : {}),
+      ...markInvalid(b.path),
     }));
 
     const temporary: PathNode[] = [...sessionPaths]
@@ -385,6 +408,7 @@ export class PathManager extends EventEmitter {
         path: p,
         category: 'temporary' as const,
         sessionIds: this.sessionsForPath(p),
+        ...markInvalid(p),
       }));
 
     const recent: PathNode[] = this.recent
@@ -397,9 +421,40 @@ export class PathManager extends EventEmitter {
         path: normalizePath(r.path),
         category: 'recent' as const,
         sessionIds: [],
+        ...markInvalid(r.path),
       }));
 
-    return { bookmarks, temporary, recent };
+    const systemPaths: PathNode[] = this.systemPaths.map((sp) => ({
+      id: sp.id,
+      path: sp.path,
+      displayName: sp.label,
+      category: 'system' as const,
+      sessionIds: [],
+      ...markInvalid(sp.path),
+    }));
+
+    return { bookmarks, temporary, recent, systemPaths };
+  }
+
+  /**
+   * BETA-011:设置系统路径条目(已按 settings.appearance.systemPaths.* 过滤),
+   * 由 bootstrap 在启动 + 设置变化时调用。空数组 = 整体关闭显示。
+   */
+  setSystemPaths(entries: SystemPathEntry[]): void {
+    this.systemPaths = entries.slice();
+    this.emit('pathTreeUpdated', this.getTree());
+  }
+
+  /**
+   * BETA-043:批量标记一组路径为不可访问。bootstrap 启动末尾扫描后调用一次。
+   * 调用会触发 pathTreeUpdated。
+   */
+  setInvalidPaths(normalizedPaths: Iterable<string>): void {
+    this.invalidPaths = new Set();
+    for (const p of normalizedPaths) {
+      this.invalidPaths.add(normalizePath(p));
+    }
+    this.emit('pathTreeUpdated', this.getTree());
   }
 
   /**

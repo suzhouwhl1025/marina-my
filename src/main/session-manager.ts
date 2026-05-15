@@ -1494,5 +1494,8 @@ function createNoopAdapter(): PlatformAdapter {
     getRefreshedPath() {
       return process.env.PATH ?? '';
     },
+    getSystemPaths() {
+      return [];
+    },
   };
 }
