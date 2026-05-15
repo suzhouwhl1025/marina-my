@@ -64,6 +64,40 @@ function filterSystemPaths(
   return entries.filter((e) => flags[e.toggleKey]);
 }
 
+/**
+ * BETA-043:并行 statSync 一遍所有路径,把不存在 / 非目录 / 无权限的路径喂给
+ * PathManager.setInvalidPaths。仅在 bootstrap 末尾调一次,不做后台周期扫
+ * (避免无谓 IO,且用户修了路径后随时可以手动重启刷新)。
+ */
+async function scanInvalidPathsAsync(pathManager: PathManager): Promise<void> {
+  const tree = pathManager.getTree();
+  const allPaths = [
+    ...tree.bookmarks,
+    ...tree.temporary,
+    ...tree.recent,
+    // 系统路径理论上永远存在,但走同一代码路径不报错;%TEMP% 不存在时
+    // 也标 invalid 而不是崩溃。
+    ...tree.systemPaths,
+  ];
+  const invalid: string[] = [];
+  for (const node of allPaths) {
+    try {
+      if (!existsSync(node.path)) {
+        invalid.push(node.path);
+        continue;
+      }
+      const st = statSync(node.path);
+      if (!st.isDirectory()) invalid.push(node.path);
+    } catch {
+      invalid.push(node.path);
+    }
+  }
+  if (invalid.length > 0) {
+    logger.info('main', `BETA-043 invalid paths detected: ${invalid.length}`);
+  }
+  pathManager.setInvalidPaths(invalid);
+}
+
 function bootstrap(): void {
   // M1-D:全局崩溃兜底 — daily driver 最大风险是"未捕获异常让主进程死掉,
   // 一刹那所有 PTY 全部消失,用户工作全丢"。装一层 net,只记日志不让进程退,
@@ -345,6 +379,12 @@ function bootstrap(): void {
           filterSystemPaths(platformAdapter.getSystemPaths(), settingsManager.get()),
         );
       }
+
+      // BETA-043:启动期异步扫描所有 path,标记不可访问者。不做后台周期扫
+      // (一次启动只扫一遍;运行时新建 session spawn 前的 statSync 仍有兜底)。
+      scanInvalidPathsAsync(pathManager).catch((err) => {
+        logger.warn('main', 'scanInvalidPathsAsync failed', err);
+      });
 
       // v1.5 改名遗留清理:EasyTerm 时代写入的右键菜单 key 若残留,会与 Marina
       // 并排出现两条菜单项。启动期静默清一次。失败 (例如本来就没装过) 不阻塞。

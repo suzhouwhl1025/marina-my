@@ -23,7 +23,7 @@ import {
   type DragEvent,
   type MouseEvent,
 } from 'react';
-import { Check, ChevronDown, ChevronRight, X } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
   type AddBookmarkResponse,
@@ -477,14 +477,17 @@ function PathItem({
   };
 
   return (
-    <li className={`path-item${selected ? ' selected' : ''}`}>
+    <li className={`path-item${selected ? ' selected' : ''}${node.invalid ? ' invalid' : ''}`}>
       <div
         className="path-item-row"
         onClick={handleSelect}
         onDoubleClick={() => void handleDoubleClick()}
         onContextMenu={handleContextMenu}
-        title={node.path}
+        title={node.invalid ? `${node.path}\n⚠️ 路径不可访问` : node.path}
       >
+        {node.invalid && (
+          <AlertTriangle size={12} className="path-invalid-icon" aria-label="路径不可访问" />
+        )}
         {sessions.length > 0 ? (
           <span
             className="path-expand-arrow"

@@ -525,6 +525,17 @@ button:disabled {
   cursor: default;
 }
 
+/* BETA-043:启动期扫描发现不可访问的路径 — 整行半透明 + ⚠️ icon */
+.path-item.invalid > .path-item-row {
+  opacity: 0.55;
+}
+
+.path-invalid-icon {
+  color: var(--gold, #f0f);
+  margin-right: 2px;
+  flex: 0 0 auto;
+}
+
 .path-name {
   flex: 1 1 auto;
   white-space: nowrap;
