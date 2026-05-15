@@ -182,6 +182,82 @@
   --iris: #3b78ff;
 }
 
+/* BETA-033 — One Dark Pro(VSCode 高点击量深色) */
+[data-theme='one-dark-pro'] {
+  --base: #282c34;
+  --surface: #21252b;
+  --overlay: #3e4451;
+  --highlight-low: #2c313a;
+  --highlight-med: #3e4451;
+  --highlight-high: #545862;
+  --muted: #5c6370;
+  --subtle: #828997;
+  --text: #abb2bf;
+  --love: #e06c75;
+  --gold: #e5c07b;
+  --rose: #d19a66;
+  --pine: #98c379;
+  --foam: #56b6c2;
+  --iris: #c678dd;
+}
+
+/* BETA-033 — Dracula(深紫高饱和) */
+[data-theme='dracula'] {
+  --base: #282a36;
+  --surface: #1e1f29;
+  --overlay: #44475a;
+  --highlight-low: #343746;
+  --highlight-med: #44475a;
+  --highlight-high: #565a73;
+  --muted: #6272a4;
+  --subtle: #8896c4;
+  --text: #f8f8f2;
+  --love: #ff5555;
+  --gold: #f1fa8c;
+  --rose: #ffb86c;
+  --pine: #50fa7b;
+  --foam: #8be9fd;
+  --iris: #bd93f9;
+}
+
+/* BETA-033 — Tokyo Night(深靛蓝日式美学) */
+[data-theme='tokyo-night'] {
+  --base: #1a1b26;
+  --surface: #16161e;
+  --overlay: #292e42;
+  --highlight-low: #1f2335;
+  --highlight-med: #2f334d;
+  --highlight-high: #414868;
+  --muted: #565f89;
+  --subtle: #737aa2;
+  --text: #c0caf5;
+  --love: #f7768e;
+  --gold: #e0af68;
+  --rose: #ff9e64;
+  --pine: #9ece6a;
+  --foam: #7dcfff;
+  --iris: #bb9af7;
+}
+
+/* BETA-033 — Catppuccin Mocha(温暖奶茶柔和) */
+[data-theme='catppuccin-mocha'] {
+  --base: #1e1e2e;
+  --surface: #181825;
+  --overlay: #313244;
+  --highlight-low: #292c3c;
+  --highlight-med: #45475a;
+  --highlight-high: #585b70;
+  --muted: #7f849c;
+  --subtle: #9399b2;
+  --text: #cdd6f4;
+  --love: #f38ba8;
+  --gold: #f9e2af;
+  --rose: #fab387;
+  --pine: #a6e3a1;
+  --foam: #94e2d5;
+  --iris: #cba6f7;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1435,80 +1511,54 @@ textarea.settings-input::-webkit-scrollbar-corner {
 }
 
 /* 主题选择卡片网格 */
-.settings-theme-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 8px;
-}
-
-.settings-theme-card {
+/* BETA-032:主题选择改纯文本列表(原色卡删除) */
+.settings-theme-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  background-color: var(--surface, #f0f);
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
   border: 1px solid var(--overlay, #f0f);
-  border-radius: 6px;
+  border-radius: 4px;
+  background-color: var(--surface, #f0f);
+  max-width: 360px;
+}
+
+.settings-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
   cursor: pointer;
-  transition: border-color 80ms ease;
+  color: var(--text, #f0f);
+  transition: background-color 80ms ease;
 }
 
-.settings-theme-card:hover {
-  border-color: var(--iris, #f0f);
-}
-
-.settings-theme-card.selected {
-  border-color: var(--iris, #f0f);
+.settings-theme-row:hover {
   background-color: var(--highlight-low, #f0f);
 }
 
-.settings-theme-card input[type='radio'] {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.settings-theme-swatch {
-  display: flex;
-  height: 18px;
-  border-radius: 3px;
-  overflow: hidden;
-  border: 1px solid var(--overlay, #f0f);
-}
-
-.settings-theme-swatch > span {
-  flex: 1 1 0;
-}
-
-.swatch-base {
-  background-color: var(--base, #f0f);
-}
-
-.swatch-iris {
-  background-color: var(--iris, #f0f);
-}
-
-.swatch-pine {
-  background-color: var(--pine, #f0f);
-}
-
-.swatch-gold {
-  background-color: var(--gold, #f0f);
-}
-
-.swatch-love {
-  background-color: var(--love, #f0f);
-}
-
-.settings-theme-name {
-  font-size: 12px;
-  color: var(--text, #f0f);
+.settings-theme-row.active {
+  background-color: var(--highlight-med, #f0f);
+  color: var(--iris, #f0f);
   font-weight: 500;
 }
 
-.settings-theme-tone {
-  font-size: 10px;
+.theme-name {
+  font-size: 13px;
+}
+
+.theme-tone-tag {
+  font-size: 11px;
   color: var(--subtle, #f0f);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background-color: var(--overlay, #f0f);
+}
+
+.theme-tone-tag.tone-light {
+  color: var(--gold, #f0f);
 }
 
 /* 复选 / 单选 / 数字框 / 下拉框 通用样式 */
@@ -2251,7 +2301,7 @@ button:focus-visible,
 .tab:focus-visible,
 .tab-close:focus-visible,
 .template-button:focus-visible,
-.settings-theme-card:focus-visible,
+.settings-theme-row:focus-visible,
 .titlebar-btn:focus-visible,
 .titlebar-traffic-btn:focus-visible,
 .settings-close:focus-visible,

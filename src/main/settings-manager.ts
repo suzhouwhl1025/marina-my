@@ -83,6 +83,11 @@ const VALID_THEMES: ThemeId[] = [
   'business',
   'ubuntu',
   'windows-terminal',
+  // BETA-033
+  'one-dark-pro',
+  'dracula',
+  'tokyo-night',
+  'catppuccin-mocha',
 ];
 
 /**

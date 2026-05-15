@@ -60,7 +60,12 @@ export type ThemeId =
   | 'cutie'
   | 'business'
   | 'ubuntu'
-  | 'windows-terminal';
+  | 'windows-terminal'
+  // BETA-033 起新增的 4 个深色主题
+  | 'one-dark-pro'
+  | 'dracula'
+  | 'tokyo-night'
+  | 'catppuccin-mocha';
 
 /**
  * 窗口外观风格 (M1-A 引入,Milestone 1)。

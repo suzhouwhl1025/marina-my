@@ -185,14 +185,19 @@ function CategoryPanel({ categoryId, setError }: CategoryPanelProps): JSX.Elemen
 // 外观分类
 // ──────────────────────────────────────────────────────────────────
 
-const THEMES: Array<{ id: ThemeId; label: string; tone: string }> = [
-  { id: 'rose-pine', label: 'Rose Pine', tone: '深色 · 默认' },
+const THEMES: Array<{ id: ThemeId; label: string; tone: '深色' | '浅色'; note?: string }> = [
+  { id: 'rose-pine', label: 'Rose Pine', tone: '深色', note: '默认' },
   { id: 'rose-pine-dawn', label: 'Rose Pine Dawn', tone: '浅色' },
-  { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色变体' },
-  { id: 'cutie', label: 'Cutie', tone: '奶油粉 · Kawaii' },
-  { id: 'business', label: 'Business', tone: '商务蓝灰' },
-  { id: 'ubuntu', label: 'Ubuntu', tone: '经典棕紫' },
-  { id: 'windows-terminal', label: 'Windows Terminal', tone: 'Campbell 配色' },
+  { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色' },
+  { id: 'cutie', label: 'Cutie', tone: '浅色', note: 'Kawaii' },
+  { id: 'business', label: 'Business', tone: '深色' },
+  { id: 'ubuntu', label: 'Ubuntu', tone: '深色' },
+  { id: 'windows-terminal', label: 'Windows Terminal', tone: '深色' },
+  // BETA-033 起新增的 4 个流行深色主题
+  { id: 'one-dark-pro', label: 'One Dark Pro', tone: '深色' },
+  { id: 'dracula', label: 'Dracula', tone: '深色' },
+  { id: 'tokyo-night', label: 'Tokyo Night', tone: '深色' },
+  { id: 'catppuccin-mocha', label: 'Catppuccin Mocha', tone: '深色' },
 ];
 
 function AppearancePanel({
@@ -245,34 +250,33 @@ function AppearancePanel({
         label="主题"
         hint="所有窗口立即同步;xterm 颜色与 UI 同步切换"
       >
-        <div className="settings-theme-grid">
+        {/* BETA-032:主题选择改纯文本列表 + tone tag,不再色卡 */}
+        <ul className="settings-theme-list" role="radiogroup" aria-label="主题">
           {THEMES.map((t) => (
-            <label
+            <li
               key={t.id}
-              className={`settings-theme-card${theme === t.id ? ' selected' : ''}`}
-              data-theme={t.id}
-            >
-              <input
-                type="radio"
-                name="theme"
-                value={t.id}
-                checked={theme === t.id}
-                onChange={() =>
-                  void updateSettings({ appearance: { theme: t.id } }, setError)
+              className={`settings-theme-row${theme === t.id ? ' active' : ''}`}
+              role="radio"
+              aria-checked={theme === t.id}
+              tabIndex={0}
+              onClick={() =>
+                void updateSettings({ appearance: { theme: t.id } }, setError)
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void updateSettings({ appearance: { theme: t.id } }, setError);
                 }
-              />
-              <span className="settings-theme-swatch" aria-hidden="true">
-                <span className="swatch-base" />
-                <span className="swatch-iris" />
-                <span className="swatch-pine" />
-                <span className="swatch-gold" />
-                <span className="swatch-love" />
+              }}
+            >
+              <span className="theme-name">{t.label}</span>
+              <span className={`theme-tone-tag tone-${t.tone === '深色' ? 'dark' : 'light'}`}>
+                {t.tone}
+                {t.note ? ` · ${t.note}` : ''}
               </span>
-              <span className="settings-theme-name">{t.label}</span>
-              <span className="settings-theme-tone">{t.tone}</span>
-            </label>
+            </li>
           ))}
-        </div>
+        </ul>
       </SettingRow>
 
       <SettingRow
