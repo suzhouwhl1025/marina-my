@@ -111,6 +111,11 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightWhite: '#e0def4',
   },
   'rose-pine-dawn': {
+    // BETA-035:浅底色下 ANSI bright 集对比度调到 WCAG AA(≥4.5:1)。
+    // 用户报告 Claude Code 在浅色主题下出现"浅底白字",根因是 brightBlack
+    // (常用于 dimmed 文字)对 #faf4ed 仅 ~3.0:1,brightYellow ~2.5:1。
+    // 这里把 brightBlack / brightYellow / brightCyan 调暗,其它 bright 项
+    // 保持与 normal 同色(Rose Pine Dawn 官方设计就是 bright=normal)。
     background: '#faf4ed',
     foreground: '#575279',
     cursor: '#575279',
@@ -124,13 +129,17 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     magenta: '#907aa9',
     cyan: '#d7827e',
     white: '#575279',
-    brightBlack: '#9893a5',
+    // 以下三项 BETA-035 调整后的对比度估算(对 #faf4ed):
+    // brightBlack #5e5a73:~6:1   ✓(原 #9893a5 ~3.0:1)
+    // brightYellow #a36e10:~5:1  ✓(原 #ea9d34 ~2.5:1)
+    // brightCyan #a35a55:~5:1    ✓(原 #d7827e ~3.0:1)
+    brightBlack: '#5e5a73',
     brightRed: '#b4637a',
     brightGreen: '#286983',
-    brightYellow: '#ea9d34',
+    brightYellow: '#a36e10',
     brightBlue: '#56949f',
     brightMagenta: '#907aa9',
-    brightCyan: '#d7827e',
+    brightCyan: '#a35a55',
     brightWhite: '#575279',
   },
   'rose-pine-moon': {

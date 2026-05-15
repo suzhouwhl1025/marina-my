@@ -2261,13 +2261,24 @@ select.settings-input option {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%238a4d6f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
 }
 
-/* B8:浅色主题阴影减淡 — 原硬编码 rgb(0 0 0 / 28-45%) 在浅底上呈"墨水块",
- * 调到 12-22% 减少视觉重量。深色主题阴影不动(28-45% 在深底正好融入)。 */
+/* B8 + BETA-037:浅色主题阴影减淡 + 边框换 --muted。
+ * 原硬编码 rgb(0 0 0 / 28-45%) 在浅底上呈"墨水块",调到 12-22% 减少视觉重量。
+ * 深色主题阴影不动(28-45% 在深底正好融入)。
+ * BETA-037 起 ctx-menu 边框在浅色主题改用 --muted,提升对比度,避免融在背景里。
+ */
 [data-theme='rose-pine-dawn'] .ctx-menu,
 [data-theme='cutie'] .ctx-menu {
+  border-color: var(--muted, #f0f);
   box-shadow:
     0 6px 18px rgb(0 0 0 / 14%),
-    0 0 0 1px var(--overlay, #f0f);
+    0 0 0 1px var(--muted, #f0f);
+}
+
+/* BETA-037:浅色主题 modal backdrop 透明度降低,避免在浅底上呈"突兀黑膜"。
+ * 深色主题 45% 不动(深底融合好)。 */
+[data-theme='rose-pine-dawn'] .app-modal-backdrop,
+[data-theme='cutie'] .app-modal-backdrop {
+  background-color: rgb(0 0 0 / 22%);
 }
 
 [data-theme='rose-pine-dawn'] .app-modal-panel,
