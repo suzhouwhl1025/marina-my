@@ -101,26 +101,28 @@
   --iris: #c4a7e7;
 }
 
-/* Cutie — 奶油粉 Kawaii 浅色 */
+/* Cutie — 80s 复古糖果风(BETA-034 重设计,iBook G3 / 马卡龙色系) */
 [data-theme='cutie'] {
-  --base: #fff5f9;
-  --surface: #ffeef5;
-  --overlay: #ffd9e8;
-  --highlight-low: #ffe9f2;
-  --highlight-med: #ffccdf;
-  --highlight-high: #ffb3d1;
+  /* 主背景层:奶油薄荷色(替代原 #fff5f9 单调粉) */
+  --base: #f0f4ea;
+  --surface: #e8edf5;
+  --overlay: #d8e0e8;
+  --highlight-low: #e3eaf0;
+  --highlight-med: #cdd6e0;
+  --highlight-high: #b5c2d2;
 
-  /* THM-1:原值 #b8809e 在 #ffeef5 上估算约 2.1:1,远不达 WCAG AA 4.5:1。
-   * 调到 #7a4566 提到 ~4.7:1 — 仍偏柔和的酒红/紫红,不破坏 cutie 调性。 */
-  --muted: #7a4566;
-  --subtle: #8a4d6f;
-  --text: #6b2e4f;
-  --love: #ff5d9e;
-  --gold: #ffb86b;
-  --rose: #7ad7d7;
-  --pine: #6fcf97;
-  --foam: #6ec0e8;
-  --iris: #c77dff;
+  /* 文字 / 中性色对比度统一 ≥ 4.5:1(BETA-035 浅色标准) */
+  --muted: #5a4d6b;       /* 暗薰衣草 */
+  --subtle: #6d6080;
+  --text: #2d2840;        /* 深靛蓝 */
+
+  /* 80s 糖果色:马卡龙粉 / 苔绿 / 暗芥末 / 蓝月 / 紫罗兰 / 青松石 */
+  --love: #c93a76;        /* 马卡龙粉(darken 后对浅底可读) */
+  --gold: #b87800;        /* 暗芥末黄 */
+  --rose: #d05a85;
+  --pine: #2f7d4f;        /* 苔绿 */
+  --foam: #2d6e88;        /* 青松石 */
+  --iris: #7548a0;        /* 紫罗兰 */
 
   color-scheme: light;
 }
