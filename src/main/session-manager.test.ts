@@ -309,7 +309,7 @@ describe('SessionManager — createSession', () => {
     expect(info.originalCwd).toBe('C:\\proj\\a');
     expect(info.currentCwd).toBe('C:\\proj\\a');
     expect(info.ownerWindowId).toBe('w-1');
-    expect(info.state).toBe('active');
+    expect(info.state).toBe('idle');
     expect(info.cols).toBe(80);
     expect(info.exitCode).toBeUndefined();
     expect(path.attached).toEqual([{ sessionId: info.id, path: 'C:\\proj\\a' }]);
@@ -386,7 +386,7 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
     vi.useRealTimers();
   });
 
-  it('初始 state=active', async () => {
+  it('初始 state=idle (BETA-008:语义反转,active=命令执行中)', async () => {
     const { mgr } = makeManager();
     const info = await mgr.createSession({
       pathId: '/p',
@@ -395,7 +395,7 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
       cols: 80,
       rows: 24,
     });
-    expect(info.state).toBe('active');
+    expect(info.state).toBe('idle');
   });
 
   it('无输出超过 idle 阈值 → state=idle', async () => {

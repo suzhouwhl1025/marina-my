@@ -488,7 +488,7 @@ export class SessionManager extends EventEmitter {
       pid: pty.pid,
       displayName: pickDisplayName(template, shell),
       ownerWindowId: input.ownerWindowId || null,
-      state: 'active',
+      state: 'idle',
       createdAt: Date.now(),
     };
 
@@ -526,15 +526,21 @@ export class SessionManager extends EventEmitter {
       this.startCwdPolling(managed);
     }, CWD_GRACE_MS);
 
-    // CP-4 勘误 #5:初始 state='active' 时立即起 idle 计时器。
+    // BETA-008(2026-05-15)推翻 CP-4 勘误 #5 的"初始 active"设计:
     //
-    // 原 bug:有的 shell 启动期第一波 PTY 数据可能是纯 OSC 1337(passthrough 为空),
-    // 此时 markActive 不被调用,scheduleIdleCheck 永不启动,state 永远卡在 'active'。
-    // 表现 = 用户看到"终端状态卡在活跃"(绿点不变黄)。
+    // 旧语义:active = 最近有字节 / idle = N 秒无输出。这导致新建终端瞬间是绿色 active,
+    // 用户感知为"刚建就闪绿",且 startup banner 字节流让状态点反复跳。
     //
-    // 修复:创建时直接 schedule 一次 idle 检查;后续任何有效字节流到达 markActive
-    // 会重置该 timer,不影响"有输出 → 保持 active"的语义。
-    this.scheduleIdleCheck(managed);
+    // 新语义(v1.7 起):
+    //   active(绿) = **用户的命令正在执行**
+    //   idle(黄)  = 等待命令(含 banner 期 + prompt 等待)
+    //   exited(灰) = 进程已退出(不变)
+    //
+    // 因此创建时直接 state='idle',无需 scheduleIdleCheck 兜底 — markActive 仅在
+    // grace 期外的真字节流到达时触发,grace 内 banner 字节会跳过 markActive,
+    // 状态自然停在 idle 不跳。"OSC-only banner 卡 active"的旧 bug 同步消失。
+    //
+    // 对应工单库 BETA-008、软件定义书 8.3 节(ADR-014)。
 
     // 把 session 挂到 path 上 (PathManager 自动触发分类流转 + emit)
     this.pathManager.attachSession(sessionId, input.pathId);
@@ -881,9 +887,8 @@ export class SessionManager extends EventEmitter {
       //   - resize quiet (CP-3 勘误 #3 v2):避免 ConPTY/SIGWINCH 重绘字节让
       //     tab 闪绿;TerminalView mount 时也无条件触发此窗口
       //   - startup grace (M1-I):session 初创 1.5s 内的 banner/prompt 输出
-      //     视作"应有的启动声",不让它"创建 → 立即 active → 1.5s 后 idle"
-      //     这套抖动闪过去;创建时 state='active' + scheduleIdleCheck 已起好,
-      //     grace 内 markActive 跳过,grace 结束后正常变 idle
+      //     视作"应有的启动声",BETA-008 后初始 state='idle',grace 期 banner
+      //     字节跳过 markActive,自然停在 idle 不闪绿
       //   - input echo quiet (抖动源 C/E):压住 sendInput 后 200ms 内的 echo /
       //     TUI 重绘字节,避免"敲键自己点亮状态点"
       const now = Date.now();
@@ -894,13 +899,9 @@ export class SessionManager extends EventEmitter {
       ) {
         this.markActive(managed);
       } else if (now < managed.startupGraceUntil) {
-        // STM-4:grace 期内有字节流入,虽然跳过 markActive(避免抖动),
-        // 但仍重置 idle timer — 否则 banner 在 1.49s 才结束的极端 case
-        // 下,createSession 起的 idle timer 2s 到点 fire → "刚结束 banner
-        // 就 idle"。重置后 idle timer 顺延,grace 后实际进 idle 的时机
-        // = 最后一条 banner 字节 + activeIdleThresholdSeconds(默认 2s),
-        // 符合用户预期。
-        this.scheduleIdleCheck(managed);
+        // BETA-008 后:grace 期内初始 state='idle',banner 字节流不让它变 active,
+        // 但也不需要 scheduleIdleCheck 兜底(根本就在 idle)。
+        // markActive 流程在 grace 期外才走,scheduleIdleCheck 由 markActive 自己起。
       }
     }
   }
