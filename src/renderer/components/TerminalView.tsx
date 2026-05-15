@@ -435,11 +435,16 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
       // bracketed paste 禁用 + 多行 → 走旧 confirm 兜底
       if (!bracketedPaste) {
-        // CPB-P3:trim 末尾换行后再算行数,避免 "ls\n" 这种单行带尾换行
-        // 被算作 2 行误触发 confirm
-        const normalized = text.replace(/\r\n?/g, '\n').replace(/\n$/, '');
-        const lineCount = normalized.split('\n').length;
+        // BETA-041:CPB-P3 原版 trim 用 .replace(/\n$/, '') 只剥一个尾换行,
+        // "ls\n\n" 仍被算成 2 行误触发 confirm。改为 split 后弹出所有尾部
+        // 空行,逻辑显式可读、不漏 case。
+        const lines = text.split(/\r\n|\r|\n/);
+        while (lines.length > 0 && lines[lines.length - 1] === '') {
+          lines.pop();
+        }
+        const lineCount = lines.length;
         if (lineCount > 1) {
+          const normalized = lines.join('\n');
           const previewRaw =
             normalized.length > 200
               ? normalized.slice(0, 200) + '…'
@@ -815,6 +820,10 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
         }
         pending = [];
         replayed = true;
+        // BETA-018:scrollback 重放完后立即滚到底。xterm 默认把分片 write 留在
+        // 顶部 viewport,用户看到的是"从上往下刷屏"。重放是同步内容回灌,
+        // 不是历史浏览,应当锚定底部。
+        term.scrollToBottom();
       })
       .catch((err) => {
         console.warn('[TerminalView] get-scrollback failed, falling back', err);
@@ -822,6 +831,8 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
         for (const c of pending) term.write(c.bytes);
         pending = [];
         replayed = true;
+        // BETA-018:fallback 路径同样滚到底,保持 viewport 一致行为
+        term.scrollToBottom();
       });
 
     // ResizeObserver — trailing debounce 150ms (用户勘误后续 #4)

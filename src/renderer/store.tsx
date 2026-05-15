@@ -164,12 +164,21 @@ function reducer(state: AppState, action: AppAction): AppState {
       // (释放本窗口旧 owner) 到达时,selectedSessionId 已是新 session,
       // displayable 不会闪到 EmptyPathState (用户勘误后续 #1 闪 + 现象)。
       if (action.session.ownerWindowId === state.myWindowId) {
+        // BETA-042:新 session 自动展开所属 path。覆盖两个场景:
+        // (a) Explorer 右键"在 Marina 终端打开"开新窗口时,sidebar 默认折叠,
+        //     用户看不到刚创建的 session
+        // (b) 模板按钮 / + 双击在已折叠 path 上创建 session 时,直观应展开
+        const expandedPathIds = new Set(state.expandedPathIds);
+        if (action.session.pathId) {
+          expandedPathIds.add(action.session.pathId);
+        }
         return {
           ...state,
           sessions,
           selectedSessionId: action.session.id,
           // 同时确保 selectedPathId 是新 session 的 path
           selectedPathId: action.session.pathId || state.selectedPathId,
+          expandedPathIds,
         };
       }
       return { ...state, sessions };

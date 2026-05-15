@@ -1491,5 +1491,8 @@ function createNoopAdapter(): PlatformAdapter {
     async isAutoStartEnabled() {
       return false;
     },
+    getRefreshedPath() {
+      return process.env.PATH ?? '';
+    },
   };
 }
