@@ -31,6 +31,7 @@ import {
   type PickFolderResponse,
 } from '@shared/protocol';
 import type { PathNode, SessionInfo } from '@shared/types';
+import { disambiguatePathNames } from '@shared/path-display';
 import {
   findMyOwnedSessionId,
   useAppDispatch,
@@ -226,6 +227,8 @@ function Category({
   actionTitle,
   onAction,
 }: CategoryProps): JSX.Element {
+  // BETA-014:同 category 内末级文件夹同名时自动补父目录区分;手动命名的不参与。
+  const displayNames = useMemo(() => disambiguatePathNames(paths), [paths]);
   return (
     <section className="sidebar-category">
       <header className="sidebar-category-header">
@@ -251,16 +254,29 @@ function Category({
         <p className="sidebar-empty">空</p>
       ) : (
         <ul className="sidebar-paths">
-          {paths.map((p) => (
-            <PathItem key={p.id} node={p} />
-          ))}
+          {paths.map((p) => {
+            const override = displayNames.get(p.id);
+            return (
+              <PathItem
+                key={p.id}
+                node={p}
+                {...(override !== undefined ? { displayNameOverride: override } : {})}
+              />
+            );
+          })}
         </ul>
       )}
     </section>
   );
 }
 
-function PathItem({ node }: { node: PathNode }): JSX.Element {
+function PathItem({
+  node,
+  displayNameOverride,
+}: {
+  node: PathNode;
+  displayNameOverride?: string;
+}): JSX.Element {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const ctxMenu = useContextMenuApi();
@@ -272,7 +288,9 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
     [node.sessionIds, state.sessions],
   );
   const activeCount = sessions.length;
-  const displayName = node.displayName ?? lastSegmentOf(node.path);
+  // BETA-014:优先用 Category 算好的去重名;退到本节点 displayName / 末段
+  const displayName =
+    displayNameOverride ?? node.displayName ?? lastSegmentOf(node.path);
 
   // M1-C:行内重命名 (仅收藏支持)
   const [renaming, setRenaming] = useState(false);
