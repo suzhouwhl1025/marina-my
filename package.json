@@ -31,6 +31,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
     "@xterm/addon-web-links": "^0.11.0",
@@ -38,6 +39,7 @@
     "@xterm/xterm": "^5.5.0",
     "lucide-react": "^1.14.0",
     "node-pty": "^1.0.0",
+    "openai": "^6.37.0",
     "uuid": "^11.0.0"
   },
   "devDependencies": {

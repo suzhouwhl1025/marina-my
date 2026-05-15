@@ -106,6 +106,7 @@ import type { PathManager } from './path-manager';
 import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
 import type { TemplatesManager } from './templates-manager';
+import type { AIClient } from './ai-client';
 import { setQuitting } from './index';
 
 export interface IpcLayerDeps {
@@ -114,9 +115,12 @@ export interface IpcLayerDeps {
   settingsManager: SettingsManager;
   sessionManager: SessionManager;
   templatesManager: TemplatesManager;
+  /** BETA-031:可选,未注入时 AI_TEST_CONNECTION 返回 ok:false */
+  aiClient?: AIClient;
 }
 
 let installed = false;
+let aiClient: AIClient | undefined;
 
 /**
  * 注册全部 IPC handler 与事件桥接。整个应用只能调用一次。
@@ -124,6 +128,7 @@ let installed = false;
 export function installIpcLayer(deps: IpcLayerDeps): void {
   if (installed) throw new Error('[ipc] installIpcLayer() already called');
   installed = true;
+  aiClient = deps.aiClient;
   registerCommandHandlers(deps);
   wireEventBroadcasts(deps);
 }
@@ -598,6 +603,15 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       // BETA-039:UI 设置页用真实绝对路径替代硬编码 %APPDATA%\Marina,
       // 在 portable / dev / 自定义 userData 场景下也保持准确。
       return { dataDir: app.getPath('userData') };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.AI_TEST_CONNECTION,
+    async (_e, _envelope: CommandEnvelope<undefined>) => {
+      // BETA-031:AI 助手设置页"测试连接"按钮调用。失败信息透传 UI。
+      if (!aiClient) return { ok: false, message: 'AI client 未初始化' };
+      return aiClient.testConnection();
     },
   );
 

@@ -289,6 +289,25 @@ export interface Settings {
     activeIdleThresholdSeconds: number;
     // 注:v1.2 起 sessionTombstoneMinutes 已删除 (砍墓地,见 ADR-008)
   };
+
+  /**
+   * BETA-031 AI 助手 — 第一个 LLM 集成点。默认全 disabled,用户在设置页主动
+   * 开启并填 API key 才生效。当前唯一 consumer 是 BETA-006(active→idle 跃迁
+   * LLM 复核,避免 Vite 等长输出工具被误判 idle)。
+   *
+   * API key 走 settings.json 持久化;不做加密(与其它持久化字段一致)。
+   * 备份导出导入会带这个字段,跨机器复制时需要小心 — README 已提示。
+   */
+  ai: {
+    /** null = 未启用;选 anthropic / openai 后激活 ai-client */
+    provider: 'anthropic' | 'openai' | null;
+    /** 任意明文,UI 显示时遮罩;空串视为未填 */
+    apiKey: string;
+    /** 例如 'claude-haiku-4-5-20251001' / 'gpt-4o-mini',空串走 provider 默认 */
+    model: string;
+    /** BETA-006:active→idle 跃迁前调 LLM 复核,默认关。开启需 apiKey 非空。 */
+    statusRecheckEnabled: boolean;
+  };
 }
 
 /**

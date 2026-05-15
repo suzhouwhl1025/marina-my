@@ -32,6 +32,7 @@ import {
   Link2,
   Monitor,
   MonitorCog,
+  Brain,
   Palette,
   Plus,
   Search,
@@ -64,6 +65,7 @@ export const Icons = {
   behavior: Sliders,
   data: Database,
   systemIntegration: Link2,
+  ai: Brain, // BETA-031 AI 助手
   advanced: Wrench,
   about: Info,
 

@@ -71,6 +71,7 @@ type CategoryId =
   | 'behavior'
   | 'data'
   | 'system-integration'
+  | 'ai'
   | 'advanced'
   | 'about';
 
@@ -80,13 +81,14 @@ interface CategoryDef {
   title: string;
 }
 
-// CP-4 勘误 #11:用 lucide 图标替换原有 Emoji
+// CP-4 勘误 #11:用 lucide 图标替换原有 Emoji。BETA-031 新增 'AI 助手'。
 const CATEGORIES: CategoryDef[] = [
   { id: 'appearance', iconName: 'appearance', title: '外观' },
   { id: 'shell', iconName: 'shell', title: 'Shell 与启动' },
   { id: 'behavior', iconName: 'behavior', title: '行为' },
   { id: 'data', iconName: 'data', title: '数据' },
   { id: 'system-integration', iconName: 'systemIntegration', title: '系统集成' },
+  { id: 'ai', iconName: 'ai', title: 'AI 助手' },
   { id: 'advanced', iconName: 'advanced', title: '高级' },
   { id: 'about', iconName: 'about', title: '关于' },
 ];
@@ -173,6 +175,8 @@ function CategoryPanel({ categoryId, setError }: CategoryPanelProps): JSX.Elemen
       return <DataPanel setError={setError} />;
     case 'system-integration':
       return <SystemIntegrationPanel setError={setError} />;
+    case 'ai':
+      return <AiPanel setError={setError} />;
     case 'advanced':
       return <AdvancedPanel setError={setError} />;
     case 'about':
@@ -1457,6 +1461,153 @@ function ExplorerIntegrationCard({
       )}
 
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// AI 助手分类(BETA-031)
+// ──────────────────────────────────────────────────────────────────
+
+function AiPanel({
+  setError,
+}: {
+  setError: (msg: string | null) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const toast = useToast();
+  const ai = state.settings.ai;
+  const provider = ai?.provider ?? null;
+  const apiKey = ai?.apiKey ?? '';
+  const model = ai?.model ?? '';
+  const statusRecheckEnabled = ai?.statusRecheckEnabled ?? false;
+  const [testing, setTesting] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  const handleTest = async (): Promise<void> => {
+    setError(null);
+    setTesting(true);
+    try {
+      const res = await window.api.invoke<undefined, { ok: boolean; message: string }>(
+        COMMAND_CHANNELS.AI_TEST_CONNECTION,
+        undefined,
+      );
+      toast.push({
+        kind: res.ok ? 'success' : 'error',
+        message: res.message || (res.ok ? '连接成功' : '连接失败'),
+      });
+    } catch (err) {
+      toast.push({
+        kind: 'error',
+        message: `测试失败:${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <section className="settings-panel">
+      <h2 className="settings-panel-title">AI 助手</h2>
+      <p className="settings-panel-hint">
+        Marina 第一个 LLM 集成点。当前唯一用途是 BETA-006:active→idle 跃迁前
+        让 LLM 看一眼 scrollback,避免 Vite 等长输出工具被误判 idle。
+        所有 API 调用走主进程,不暴露 key 到 renderer。
+      </p>
+
+      <SettingRow label="服务商" hint="选择后才会激活其它字段">
+        <select
+          className="settings-input"
+          value={provider ?? ''}
+          onChange={(e) => {
+            const v = e.target.value;
+            void updateSettings(
+              {
+                ai: { provider: v === '' ? null : (v as 'anthropic' | 'openai') },
+              },
+              setError,
+            );
+          }}
+        >
+          <option value="">未启用</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </SettingRow>
+
+      {provider !== null && (
+        <>
+          <SettingRow label="API key" hint="存储于本地 settings.json,导出时会带出">
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                className="settings-input"
+                value={apiKey}
+                placeholder={provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
+                onChange={(e) =>
+                  void updateSettings({ ai: { apiKey: e.target.value } }, setError)
+                }
+                style={{ minWidth: 280 }}
+              />
+              <button
+                type="button"
+                className="settings-button"
+                onClick={() => setShowKey((v) => !v)}
+              >
+                {showKey ? '隐藏' : '显示'}
+              </button>
+            </div>
+          </SettingRow>
+
+          <SettingRow label="模型" hint="留空走默认(haiku / gpt-4o-mini)">
+            <input
+              type="text"
+              className="settings-input"
+              value={model}
+              placeholder={
+                provider === 'anthropic'
+                  ? 'claude-haiku-4-5-20251001'
+                  : 'gpt-4o-mini'
+              }
+              onChange={(e) =>
+                void updateSettings({ ai: { model: e.target.value } }, setError)
+              }
+              style={{ minWidth: 280 }}
+            />
+          </SettingRow>
+
+          <SettingRow label="测试连接" hint="跑一次最小 ping 请求验证 key 有效">
+            <button
+              type="button"
+              className="settings-button"
+              onClick={() => void handleTest()}
+              disabled={testing || !apiKey.trim()}
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+          </SettingRow>
+
+          <SettingRow
+            label="状态复核(BETA-006)"
+            hint="active→idle 跃迁前让 LLM 复核;失败时回退原阈值,不阻塞"
+          >
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={statusRecheckEnabled}
+                onChange={(e) =>
+                  void updateSettings(
+                    { ai: { statusRecheckEnabled: e.target.checked } },
+                    setError,
+                  )
+                }
+                disabled={!apiKey.trim()}
+              />
+              <span>启用</span>
+            </label>
+          </SettingRow>
+        </>
+      )}
+    </section>
   );
 }
 

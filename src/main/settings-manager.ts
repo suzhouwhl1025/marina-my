@@ -73,6 +73,13 @@ export const DEFAULT_SETTINGS: Settings = {
     logLevel: 'INFO',
     activeIdleThresholdSeconds: 2,
   },
+  // BETA-031 AI 助手默认全 disabled,用户开启 + 填 key 后才生效
+  ai: {
+    provider: null,
+    apiKey: '',
+    model: '',
+    statusRecheckEnabled: false,
+  },
 };
 
 const VALID_THEMES: ThemeId[] = [

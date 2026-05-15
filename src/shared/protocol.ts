@@ -124,6 +124,9 @@ export const COMMAND_CHANNELS = {
    */
   SYSTEM_CLIPBOARD_READ_TEXT: 'cmd:system:clipboard-read-text',
   SYSTEM_CLIPBOARD_WRITE_TEXT: 'cmd:system:clipboard-write-text',
+
+  /** BETA-031:AI 助手测试连接 — 主进程用 SDK 跑一次 ping,返回成功 / 错误描述 */
+  AI_TEST_CONNECTION: 'cmd:ai:test-connection',
 } as const;
 
 export type CommandChannel = (typeof COMMAND_CHANNELS)[keyof typeof COMMAND_CHANNELS];

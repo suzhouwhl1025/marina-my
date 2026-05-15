@@ -29,6 +29,7 @@ import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
 import { getPlatformAdapter, type SystemPathEntry } from './platform';
+import { AIClient } from './ai-client';
 import { WindowsAdapter } from './platform/windows';
 import { parseOpenHere, parseSimpleMode } from './argv-utils';
 import { getBuildType } from './build-type';
@@ -331,12 +332,18 @@ function bootstrap(): void {
       const tmplSrc = await templatesManager.initialize();
       logger.info('main', `templates loaded from: ${tmplSrc}`);
 
+      // BETA-031:AI 助手客户端,settings 读取走 SettingsManager.get() 闭包,
+      // 用户改 key / provider 即刻生效;BETA-006 用同实例做状态复核。
+      const aiClient = new AIClient(() => settingsManager.get());
+      sessionManager.setAiClient(aiClient);
+
       installIpcLayer({
         windowManager,
         pathManager,
         settingsManager,
         sessionManager,
         templatesManager,
+        aiClient,
       });
 
       // ── 设置副作用 wiring ─────────────────────────────

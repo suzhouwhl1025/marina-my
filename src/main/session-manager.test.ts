@@ -178,6 +178,7 @@ function makeStubSettingsManager(
       systemPaths: { desktop: true, home: true, temp: true },
       macOSTrafficLightHoverSymbols: false,
     },
+    ai: { provider: null, apiKey: '', model: '', statusRecheckEnabled: false },
     shell: { defaultShellId: '', newTerminalShellPolicy: 'default' },
     behavior: {
       startupBehavior: 'open-window',

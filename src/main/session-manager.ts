@@ -1133,12 +1133,55 @@ export class SessionManager extends EventEmitter {
     const ms = Math.max(100, thresholdSec * 1000);
     managed.idleTimer = setTimeout(() => {
       managed.idleTimer = null;
-      if (managed.info.state === 'active') {
-        managed.info.state = 'idle';
-        this.emitStateChanged(managed, { state: 'idle' });
+      if (managed.info.state !== 'active') return;
+      // BETA-006:active→idle 跃迁前给 LLM 看一眼 scrollback 尾部判断。
+      // 仅在用户开启 statusRecheckEnabled 且 aiClient.isConfigured() 时生效。
+      // 失败 / LLM 异常时回退到原行为(直接转 idle),不阻塞主流程。
+      const s = this.settingsManager.get();
+      if (
+        s.ai?.statusRecheckEnabled &&
+        this.aiClient &&
+        this.aiClient.isConfigured()
+      ) {
+        const tail = managed.scrollback
+          .subarray(Math.max(0, managed.scrollback.length - 2048))
+          .toString('utf8');
+        this.aiClient
+          .recheckIdle(tail)
+          .then((verdict) => {
+            if (verdict === 'keep-active') {
+              // LLM 判定还在跑 → 重新调度,不转 idle
+              if (managed.info.state === 'active') this.scheduleIdleCheck(managed);
+              return;
+            }
+            if (managed.info.state === 'active') {
+              managed.info.state = 'idle';
+              this.emitStateChanged(managed, { state: 'idle' });
+            }
+          })
+          .catch((err) => {
+            logger.warn('SessionManager', 'BETA-006 LLM recheck failed, fallback', err);
+            if (managed.info.state === 'active') {
+              managed.info.state = 'idle';
+              this.emitStateChanged(managed, { state: 'idle' });
+            }
+          });
+        return;
       }
+      // 默认路径:直接转 idle
+      managed.info.state = 'idle';
+      this.emitStateChanged(managed, { state: 'idle' });
     }, ms);
   }
+
+  /**
+   * BETA-031:bootstrap 启动后注入 AIClient,供 BETA-006 状态复核使用。
+   * 可空(测试场景不注入);需要后从 settings.ai 现读配置。
+   */
+  setAiClient(client: import('./ai-client').AIClient | null): void {
+    this.aiClient = client;
+  }
+  private aiClient: import('./ai-client').AIClient | null = null;
 
   // ──────────────────────────────────────────────────────────────────
   // 内部:OSC 1337 cwd 处理
