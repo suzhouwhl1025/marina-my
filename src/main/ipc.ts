@@ -570,6 +570,15 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     },
   );
 
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_GET_DATA_DIR,
+    (_e, _envelope: CommandEnvelope<undefined>): { dataDir: string } => {
+      // BETA-039:UI 设置页用真实绝对路径替代硬编码 %APPDATA%\Marina,
+      // 在 portable / dev / 自定义 userData 场景下也保持准确。
+      return { dataDir: app.getPath('userData') };
+    },
+  );
+
   // Explorer 集成 —— 不读 settings,现场查 + 操作系统状态
   ipcMain.handle(
     COMMAND_CHANNELS.EXPLORER_INTEGRATION_GET_STATUS,

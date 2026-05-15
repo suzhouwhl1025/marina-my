@@ -34,7 +34,6 @@ import {
   type AddTemplatePayload,
   type AddTemplateResponse,
   type ExplorerIntegrationStatus,
-  type GetPsCommandsResponse,
   type ImportSettingsResponse,
   type ListShellsResponse,
   type ExportSettingsResponse,
@@ -62,7 +61,6 @@ import {
   type FontEntry,
 } from './font-detection';
 import { Icon, type IconName } from './icons';
-import { useToast } from './Toast';
 import { useModal } from './Modal';
 import { TemplateIcon } from './TemplateIcon';
 
@@ -1049,6 +1047,23 @@ function DataPanel({
 }): JSX.Element {
   const [busy, setBusy] = useState<'export' | 'import' | null>(null);
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  // BETA-039:从主进程取真实 userData 路径(app.getPath('userData')),
+  // portable / dev / 自定义 userData 场景下 UI 都准确;首次渲染前显示占位。
+  const [dataDir, setDataDir] = useState<string>('…');
+  useEffect(() => {
+    let cancelled = false;
+    window.api
+      .invoke<unknown, { dataDir: string }>(COMMAND_CHANNELS.SYSTEM_GET_DATA_DIR, {})
+      .then((res) => {
+        if (!cancelled && res?.dataDir) setDataDir(res.dataDir);
+      })
+      .catch(() => {
+        // 静默:UI 退回到占位文本;真实路径取不到不影响其他功能。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleOpenDataDir = (): void => {
     setError(null);
@@ -1101,7 +1116,7 @@ function DataPanel({
 
       <SettingRow label="数据目录" hint="所有 Marina 配置文件存放处">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span className="settings-info-text">%APPDATA%\Marina</span>
+          <span className="settings-info-text" title={dataDir}>{dataDir}</span>
           <button type="button" className="settings-button" onClick={handleOpenDataDir}>
             在 Explorer 中打开
           </button>
@@ -1162,11 +1177,9 @@ function SystemIntegrationPanel({
   const state = useAppState();
   const sys = state.settings?.systemIntegration;
   const openIn = sys?.explorerOpenIn ?? 'new-window';
-  const toast = useToast();
 
   const [status, setStatus] = useState<ExplorerIntegrationStatus | null>(null);
   const [busy, setBusy] = useState<'classic' | 'modern' | null>(null);
-  const [psCommands, setPsCommands] = useState<GetPsCommandsResponse | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -1182,15 +1195,6 @@ function SystemIntegrationPanel({
 
   useEffect(() => {
     void refreshStatus();
-    void window.api
-      .invoke<undefined, GetPsCommandsResponse>(
-        COMMAND_CHANNELS.EXPLORER_INTEGRATION_GET_PS_COMMANDS,
-        undefined,
-      )
-      .then(setPsCommands)
-      .catch(() => {
-        /* PS 命令展示是可选功能,失败静默 */
-      });
   }, [refreshStatus]);
 
   const handleSet = async (
@@ -1219,21 +1223,6 @@ function SystemIntegrationPanel({
     }
   };
 
-  const copyToClipboard = async (text: string, label: string): Promise<void> => {
-    // FBK-2:成功反馈走绿色 success toast,与项目其他成功消息一致(原实现
-    // 复用 setError 把成功消息塞进红色错误样式槽,视觉上像"出错了")。
-    try {
-      const ok = await window.api.clipboard.writeText(text);
-      if (!ok) throw new Error('写入剪贴板失败');
-      toast.push({ kind: 'success', message: `已复制 ${label} 到剪贴板` });
-    } catch (err) {
-      toast.push({
-        kind: 'error',
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">系统集成</h2>
@@ -1259,11 +1248,6 @@ function SystemIntegrationPanel({
           ) : null
         }
         certInfo={status?.cert ?? null}
-        psInstallCommand={psCommands?.installModern ?? null}
-        psUninstallCommand={psCommands?.uninstallModern ?? null}
-        psLabelInstall="安装命令"
-        psLabelUninstall="卸载命令"
-        onCopy={(text, label) => void copyToClipboard(text, label)}
       />
 
       {/* —— 经典右键菜单卡片 —— */}
@@ -1276,11 +1260,6 @@ function SystemIntegrationPanel({
         onToggle={(next) => void handleSet('classic', next)}
         detail={null}
         certInfo={null}
-        psInstallCommand={psCommands?.installClassic ?? null}
-        psUninstallCommand={psCommands?.uninstallClassic ?? null}
-        psLabelInstall="注册命令"
-        psLabelUninstall="移除命令"
-        onCopy={(text, label) => void copyToClipboard(text, label)}
       />
 
       {/* —— 打开方式(纯偏好,保留在 settings.json) —— */}
@@ -1336,11 +1315,6 @@ interface ExplorerIntegrationCardProps {
   onToggle: (enabled: boolean) => void;
   detail: ReactNode;
   certInfo: ExplorerIntegrationStatus['cert'];
-  psInstallCommand: string | null;
-  psUninstallCommand: string | null;
-  psLabelInstall: string;
-  psLabelUninstall: string;
-  onCopy: (text: string, label: string) => void;
 }
 
 function ExplorerIntegrationCard({
@@ -1352,11 +1326,6 @@ function ExplorerIntegrationCard({
   onToggle,
   detail,
   certInfo,
-  psInstallCommand,
-  psUninstallCommand,
-  psLabelInstall,
-  psLabelUninstall,
-  onCopy,
 }: ExplorerIntegrationCardProps): JSX.Element {
   const isUnsupported = status === 'unsupported';
   const isEnabled = status === 'enabled';
@@ -1405,28 +1374,6 @@ function ExplorerIntegrationCard({
         </div>
       )}
 
-      {(psInstallCommand || psUninstallCommand) && (
-        <div className="explorer-integration-actions">
-          {psInstallCommand && (
-            <button
-              type="button"
-              className="settings-button"
-              onClick={() => onCopy(psInstallCommand, psLabelInstall)}
-            >
-              复制 {psLabelInstall}
-            </button>
-          )}
-          {psUninstallCommand && (
-            <button
-              type="button"
-              className="settings-button"
-              onClick={() => onCopy(psUninstallCommand, psLabelUninstall)}
-            >
-              复制 {psLabelUninstall}
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
