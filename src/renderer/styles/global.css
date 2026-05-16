@@ -101,28 +101,28 @@
   --iris: #c4a7e7;
 }
 
-/* Cutie — 80s 复古糖果风(BETA-034 重设计,iBook G3 / 马卡龙色系) */
+/* Cutie — 樱花奶昔(Sakura Milk):奶白底 + 樱花粉 + 莓红强调 */
 [data-theme='cutie'] {
-  /* 主背景层:奶油薄荷色(替代原 #fff5f9 单调粉) */
-  --base: #f0f4ea;
-  --surface: #e8edf5;
-  --overlay: #d8e0e8;
-  --highlight-low: #e3eaf0;
-  --highlight-med: #cdd6e0;
-  --highlight-high: #b5c2d2;
+  /* 背景层:奶白偏粉 → 樱花淡粉 → 糖霜粉 */
+  --base: #fff8fb;
+  --surface: #ffeef4;
+  --overlay: #fcdbe6;
+  --highlight-low: #ffe4ec;
+  --highlight-med: #f5c3d3;
+  --highlight-high: #e8a3bd;
 
   /* 文字 / 中性色对比度统一 ≥ 4.5:1(BETA-035 浅色标准) */
-  --muted: #5a4d6b;       /* 暗薰衣草 */
-  --subtle: #6d6080;
-  --text: #2d2840;        /* 深靛蓝 */
+  --muted: #a8627e;       /* 淡莓棕 */
+  --subtle: #8a4566;      /* 中莓棕 */
+  --text: #5c1d3e;        /* 深莓酒红 */
 
-  /* 80s 糖果色:马卡龙粉 / 苔绿 / 暗芥末 / 蓝月 / 紫罗兰 / 青松石 */
-  --love: #c93a76;        /* 马卡龙粉(darken 后对浅底可读) */
-  --gold: #b87800;        /* 暗芥末黄 */
-  --rose: #d05a85;
-  --pine: #2f7d4f;        /* 苔绿 */
-  --foam: #2d6e88;        /* 青松石 */
-  --iris: #7548a0;        /* 紫罗兰 */
+  /* 强调色:草莓粉 / 蜜桃驼 / 糖霜玫瑰 / 桑葚 / 薰衣草 / 紫莓 */
+  --love: #e91e63;        /* 草莓粉(主强调) */
+  --gold: #d4795c;        /* 蜜桃驼(替代黄,与粉系协调) */
+  --rose: #ff7aa8;        /* 糖霜玫瑰 */
+  --pine: #b85d8e;        /* 桑葚(替代绿色位,保持莓系) */
+  --foam: #b89cd9;        /* 薰衣草(替代青色位) */
+  --iris: #c558a0;        /* 紫莓 */
 
   color-scheme: light;
 }
@@ -310,7 +310,7 @@ button:disabled {
 .app-titlebar {
   display: flex;
   align-items: center;
-  height: 36px;
+  height: 40px;
   flex: 0 0 auto;
   background-color: var(--surface, #f0f);
   font-size: 12px;
@@ -343,8 +343,8 @@ button:disabled {
 .titlebar-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 12px;
+  gap: 10px;
+  padding: 0 16px;
   color: var(--text, #f0f);
   font-weight: 500;
   white-space: nowrap;
@@ -370,7 +370,7 @@ button:disabled {
   color: var(--muted, #f0f);
   font-family: var(--terminal-font-family, monospace);
   font-size: 10px;
-  padding: 0 10px;
+  padding: 0 16px;
 }
 
 /* ── Windows 风格:控制按钮在右,方形 lucide 图标 ── */
@@ -411,7 +411,7 @@ button:disabled {
 
 .app-titlebar-macos {
   /* macOS 标题栏更紧凑 */
-  height: 32px;
+  height: 36px;
   padding-left: 0;
 }
 
@@ -435,7 +435,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 16px;
   -webkit-app-region: no-drag;
   flex: 0 0 auto;
 }
@@ -498,7 +498,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   background-color: var(--surface, #f0f);
-  border-right: 1px solid var(--overlay, #f0f);
+  /* 无边框版:靠 surface/base 背景色差分区,不画 1px 分隔线 */
   overflow: hidden;
   /* F10:为 .sidebar-drag-overlay 提供绝对定位锚点 */
   position: relative;
@@ -508,9 +508,9 @@ button:disabled {
   flex: 1 1 0;
   overflow-y: auto;
   /* F7(beta 勘误2 续):top padding 清零 — 第一个 category-header 必须紧贴
-     sidebar 顶,才能与右侧 .tab-bar 顶端对齐。底部 8px 保留,给"设置"行
+     sidebar 顶,才能与右侧 .tab-bar 顶端对齐。底部 10px 保留,给"设置"行
      上方留呼吸距离。 */
-  padding: 0 0 8px;
+  padding: 0 0 10px;
   transition: background-color 100ms ease;
 }
 
@@ -575,11 +575,7 @@ button:disabled {
   /* F7(beta 勘误2 续):上 padding 清零,让第一个 .sidebar-category-header
      的 32px min-height 顶到 sidebar 顶部,与右侧 TabBar 对齐。 */
   padding: 0 0 4px;
-  border-bottom: 1px solid var(--overlay, #f0f);
-}
-
-.sidebar-category:last-child {
-  border-bottom: none;
+  /* 无边框版:分类间不画横线,靠 category-header 自身节奏区分 */
 }
 
 .sidebar-category-header {
@@ -981,7 +977,7 @@ button:disabled {
   display: flex;
   align-items: stretch;
   background-color: var(--surface, #f0f);
-  border-bottom: 1px solid var(--overlay, #f0f);
+  /* 无边框版:tab-bar 与主区靠 surface/base 背景差区分,不画底部 1px 横线 */
   min-height: 32px;
   overflow-x: auto;
 }
@@ -990,6 +986,8 @@ button:disabled {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
+  /* 微调:左侧 6px 让首个 tab 不贴 sidebar 边界,与右侧主区呼吸感保持一致 */
+  padding-left: 6px;
 }
 
 /* BETA-028:终端工具栏 — Tab bar 右端嵌入 / 简易模式右上角悬浮 */
@@ -1002,7 +1000,7 @@ button:disabled {
 
 .terminal-toolbar-inline {
   padding: 0 6px;
-  border-left: 1px solid var(--overlay, #f0f);
+  /* 无边框版:工具栏靠 margin-left:auto 推到右侧,与 tab 列表用空隙区分,不画 1px 竖线 */
   margin-left: auto;
 }
 
@@ -1054,7 +1052,7 @@ button:disabled {
   padding: 6px 15px 6px 10px;
   background-color: transparent;
   border: none;
-  border-right: 1px solid var(--overlay, #f0f);
+  /* 无边框版:tab 之间不画竖线,靠 hover/selected 背景差区分;选中态保留下方 2px iris */
   /* F4(beta 勘误2):BETA-020 一度给 tab 加了 4px 4px 0 0 顶角圆角,用户复审
      反馈不想要,直接抹平。tab 选中态靠下方 2px iris 横线表达,不再依赖圆角。 */
   color: var(--text, #f0f);
@@ -1367,7 +1365,7 @@ button:disabled {
 .terminal-host .xterm {
   position: absolute;
   inset: 0;
-  padding: 8px;
+  padding: 10px 12px;
 }
 
 .terminal-host .xterm-viewport {
@@ -2420,7 +2418,7 @@ select.settings-input option {
 }
 
 [data-theme='cutie'] select.settings-input {
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%238a4d6f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%238a4566' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
 }
 
 /* B8 + BETA-037:浅色主题阴影减淡 + 边框换 --muted。

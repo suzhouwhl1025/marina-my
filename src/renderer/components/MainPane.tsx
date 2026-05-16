@@ -64,9 +64,9 @@ interface DetectedShell {
 // 等程序员字体在多数字号下宽高比稳定在 0.55-0.62 之间,取 0.6 是中位估值。
 // 即便偏离 ±10%,估算的 cols 偏差也只是 ±10% — fitAddon mount 后立即纠正。
 const MONO_CHAR_ASPECT = 0.6;
-// TerminalView 容器周围的固定 chrome:左右各 ~8px 内边距,顶部 tabbar 32px +
+// TerminalView 容器周围的固定 chrome:左右各 ~12px 内边距,顶部 tabbar 32px +
 // statusbar 24px = 56px。这两个常量配合容器 clientWidth/Height 估出可用区域。
-const TERMINAL_HOST_PADDING_X = 16;
+const TERMINAL_HOST_PADDING_X = 24;
 const TERMINAL_HOST_CHROME_Y = 56;
 // 兜底下限:就算容器尺寸异常(0 或负),也至少给 PTY 一个 spawn 能跑起来的初值。
 const MIN_COLS = 20;
