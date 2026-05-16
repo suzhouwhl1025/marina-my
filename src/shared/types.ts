@@ -308,6 +308,14 @@ export interface Settings {
     provider: 'anthropic' | 'openai' | null;
     /** 任意明文,UI 显示时遮罩;空串视为未填 */
     apiKey: string;
+    /**
+     * F6(beta 勘误2):自定义 Base URL。空串 = 走 SDK 默认 endpoint
+     * (api.anthropic.com / api.openai.com);填写后透传给 SDK constructor 的
+     * `baseURL` 字段。覆盖场景:代理网关、Azure OpenAI、自托管 LLM、企业
+     * 内网镜像。Anthropic 与 OpenAI 两个官方 SDK 都接受 `baseURL` 字段,
+     * 透传逻辑统一。
+     */
+    baseURL: string;
     /** 例如 'claude-haiku-4-5-20251001' / 'gpt-4o-mini',空串走 provider 默认 */
     model: string;
     /** BETA-006:active→idle 跃迁前调 LLM 复核,默认关。开启需 apiKey 非空。 */

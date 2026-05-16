@@ -28,14 +28,29 @@ const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 function safeAi(s: Settings | undefined): {
   provider: 'anthropic' | 'openai' | null;
   apiKey: string;
+  /** F6(beta 勘误2):自定义 endpoint;空串 = SDK 默认 */
+  baseURL: string;
   model: string;
 } {
   const ai = s?.ai;
   return {
     provider: ai?.provider ?? null,
     apiKey: ai?.apiKey ?? '',
+    baseURL: ai?.baseURL ?? '',
     model: ai?.model ?? '',
   };
+}
+
+/**
+ * F6(beta 勘误2):Anthropic / OpenAI 两个 SDK 都接 `baseURL?: string` 字段。
+ * 空串视为未填,不传(让 SDK 走默认 endpoint);非空时透传(无 trailing
+ * slash 处理 — SDK 内部已兼容)。返回值直接展开到 SDK constructor 的
+ * options 上。
+ */
+function clientOptions(apiKey: string, baseURL: string): { apiKey: string; baseURL?: string } {
+  return baseURL.trim()
+    ? { apiKey, baseURL: baseURL.trim() }
+    : { apiKey };
 }
 
 export interface TestConnectionResult {
@@ -62,12 +77,12 @@ export class AIClient {
    * 错误细节走 message 字段返回,不抛 — 调用方(IPC handler)直接转给 UI。
    */
   async testConnection(): Promise<TestConnectionResult> {
-    const { provider, apiKey, model } = safeAi(this.getSettings());
+    const { provider, apiKey, baseURL, model } = safeAi(this.getSettings());
     if (!provider) return { ok: false, message: '未选择 provider' };
     if (!apiKey.trim()) return { ok: false, message: 'API key 为空' };
     try {
       if (provider === 'anthropic') {
-        const client = new Anthropic({ apiKey });
+        const client = new Anthropic(clientOptions(apiKey, baseURL));
         const res = await client.messages.create({
           model: model || DEFAULT_ANTHROPIC_MODEL,
           max_tokens: 8,
@@ -79,7 +94,7 @@ export class AIClient {
         };
       }
       // openai
-      const client = new OpenAI({ apiKey });
+      const client = new OpenAI(clientOptions(apiKey, baseURL));
       const res = await client.chat.completions.create({
         model: model || DEFAULT_OPENAI_MODEL,
         max_tokens: 8,
@@ -101,7 +116,7 @@ export class AIClient {
    * 出错时 throw — 调用方应当 try/catch 并回退到原阈值判定。
    */
   async recheckIdle(scrollbackTail: string): Promise<'keep-active' | 'go-idle'> {
-    const { provider, apiKey, model } = safeAi(this.getSettings());
+    const { provider, apiKey, baseURL, model } = safeAi(this.getSettings());
     if (!provider) throw new Error('AI provider 未配置');
     if (!apiKey.trim()) throw new Error('AI apiKey 未填');
 
@@ -118,7 +133,7 @@ export class AIClient {
 
     let text: string;
     if (provider === 'anthropic') {
-      const client = new Anthropic({ apiKey });
+      const client = new Anthropic(clientOptions(apiKey, baseURL));
       const res = await client.messages.create({
         model: model || DEFAULT_ANTHROPIC_MODEL,
         max_tokens: 8,
@@ -128,7 +143,7 @@ export class AIClient {
       const block = res.content[0];
       text = block && block.type === 'text' ? block.text : '';
     } else {
-      const client = new OpenAI({ apiKey });
+      const client = new OpenAI(clientOptions(apiKey, baseURL));
       const res = await client.chat.completions.create({
         model: model || DEFAULT_OPENAI_MODEL,
         max_tokens: 8,

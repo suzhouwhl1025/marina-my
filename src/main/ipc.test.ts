@@ -164,6 +164,9 @@ function makeStubs() {
     on: vi.fn(),
     listBookmarks: vi.fn(() => []),
     listRecent: vi.fn(() => []),
+    // F1(beta 勘误2):IPC SESSION_CREATE 调用 resolvePathIdToCwd 解析
+    // system:* 前缀;测试只关心普通路径直接透传的分支,因此 mock 也保持透传。
+    resolvePathIdToCwd: vi.fn((p: string) => p),
   };
 
   const templatesManager = {

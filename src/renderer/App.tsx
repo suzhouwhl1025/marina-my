@@ -172,6 +172,17 @@ function ConnectedShell({
     }
   }, [uiFontFamily, terminalFontFamily]);
 
+  // F3(beta 勘误2):把 data-theme 同时挂在 <html> 上 — 否则 ContextMenu /
+  // Modal / Toast 这类 Provider 渲染的 DOM 节点在 .app-root 之外(它们包裹
+  // .app-root 作为子节点,自己的 portal-like 节点是 .app-root 的兄弟),
+  // 拿不到 data-theme 选择器定义的 CSS 变量,只能 fallback 到 :root 的
+  // rose-pine 默认值。挂到 <html> 后所有 DOM 节点都在主题作用域内。
+  // (旧版仍保留 .app-root 上的 data-theme,内部已大量按它写过 CSS 选择器,
+  // 同时挂两处不冲突,新主题切换路径以 <html> 为准。)
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', currentTheme);
+  }, [currentTheme]);
+
   if (sync.error) {
     return (
       <FullPagePlaceholder

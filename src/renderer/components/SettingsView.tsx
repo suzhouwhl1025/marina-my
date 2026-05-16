@@ -1498,6 +1498,7 @@ function AiPanel({
   const ai = state.settings.ai;
   const provider = ai?.provider ?? null;
   const apiKey = ai?.apiKey ?? '';
+  const baseURL = ai?.baseURL ?? '';
   const model = ai?.model ?? '';
   const statusRecheckEnabled = ai?.statusRecheckEnabled ?? false;
   const [testing, setTesting] = useState(false);
@@ -1576,6 +1577,27 @@ function AiPanel({
                 {showKey ? '隐藏' : '显示'}
               </button>
             </div>
+          </SettingRow>
+
+          <SettingRow
+            label="Base URL"
+            hint="留空走官方默认;代理网关 / Azure OpenAI / 自托管 LLM 在此覆盖"
+          >
+            <input
+              type="text"
+              className="settings-input"
+              value={baseURL}
+              placeholder={
+                provider === 'anthropic'
+                  ? 'https://api.anthropic.com'
+                  : 'https://api.openai.com/v1'
+              }
+              onChange={(e) =>
+                void updateSettings({ ai: { baseURL: e.target.value } }, setError)
+              }
+              style={{ minWidth: 320 }}
+              spellCheck={false}
+            />
           </SettingRow>
 
           <SettingRow label="模型" hint="留空走默认(haiku / gpt-4o-mini)">

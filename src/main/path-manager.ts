@@ -478,6 +478,25 @@ export class PathManager extends EventEmitter {
     return this.sessionToPath.get(sessionId);
   }
 
+  /**
+   * 把渲染端传来的 pathId 解析为可用于 spawn 的真实文件系统绝对路径。
+   *
+   * 系统路径节点(BETA-011)的 PathNode.id 是稳定逻辑名 `system:home` /
+   * `system:desktop` / `system:temp`,而真实路径在 systemPaths 表里。如果
+   * 渲染端把 selectedPathId(== node.id)直接当 cwd 发回来,SessionManager
+   * spawn 时会拿 `system:home` 当目录,直接挂 CwdNotAccessible。这里统一
+   * 在 IPC 边界做一次解析:
+   * - `system:*` → 从 systemPaths 找匹配 entry,返回 entry.path
+   * - 其它输入 → 原样返回(已是真实路径)
+   * - 找不到匹配的 system:* id → 返回 null,调用方应当报错而不是 fallback
+   *   到 homedir(否则用户感受是"点了桌面但实际开在主目录,且没提示")。
+   */
+  resolvePathIdToCwd(pathId: string): string | null {
+    if (!pathId.startsWith('system:')) return pathId;
+    const entry = this.systemPaths.find((sp) => sp.id === pathId);
+    return entry ? entry.path : null;
+  }
+
   // ──────────────────────────────────────────────────────────────────
   // 内部帮助
   // ──────────────────────────────────────────────────────────────────

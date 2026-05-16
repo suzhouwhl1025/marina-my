@@ -487,9 +487,14 @@ function PathItem({
         onContextMenu={handleContextMenu}
         title={node.invalid ? `${node.path}\n⚠️ 路径不可访问` : node.path}
       >
-        {node.invalid && (
-          <AlertTriangle size={12} className="path-invalid-icon" aria-label="路径不可访问" />
-        )}
+        {/*
+          F2(beta 勘误2):左侧固定 12px 槽位,按优先级选一个内容渲染 —
+          展开箭头(有会话时)> 警告 icon(invalid 时)> 透明 placeholder。
+          三种状态用同一个槽位,保证所有路径行的 name 文本起始 x 坐标一致,
+          解决了 invalid 行 ⚠️ 把后续文字往右顶导致与其他行不对齐的问题。
+          有会话且 invalid 的极少数情况(session 创建后路径被删):展开
+          箭头优先,⚠️ 通过 title tooltip 提示。
+        */}
         {sessions.length > 0 ? (
           <span
             className="path-expand-arrow"
@@ -497,6 +502,10 @@ function PathItem({
             aria-label={expanded ? '收起' : '展开'}
           >
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </span>
+        ) : node.invalid ? (
+          <span className="path-expand-arrow path-invalid-slot" aria-label="路径不可访问">
+            <AlertTriangle size={12} className="path-invalid-icon" />
           </span>
         ) : (
           <span className="path-expand-arrow placeholder" />

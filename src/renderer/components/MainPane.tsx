@@ -194,6 +194,13 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const dispatch = useAppDispatch();
   const toast = useToast();
   const [creating, setCreating] = useState(false);
+  // F1(beta 勘误2):系统路径节点的 pathId 是逻辑名 `system:home` 等,直接
+  // 显示给用户既丑又信息量为零。从 pathTree.systemPaths 找出对应的真实路径,
+  // UI 里展示真实绝对路径;主进程也会做相同的 resolve 再 spawn(见 ipc.ts)。
+  const displayPath =
+    pathId.startsWith('system:')
+      ? state.pathTree.systemPaths.find((sp) => sp.id === pathId)?.path ?? pathId
+      : pathId;
   // 勘误第二轮 #3:启动期拉一次 detectShells,缓存到组件状态。SessionManager
   // 内部已 cache,所以二次以上调用是 O(1)。
   const [shells, setShells] = useState<DetectedShell[] | null>(null);
@@ -255,7 +262,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
 
   return (
     <div className="empty-path-state">
-      <p className="empty-hint">在 <code>{pathId}</code> 新建终端</p>
+      <p className="empty-hint">在 <code>{displayPath}</code> 新建终端</p>
 
       {shells && shells.length > 0 && (
         <div className="empty-section">

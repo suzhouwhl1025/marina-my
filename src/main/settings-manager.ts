@@ -78,6 +78,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ai: {
     provider: null,
     apiKey: '',
+    // F6(beta 勘误2):自定义 endpoint,空串走 SDK 默认地址
+    baseURL: '',
     model: '',
     statusRecheckEnabled: false,
   },
