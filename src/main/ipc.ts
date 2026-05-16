@@ -77,6 +77,8 @@ import {
   type PickFolderResponse,
   type QuitPayload,
   type QuitResponse,
+  type OpenSessionInNewWindowPayload,
+  type OpenSessionInNewWindowResponse,
   type ReleaseSessionPayload,
   type RemoveBookmarkPayload,
   type RemoveFromRecentPayload,
@@ -359,6 +361,67 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     COMMAND_CHANNELS.SESSION_RELEASE,
     (_e, envelope: CommandEnvelope<ReleaseSessionPayload>): void => {
       sessionManager.releaseOwner(envelope.payload.sessionId, envelope.windowId);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SESSION_OPEN_IN_NEW_WINDOW,
+    (
+      _e,
+      envelope: CommandEnvelope<OpenSessionInNewWindowPayload>,
+    ): OpenSessionInNewWindowResponse => {
+      const { sessionId } = envelope.payload;
+      const session = sessionManager.get(sessionId);
+      if (!session) {
+        throw makeIpcError('SessionNotFound', `sessionId="${sessionId}"`);
+      }
+      // 允许两种情况:
+      //   1) 当前 owner 就是调用方 → 先释放再 claim 给新窗口(经典"移到新窗口")
+      //   2) session 是 orphan(无主) → 不需要释放,直接 claim 给新窗口
+      // 拒绝:其他窗口正持有 — 跨窗口偷会话不在本协议允许范围。
+      if (
+        session.ownerWindowId !== null &&
+        session.ownerWindowId !== envelope.windowId
+      ) {
+        throw makeIpcError(
+          'NotOwner',
+          `sessionId="${sessionId}" 由其他窗口持有(${session.ownerWindowId}),不能从此窗口移动`,
+        );
+      }
+      // 同步:若是调用方持有则先 release,然后造新窗口 + claim — 新窗口拉
+      // snapshot 时已经是它持有的状态,renderer 从 URL ?selectSessionId 读到
+      // 目标后直接 dispatch 选中,没有跨进程时序竞争。
+      if (session.ownerWindowId === envelope.windowId) {
+        sessionManager.releaseOwner(sessionId, envelope.windowId);
+      }
+      // 从调用方窗口的当前 bounds 计算级联偏移,避免新窗口完全盖在旧窗口上。
+      // getNormalBounds 排除最大化/全屏的扩展尺寸,所以即使调用方是 maximized,
+      // 新窗口也会落到"该窗口被还原后的位置 + 偏移",不会撑满屏幕。
+      const callerWin = windowManager.getById(envelope.windowId);
+      const cascadeBounds = (() => {
+        if (!callerWin || callerWin.isDestroyed()) return undefined;
+        const b = callerWin.getNormalBounds();
+        const CASCADE = 32;
+        return {
+          width: b.width,
+          height: b.height,
+          x: b.x + CASCADE,
+          y: b.y + CASCADE,
+          maximized: false,
+        };
+      })();
+      const info = windowManager.createWindowFromFactory({
+        selectSessionId: sessionId,
+        ...(envelope.payload.simpleMode ? { simpleMode: true } : {}),
+        ...(cascadeBounds ? { initialBounds: cascadeBounds } : {}),
+      });
+      try {
+        sessionManager.claimOwner(sessionId, info.id);
+      } catch (err) {
+        // 极小概率:在 release 与 claim 之间另一个窗口抢先 claim。session 留
+        // 在那里(orphan 或被抢),新窗口仍开出来,只是不会自动 select。
+      }
+      return { windowId: info.id, windowNumber: info.number };
     },
   );
 

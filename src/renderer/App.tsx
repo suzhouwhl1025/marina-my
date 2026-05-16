@@ -19,7 +19,6 @@ import { WindowChrome } from './components/WindowChrome';
 import { ContextMenuProvider } from './components/ContextMenu';
 import { ToastProvider } from './components/Toast';
 import { ModalProvider } from './components/Modal';
-import { TerminalToolbar } from './components/TerminalToolbar';
 import { LanguageProvider } from './components/LanguageProvider';
 
 type HandshakeState =
@@ -177,6 +176,25 @@ function ConnectedShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 右键 Tab → "在新窗口中打开":?selectSessionId=X。等 snapshot 加载完(此时
+  // sessions 已包含新 owner 信息)再 dispatch 选中,避免选到不存在的 session。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!sync.ready) return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSessionId = params.get('selectSessionId');
+    if (!initialSessionId) return;
+    dispatch({
+      type: 'view/focus-requested',
+      selectSessionId: initialSessionId,
+    });
+    // 一次性,清掉 query 防止刷新 / DevTools 重载时重新触发
+    const url = new URL(window.location.href);
+    url.searchParams.delete('selectSessionId');
+    window.history.replaceState({}, '', url.toString());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.ready]);
+
   // 即时同步 uiZoom 到 webFrame.setZoomFactor (preload 桥)。
   // 必须在 early return 之前 — React Hooks 规则:每次渲染调用顺序须一致。
   useEffect(() => {
@@ -248,9 +266,8 @@ function ConnectedShell({
               <SettingsView />
             ) : state.simpleMode ? (
               // BETA-027:简易页面 — 隐藏 Sidebar / Tab bar,只保留 WindowChrome
-              // + 终端区。工具栏浮在右上角(floating)以便用户出口。
+              // + 终端区。退出简易模式的入口现在嵌在 terminal-statusbar 里(pid 之后)。
               <div className="app-body simple-mode">
-                <TerminalToolbar variant="floating" />
                 <MainPane />
               </div>
             ) : (

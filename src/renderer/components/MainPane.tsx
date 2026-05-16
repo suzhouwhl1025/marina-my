@@ -34,14 +34,12 @@ import {
 import type { SessionInfo, Template } from '@shared/types';
 import {
   findMyOwnedSessionId,
-  findPathNode,
   getDisplayableSession,
   getSessionsInSelectedPath,
   useAppDispatch,
   useAppState,
 } from '../store';
 import { TerminalView } from './TerminalView';
-import { TerminalToolbar } from './TerminalToolbar';
 import { focusTerminalDom } from '../focus';
 import { Icon, type IconName } from './icons';
 import { TemplateIcon } from './TemplateIcon';
@@ -49,6 +47,7 @@ import { useContextMenuApi } from './ContextMenu';
 import { useToast } from './Toast';
 import { useModal } from './Modal';
 import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
+import { buildSessionContextMenu } from './sessionContextMenu';
 
 interface DetectedShell {
   id: string;
@@ -378,8 +377,6 @@ function TabBar({ sessions, selectedSessionId, showBlankTab }: TabBarProps): JSX
           <span className="tab-name">新建</span>
         </button>
       </div>
-      {/* BETA-028:tab-bar 右端嵌入终端工具栏 */}
-      <TerminalToolbar variant="inline" />
     </div>
   );
 }
@@ -412,121 +409,40 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
   const handleContextMenu = (e: MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    // P2-13:用 store.findPathNode 替代手写 3 栏 fallback,与 store 内部
-     // 同名 helper 一致;path 不存在(temporary 已 evict / 历史路径被清等)
-     // 时回退 session.originalCwd。
-    const path =
-      findPathNode(state.pathTree, session.pathId)?.path || session.originalCwd;
-
     ctxMenu.open({
       x: e.clientX,
       y: e.clientY,
       title: session.displayName,
-      items: [
-        {
-          // 用户测试发现"始终灰显":原代码用 `variant !== 'mine'`,
-          // 把 orphan(无主)session 也灰掉了。spec 6.3 与 milestone-1
-          // 工作记录 §2.3 描述是"**不是本窗口持有时**灰显"。orphan 不属
-          // 于"他人持有",应可重命名。改为仅 'other' 时灰显。
-          label: '重命名…',
-          disabled: variant === 'other',
-          ...(variant === 'other' ? { hint: '其他窗口持有,无法重命名' } : {}),
-          onSelect: async () => {
-            // CPB-P2 同款改造:window.prompt → 自绘 Modal.prompt。
-            // 原生 prompt 关闭后焦点漂到 body,这里 Modal.prompt 内置
-            // previousActiveElement 归还。
-            const next = await modal.prompt({
-              title: '重命名会话',
-              message: '为此会话指定新的显示名(不影响 sessionId)',
-              defaultValue: session.displayName,
-              confirmLabel: '保存',
-            });
-            if (next === null) return;
-            const trimmed = next.trim();
-            if (!trimmed) return;
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_RENAME, {
-                sessionId: session.id,
-                newDisplayName: trimmed,
-              })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `重命名失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
+      items: buildSessionContextMenu(session, {
+        variant,
+        pathTree: state.pathTree,
+        copyToClipboard,
+        toastError: (message) => toast.push({ kind: 'error', message }),
+        onRename: async () => {
+          // Tab 端走 Modal.prompt(Sidebar 端走行内编辑,两者菜单"内容"对齐
+          // 但触发体验各按各侧的惯例)。
+          const next = await modal.prompt({
+            title: '重命名会话',
+            message: '为此会话指定新的显示名(不影响 sessionId)',
+            defaultValue: session.displayName,
+            confirmLabel: '保存',
+          });
+          if (next === null) return;
+          const trimmed = next.trim();
+          if (!trimmed) return;
+          window.api
+            .invoke(COMMAND_CHANNELS.SESSION_RENAME, {
+              sessionId: session.id,
+              newDisplayName: trimmed,
+            })
+            .catch((err: unknown) =>
+              toast.push({
+                kind: 'error',
+                message: `重命名失败:${err instanceof Error ? err.message : String(err)}`,
+              }),
+            );
         },
-        {
-          // STM-3:恢复 OSC 标题自动更新 — 用户手改名后,Claude Code 等
-          // 持续刷标题的程序被锁(manuallyRenamed=true),此项重置标志位
-          // 让 OSC 0/1/2 标题事件再次生效。仅在 'mine' / 'orphan' 显示
-          // (与 '重命名' 同条件)。
-          label: '恢复自动标题',
-          disabled: variant === 'other',
-          ...(variant === 'other' ? { hint: '其他窗口持有,无法修改' } : {}),
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLEAR_MANUAL_RENAME, {
-                sessionId: session.id,
-              })
-              .then(() => {
-                toast.push({
-                  kind: 'info',
-                  message: '已恢复 — shell / agent 的标题将再次自动更新',
-                });
-              })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `恢复失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        {
-          label: '复制路径',
-          onSelect: () => copyToClipboard(path, '路径'),
-        },
-        {
-          label: '复制 cwd',
-          onSelect: () => copyToClipboard(session.currentCwd, 'cwd'),
-        },
-        {
-          label: `复制 PID${session.pid > 0 ? ` (${session.pid})` : ''}`,
-          disabled: session.pid <= 0,
-          onSelect: () => copyToClipboard(String(session.pid), 'PID'),
-        },
-        {
-          label: '在 Explorer 中显示',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        { divider: true, label: '' },
-        {
-          label: '关闭',
-          danger: true,
-          disabled: variant === 'other',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId: session.id })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `关闭失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-      ],
+      }),
     });
   };
 

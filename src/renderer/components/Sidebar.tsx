@@ -44,6 +44,7 @@ import { Icon, type IconName } from './icons';
 import { useContextMenuApi, type ContextMenuItem } from './ContextMenu';
 import { useToast } from './Toast';
 import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
+import { buildSessionContextMenu } from './sessionContextMenu';
 
 /**
  * 状态点颜色 (软件定义书 6.2.4 状态指示):
@@ -55,9 +56,9 @@ import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
  * 防止变量缺失渲染成黑色 (软件定义书 5.1.9)。
  */
 const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
-  active: 'var(--pine, #f0f)',
-  idle: 'var(--gold, #f0f)',
-  exited: 'var(--muted, #f0f)',
+  active: 'var(--color-success, #f0f)',
+  idle: 'var(--color-warning, #f0f)',
+  exited: 'var(--color-text-muted, #f0f)',
 };
 
 // ──────────────────────────────────────────────────────────────────
@@ -661,73 +662,23 @@ function SessionItemImpl({
   const handleContextMenu = (e: MouseEvent<HTMLLIElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    const tpl = stateRef.current.templates.find((t) => t.id === session.templateId);
-    const fullCmd = tpl
-      ? `${tpl.command || '(纯 shell)'} ${tpl.args.join(' ')}`.trim()
-      : '(模板未找到)';
-
+    const variant: 'mine' | 'orphan' | 'other' = isMine
+      ? 'mine'
+      : ownedByOther
+        ? 'other'
+        : 'orphan';
     ctxMenu.open({
       x: e.clientX,
       y: e.clientY,
       title: session.displayName,
-      items: [
-        {
-          // 与 Tab 同口径:仅"其他窗口持有"时灰显;orphan / 本窗口持有 都允许。
-          // 原 `disabled: !isMine` 把 orphan 也灰掉,与 spec 6.3 不符。
-          label: '重命名…',
-          disabled: ownedByOther,
-          ...(ownedByOther ? { hint: '其他窗口持有,无法重命名' } : {}),
-          onSelect: beginRename,
-        },
-        {
-          label: '复制路径',
-          onSelect: () => copyToClipboard(session.pathId, '路径'),
-        },
-        {
-          label: '复制 cwd',
-          onSelect: () => copyToClipboard(session.currentCwd, 'cwd'),
-        },
-        {
-          label: `复制 PID${session.pid > 0 ? ` (${session.pid})` : ''}`,
-          disabled: session.pid <= 0,
-          onSelect: () => copyToClipboard(String(session.pid), 'PID'),
-        },
-        {
-          label: '在 Explorer 中显示',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path: session.pathId })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        { divider: true, label: '' },
-        {
-          label: `完整命令:${fullCmd}`,
-          disabled: true,
-          hint: fullCmd,
-        },
-        { divider: true, label: '' },
-        {
-          label: '关闭',
-          danger: true,
-          disabled: ownedByOther,
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId: session.id })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `关闭失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-      ],
+      items: buildSessionContextMenu(session, {
+        variant,
+        pathTree: stateRef.current.pathTree,
+        copyToClipboard,
+        toastError: (message) => toast.push({ kind: 'error', message }),
+        // Sidebar 端走"行内编辑"重命名(Tab 端走 Modal.prompt)
+        onRename: beginRename,
+      }),
     });
   };
 

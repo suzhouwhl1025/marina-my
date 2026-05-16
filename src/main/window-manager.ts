@@ -71,6 +71,13 @@ export interface CreateWindowOptions {
    * startup 时 dispatch view/set-simple-mode,首次渲染就跳过 Sidebar/Tab bar。
    */
   simpleMode?: boolean;
+  /**
+   * 右键 Tab → "在新窗口中打开":新窗口启动后从 URL ?selectSessionId 读到
+   * 目标 session,自动 dispatch view/focus-requested 切到该 session。ownership
+   * 由调用方在创建窗口前后通过 SessionManager.claimOwner 完成,这里只负责
+   * 把 hint 透传到 renderer 启动阶段。
+   */
+  selectSessionId?: string;
 }
 
 export interface IWindowManager {
@@ -249,7 +256,10 @@ export class WindowManager implements IWindowManager {
     // dev 模式从 Vite dev server 拉,build 后从本地文件加载
     // BETA-027:simpleMode=true 时附加 ?mode=simple,renderer 启动时一次性 dispatch
     const simpleFlag = options.simpleMode ? '&mode=simple' : '';
-    const queryString = `?windowId=${encodeURIComponent(windowId)}&windowNumber=${windowNumber}${simpleFlag}`;
+    const selectFlag = options.selectSessionId
+      ? `&selectSessionId=${encodeURIComponent(options.selectSessionId)}`
+      : '';
+    const queryString = `?windowId=${encodeURIComponent(windowId)}&windowNumber=${windowNumber}${simpleFlag}${selectFlag}`;
     if (isDev && process.env.ELECTRON_RENDERER_URL) {
       void win.loadURL(process.env.ELECTRON_RENDERER_URL + queryString);
     } else {

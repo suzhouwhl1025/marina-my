@@ -71,6 +71,12 @@ export const COMMAND_CHANNELS = {
    * 的任务进度标题重新生效。
    */
   SESSION_CLEAR_MANUAL_RENAME: 'cmd:session:clear-manual-rename',
+  /**
+   * 右键 Tab → "在新窗口中打开"。原子地把 session 从调用方窗口释放,
+   * 创建新窗口并把所有权直接转给新窗口,新窗口启动时从 URL ?selectSessionId
+   * 读到目标后 dispatch select-session 自动切到该 session。
+   */
+  SESSION_OPEN_IN_NEW_WINDOW: 'cmd:session:open-in-new-window',
 
   // Bookmark / Path 域
   BOOKMARK_ADD: 'cmd:bookmark:add',
@@ -307,6 +313,17 @@ export interface GetScrollbackResponse {
 
 export interface ReleaseSessionPayload {
   sessionId: string;
+}
+
+export interface OpenSessionInNewWindowPayload {
+  sessionId: string;
+  /** true → 新窗口以简易模式启动(隐藏 Sidebar/Tab bar)。默认 false。 */
+  simpleMode?: boolean;
+}
+
+export interface OpenSessionInNewWindowResponse {
+  windowId: string;
+  windowNumber: number;
 }
 
 export interface FocusSessionOwnerPayload {
