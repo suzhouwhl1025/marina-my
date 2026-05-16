@@ -502,7 +502,10 @@ button:disabled {
 .sidebar-bookmarks-dropzone {
   flex: 1 1 0;
   overflow-y: auto;
-  padding: 8px 0;
+  /* F7(beta 勘误2 续):top padding 清零 — 第一个 category-header 必须紧贴
+     sidebar 顶,才能与右侧 .tab-bar 顶端对齐。底部 8px 保留,给"设置"行
+     上方留呼吸距离。 */
+  padding: 0 0 8px;
   transition: background-color 100ms ease;
 }
 
@@ -513,7 +516,9 @@ button:disabled {
 }
 
 .sidebar-category {
-  padding: 4px 0;
+  /* F7(beta 勘误2 续):上 padding 清零,让第一个 .sidebar-category-header
+     的 32px min-height 顶到 sidebar 顶部,与右侧 TabBar 对齐。 */
+  padding: 0 0 4px;
   border-bottom: 1px solid var(--overlay, #f0f);
 }
 
