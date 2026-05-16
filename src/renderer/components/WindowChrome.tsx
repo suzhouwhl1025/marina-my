@@ -28,13 +28,21 @@ import type { WindowStyle } from '@shared/types';
 import { Minus, Square, Copy as RestoreIcon, X } from 'lucide-react';
 import { focusTerminalDom } from '../focus';
 import { useAppState } from '../store';
+// [BETA-019 DEBUG] 临时 cursor 状态 HUD,定位"运行一段时间出现闪烁光标"。删除时
+// 一并删除 components/Beta019CursorHud.tsx 与 debug/beta019-cursor-hud.ts。
+import { Beta019CursorHud } from './Beta019CursorHud';
 
 interface Props {
   windowStyle: WindowStyle;
   buildVersion: string;
+  /**
+   * DEV-COEXIST 2026-05-16:'dev' / 'portable' 时在 "Marina" 字样后追加
+   * 后缀,避免 npm run dev 与打包版同时跑混淆。'installed' 保持原样。
+   */
+  buildType: 'dev' | 'portable' | 'installed';
 }
 
-export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element {
+export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): JSX.Element {
   // P2-18:本组件唯一需要的全局值是 windowNumber,而它在本窗口生命周期内不变
   // (preload 从 URL query 解析,见 ipc-protocol.md 2.2)。直接读 window.api,
   // 避免 useAppState 订阅整个 state 引发的无关重渲。
@@ -87,7 +95,10 @@ export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element 
     callToggleMax();
   };
 
-  const title = `Marina — Window ${windowNumber || '?'}`;
+  // DEV-COEXIST:'Marina (dev) — Window 1' / 'Marina (portable) — ...' / 'Marina — ...'
+  const appLabel =
+    buildType === 'dev' ? 'Marina (dev)' : buildType === 'portable' ? 'Marina (portable)' : 'Marina';
+  const title = `${appLabel} — Window ${windowNumber || '?'}`;
 
   if (windowStyle === 'macos') {
     return (
@@ -110,10 +121,12 @@ export function WindowChrome({ windowStyle, buildVersion }: Props): JSX.Element 
       onDoubleClick={handleDragRegionDblClick}
     >
       <div className="titlebar-title titlebar-drag">
-        <span className="titlebar-app-name">Marina</span>
+        <span className="titlebar-app-name">{appLabel}</span>
         <span className="titlebar-window-badge">Window {windowNumber || '?'}</span>
       </div>
       <div className="titlebar-spacer titlebar-drag" />
+      {/* [BETA-019 DEBUG] */}
+      <Beta019CursorHud />
       <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
       <div className="titlebar-controls" aria-label="窗口控制(Windows 风格)">
         <button
@@ -227,6 +240,8 @@ function MacosTitlebar({
       <div className="titlebar-spacer titlebar-drag" />
       <div className="titlebar-title titlebar-drag">{title}</div>
       <div className="titlebar-spacer titlebar-drag" />
+      {/* [BETA-019 DEBUG] */}
+      <Beta019CursorHud />
       <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
     </div>
   );

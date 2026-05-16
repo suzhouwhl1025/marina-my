@@ -172,6 +172,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     (): GetProtocolVersionResponse => ({
       protocolVersion: PROTOCOL_VERSION,
       buildVersion: app.getVersion(),
+      buildType: getBuildType(),
     }),
   );
 

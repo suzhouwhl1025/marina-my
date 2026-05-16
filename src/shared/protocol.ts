@@ -183,6 +183,12 @@ export interface EventEnvelope<P = unknown> {
 export interface GetProtocolVersionResponse {
   protocolVersion: typeof PROTOCOL_VERSION;
   buildVersion: string;
+  /**
+   * DEV-COEXIST(2026-05-16):构建形态。renderer 据此在标题栏后缀显示
+   * "(dev)" / "(portable)",避免 dev 实例与打包版同时跑时误认。
+   * 与 SYSTEM_GET_BUILD_TYPE 同源,只是放进握手响应里,首次握手就拿到。
+   */
+  buildType: 'dev' | 'portable' | 'installed';
 }
 
 export interface GetSnapshotPayload {

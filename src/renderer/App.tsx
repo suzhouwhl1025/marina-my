@@ -24,7 +24,7 @@ import { LanguageProvider } from './components/LanguageProvider';
 
 type HandshakeState =
   | { status: 'pending' }
-  | { status: 'ok'; buildVersion: string }
+  | { status: 'ok'; buildVersion: string; buildType: 'dev' | 'portable' | 'installed' }
   | { status: 'mismatch'; mainVersion: number; rendererVersion: number }
   | { status: 'error'; message: string };
 
@@ -60,7 +60,7 @@ export function App(): JSX.Element {
     }
     window.api
       .getProtocolVersion()
-      .then(({ protocolVersion, buildVersion }) => {
+      .then(({ protocolVersion, buildVersion, buildType }) => {
         if (protocolVersion !== PROTOCOL_VERSION) {
           setHandshake({
             status: 'mismatch',
@@ -69,7 +69,7 @@ export function App(): JSX.Element {
           });
           return;
         }
-        setHandshake({ status: 'ok', buildVersion });
+        setHandshake({ status: 'ok', buildVersion, buildType });
       })
       .catch((err: unknown) => {
         setHandshake({
@@ -111,12 +111,21 @@ export function App(): JSX.Element {
       myWindowId={window.api.windowId}
       myWindowNumber={window.api.windowNumber}
     >
-      <ConnectedShell buildVersion={handshake.buildVersion} />
+      <ConnectedShell
+        buildVersion={handshake.buildVersion}
+        buildType={handshake.buildType}
+      />
     </AppStateProvider>
   );
 }
 
-function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element {
+function ConnectedShell({
+  buildVersion,
+  buildType,
+}: {
+  buildVersion: string;
+  buildType: 'dev' | 'portable' | 'installed';
+}): JSX.Element {
   const sync = useIpcSync();
   const state = useAppState();
   const dispatch = useAppDispatch();
@@ -189,7 +198,11 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
             data-window-style={windowStyle}
             data-simple-mode={state.simpleMode ? 'true' : 'false'}
           >
-            <WindowChrome windowStyle={windowStyle} buildVersion={buildVersion} />
+            <WindowChrome
+              windowStyle={windowStyle}
+              buildVersion={buildVersion}
+              buildType={buildType}
+            />
             {state.inSettingsView ? (
               <SettingsView />
             ) : state.simpleMode ? (

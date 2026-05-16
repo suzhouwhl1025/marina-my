@@ -100,6 +100,23 @@ async function scanInvalidPathsAsync(pathManager: PathManager): Promise<void> {
 }
 
 function bootstrap(): void {
+  // DEV-COEXIST(2026-05-16):dev 模式下改 app 名,让 npm run dev 与打包版
+  // Marina.exe 互不冲突。Electron 把以下 4 类资源全部按 `productName` 派生:
+  //   - app.getPath('userData') → %APPDATA%\Marina (dev) vs %APPDATA%\Marina
+  //   - requestSingleInstanceLock 的锁键(底层用 userData 目录)
+  //   - 日志目录(logger 走 join(userData, 'logs'))
+  //   - 任务栏 AppUserModelID(影响 Windows 任务栏分组)
+  // 必须在 requestSingleInstanceLock / getPath('userData') / setAppUserModelId
+  // 之前调用 — 一旦解析过,Electron 缓存了路径,改 name 不再生效。
+  //
+  // 同样的 portable 形态也独立一份,避免运行中的 portable 与已安装版互踩
+  // settings.json / 单实例锁。仅 installed 形态使用 "Marina" 原名。
+  if (!app.isPackaged) {
+    app.setName('Marina (dev)');
+  } else if (process.env['PORTABLE_EXECUTABLE_DIR']) {
+    app.setName('Marina (portable)');
+  }
+
   // M1-D:全局崩溃兜底 — daily driver 最大风险是"未捕获异常让主进程死掉,
   // 一刹那所有 PTY 全部消失,用户工作全丢"。装一层 net,只记日志不让进程退,
   // 已经损坏的状态由各 manager 自愈或下次操作时校验。
