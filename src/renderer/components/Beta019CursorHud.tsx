@@ -1,80 +1,75 @@
-// [BETA-019 DEBUG] HUD 组件 — 嵌在标题栏中间,250ms 轮询当前活动 session 的
-// xterm 内部 cursor 状态。复现"运行一段时间出现闪烁光标"时,直接看 HUD 上的
-// `hide:` 字段在哪一刻从 T 翻到 F,即定位 root cause(是 ?25h、DECSTR 还是 RIS)。
+// [BETA-019 DEBUG] HUD 组件 — 嵌在标题栏中部。
+//
+// 主行(标题栏内一直显示):当前 cursor 状态摘要 + flips 计数 + 末次翻转方向。
+// 展开面板(点击 ▼ 切换):完整翻转日志 — 每一次翻转的时刻 / 方向 / 原因 /
+//   stack 头,从最新到最旧倒序排列。日志由 beta019-cursor-hud 模块层 Map 持久,
+//   组件 unmount / sessionId 切换都不丢失,Marina 进程重启清空。
+//
+// 翻转捕获机制:beta019-cursor-hud 在 registerTerminal 时给
+// `coreService.isCursorHidden` 装 Object.defineProperty setter,翻转瞬间抓
+// stack trace,解析出 InputHandler 调用方(softReset / fullReset / setModePrivate
+// 等),直接告诉用户是哪条 escape 路径。
 //
 // 本组件 + beta019-cursor-hud.ts 完成定位后可整体删除。
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppState } from '../store';
-import { getTerminal, sampleCursor, type CursorSnapshot } from '../debug/beta019-cursor-hud';
+import {
+  getTerminal,
+  sampleCursor,
+  getHistory,
+  type CursorSnapshot,
+  type FlipHistory,
+} from '../debug/beta019-cursor-hud';
 
-interface HudState {
+interface HudView {
   snap: CursorSnapshot;
-  hideFlips: number;          // isCursorHidden 跳变次数(true↔false)
-  lastFlipAt: number | null;  // 最后一次跳变时刻(ms since mount)
-  lastFlipFromTo: string;     // 最后一次跳变方向,如 "T→F"
+  hist: FlipHistory | null;
 }
+
+const EMPTY_SNAP: CursorSnapshot = {
+  cursorHidden: null,
+  cursorInitialized: null,
+  blink: null,
+  style: null,
+  cursorX: null,
+  cursorY: null,
+  bufferY: null,
+};
 
 export function Beta019CursorHud(): JSX.Element | null {
   const state = useAppState();
   const sessionId = state.selectedSessionId;
   const session = sessionId ? state.sessions.get(sessionId) : undefined;
 
-  const [hud, setHud] = useState<HudState>({
-    snap: {
-      cursorHidden: null,
-      cursorInitialized: null,
-      blink: null,
-      style: null,
-      cursorX: null,
-      cursorY: null,
-      bufferY: null,
-    },
-    hideFlips: 0,
-    lastFlipAt: null,
-    lastFlipFromTo: '',
-  });
-
-  // 用 ref 保存"上一次的 hidden 值"和"组件 mount 时刻",跨 setInterval 回调可见
-  const lastHiddenRef = useRef<boolean | null>(null);
-  const mountedAtRef = useRef<number>(Date.now());
-
-  // session 切换时重置翻转计数(新 Terminal 实例,前一个的计数无意义)
-  useEffect(() => {
-    lastHiddenRef.current = null;
-    mountedAtRef.current = Date.now();
-    setHud((h) => ({ ...h, hideFlips: 0, lastFlipAt: null, lastFlipFromTo: '' }));
-  }, [sessionId]);
+  const [view, setView] = useState<HudView>({ snap: EMPTY_SNAP, hist: null });
+  const [expanded, setExpanded] = useState<boolean>(false);
 
   useEffect(() => {
     const id = window.setInterval(() => {
       const term = getTerminal(sessionId);
       const snap = sampleCursor(term);
-      const prev = lastHiddenRef.current;
-      const cur = snap.cursorHidden;
-      let flipped = false;
-      let flipFromTo = '';
-      if (prev !== null && cur !== null && prev !== cur) {
-        flipped = true;
-        flipFromTo = `${prev ? 'T' : 'F'}→${cur ? 'T' : 'F'}`;
-      }
-      lastHiddenRef.current = cur;
-      setHud((h) => ({
-        snap,
-        hideFlips: flipped ? h.hideFlips + 1 : h.hideFlips,
-        lastFlipAt: flipped ? Date.now() - mountedAtRef.current : h.lastFlipAt,
-        lastFlipFromTo: flipped ? flipFromTo : h.lastFlipFromTo,
-      }));
+      const hist = getHistory(sessionId);
+      setView({ snap, hist });
     }, 250);
     return () => window.clearInterval(id);
   }, [sessionId]);
 
   if (!sessionId) return null;
 
-  const { snap, hideFlips, lastFlipAt, lastFlipFromTo } = hud;
+  const { snap, hist } = view;
+  const hideFlips = hist?.hideFlips ?? 0;
+  const lastFlipAt = hist?.lastFlipAt ?? null;
+  const lastFlipFromTo = hist?.lastFlipFromTo ?? '';
+
   const hideStr = snap.cursorHidden === null ? '?' : snap.cursorHidden ? 'T' : 'F';
-  // 正常态光标应隐藏 → hide=T 是绿色;hide=F 在 TUI 输出时就是 bug 现象 → 红色
-  const hideColor = snap.cursorHidden === false ? '#ff5d9e' : snap.cursorHidden === true ? '#9ccfd8' : '#888';
-  const flipsColor = hideFlips > 1 ? '#ff5d9e' : '#888';
+  const lastFlipToF = lastFlipFromTo.endsWith('→F');
+  const hideAlarmed = snap.cursorHidden === false && hideFlips >= 1 && lastFlipToF;
+  const hideColor = hideAlarmed
+    ? '#ff5d9e'
+    : snap.cursorHidden === true
+      ? '#9ccfd8'
+      : '#aaa';
+  const flipsColor = hideFlips >= 2 ? '#ff5d9e' : hideFlips === 1 ? '#9ccfd8' : '#888';
   const blinkStr = snap.blink === null ? '?' : snap.blink ? 'T' : 'F';
   const styleStr = snap.style ?? '?';
   const xy = `${snap.cursorX ?? '?'},${snap.cursorY ?? '?'}`;
@@ -82,33 +77,194 @@ export function Beta019CursorHud(): JSX.Element | null {
   const sessState = session?.state ?? '?';
 
   return (
+    <>
+      <div
+        className="titlebar-drag"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '0 8px',
+          fontFamily: 'Consolas, monospace',
+          fontSize: 11,
+          color: '#aaa',
+          userSelect: 'none',
+          whiteSpace: 'nowrap',
+        }}
+        title="[BETA-019 DEBUG] 点击 ▼ 展开完整翻转日志"
+      >
+        <span>BETA-019</span>
+        <span>
+          hide:<span style={{ color: hideColor, fontWeight: 600 }}>{hideStr}</span>
+        </span>
+        <span>blink:{blinkStr}</span>
+        <span>style:{styleStr}</span>
+        <span>xy:[{xy}]</span>
+        <span>
+          flips:<span style={{ color: flipsColor, fontWeight: 600 }}>{hideFlips}</span>
+          {lastFlipFromTo && (
+            <span style={{ color: '#888' }}>
+              ({lastFlipFromTo}@{flipAt})
+            </span>
+          )}
+        </span>
+        <span>state:{sessState}</span>
+        {/* 展开/折叠按钮 — 不在 drag 区,避免点击触发拖窗 */}
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          style={{
+            background: 'transparent',
+            border: '1px solid #555',
+            color: '#ddd',
+            padding: '0 6px',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            fontSize: 10,
+            lineHeight: '16px',
+            borderRadius: 2,
+            WebkitAppRegion: 'no-drag',
+          } as React.CSSProperties}
+          title={expanded ? '折叠日志' : '展开完整翻转日志'}
+        >
+          {expanded ? '▲ 折叠' : `▼ log(${hist?.flipLog.length ?? 0})`}
+        </button>
+      </div>
+      {expanded && hist && <FlipLogPanel hist={hist} />}
+    </>
+  );
+}
+
+function FlipLogPanel({ hist }: { hist: FlipHistory }): JSX.Element {
+  const log = hist.flipLog;
+  // 倒序展示 — 最新在上
+  const rows = [...log].reverse();
+  const copyAll = (): void => {
+    const text = log
+      .map(
+        (e, i) =>
+          `#${i + 1}\t${(e.at / 1000).toFixed(2)}s\t${e.fromTo}\t${e.reason}\t${e.stackHead}`,
+      )
+      .join('\n');
+    void navigator.clipboard.writeText(text).catch(() => {
+      /* ignore */
+    });
+  };
+
+  return (
     <div
-      className="titlebar-drag"
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '0 8px',
+        position: 'fixed',
+        top: 36, // .app-titlebar 高度:Windows 36px / macOS 32px,优先对齐 Windows
+        right: 24,
+        zIndex: 9999,
+        background: '#1f1d2e',
+        border: '1px solid #524f67',
+        borderRadius: 4,
+        padding: 8,
+        maxWidth: 720,
+        maxHeight: 'calc(100vh - 80px)',
+        overflowY: 'auto',
+        boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
         fontFamily: 'Consolas, monospace',
         fontSize: 11,
-        color: '#aaa',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-      }}
-      title="[BETA-019 DEBUG] xterm cursor 状态实时采样。hide=T 是正常(光标隐藏),hide=F 表示 ?25l 被翻回 → bug。flips>1 说明运行中发生过翻转,记下 flipAt 看是哪个时刻。"
+        color: '#e0def4',
+        WebkitAppRegion: 'no-drag',
+      } as React.CSSProperties}
     >
-      <span>BETA-019</span>
-      <span>
-        hide:<span style={{ color: hideColor, fontWeight: 600 }}>{hideStr}</span>
-      </span>
-      <span>blink:{blinkStr}</span>
-      <span>style:{styleStr}</span>
-      <span>xy:[{xy}]</span>
-      <span>
-        flips:<span style={{ color: flipsColor, fontWeight: 600 }}>{hideFlips}</span>
-        {lastFlipFromTo && <span style={{ color: '#888' }}>({lastFlipFromTo}@{flipAt})</span>}
-      </span>
-      <span>state:{sessState}</span>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 8,
+          borderBottom: '1px solid #393552',
+          paddingBottom: 4,
+        }}
+      >
+        <span style={{ color: '#c4a7e7', fontWeight: 600 }}>
+          BETA-019 翻转日志 (共 {log.length} 条)
+        </span>
+        <button
+          type="button"
+          onClick={copyAll}
+          style={{
+            background: '#393552',
+            border: '1px solid #524f67',
+            color: '#e0def4',
+            padding: '2px 8px',
+            fontSize: 10,
+            cursor: 'pointer',
+            borderRadius: 2,
+            fontFamily: 'inherit',
+          }}
+        >
+          📋 复制全部
+        </button>
+      </div>
+      {log.length === 0 ? (
+        <div style={{ color: '#6e6a86', padding: 8 }}>
+          尚未捕获到翻转。启动 Claude Code 应看到首次 F→T(`?25l` 隐藏光标)。
+        </div>
+      ) : (
+        <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+          <thead>
+            <tr style={{ color: '#908caa', borderBottom: '1px solid #393552' }}>
+              <th style={{ textAlign: 'left', padding: '4px 8px' }}>#</th>
+              <th style={{ textAlign: 'right', padding: '4px 8px' }}>时刻</th>
+              <th style={{ textAlign: 'center', padding: '4px 8px' }}>方向</th>
+              <th style={{ textAlign: 'left', padding: '4px 8px' }}>原因 (来源 escape)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((e, idx) => {
+              const num = log.length - idx;
+              const isToF = e.fromTo.endsWith('→F');
+              const dirColor = isToF ? '#ff5d9e' : '#9ccfd8';
+              return (
+                <tr
+                  key={`${e.atEpoch}-${num}`}
+                  style={{ borderBottom: '1px solid #2a2738' }}
+                  title={e.stackHead}
+                >
+                  <td style={{ padding: '4px 8px', color: '#6e6a86' }}>{num}</td>
+                  <td
+                    style={{
+                      padding: '4px 8px',
+                      textAlign: 'right',
+                      color: '#f6c177',
+                    }}
+                  >
+                    {(e.at / 1000).toFixed(2)}s
+                  </td>
+                  <td
+                    style={{
+                      padding: '4px 8px',
+                      textAlign: 'center',
+                      color: dirColor,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {e.fromTo}
+                  </td>
+                  <td style={{ padding: '4px 8px' }}>{e.reason}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      <div
+        style={{
+          color: '#6e6a86',
+          fontSize: 10,
+          marginTop: 8,
+          paddingTop: 4,
+          borderTop: '1px solid #393552',
+        }}
+      >
+        悬停每行看 stack head。粉红 T→F 在运行中出现 = bug 假设证实,原因列直接指明 escape 路径。
+      </div>
     </div>
   );
 }
