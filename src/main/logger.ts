@@ -2,15 +2,22 @@
  * @file src/main/logger.ts
  * @purpose 主进程持久化日志 (M1-D) — 无新依赖,纯 Node fs。
  *
- *   写入 `%APPDATA%/Marina/logs/main-YYYY-MM-DD.log`,按日切;同时镜像到
+ *   写入 `%APPDATA%/Marina/logs/<channel>-YYYY-MM-DD.log`,按日切;同时镜像到
  *   console (dev / 启动期诊断)。
+ *
+ *   两个 channel:
+ *   - `main` — 通用主进程日志,info/warn/error 走这里,**会** mirror console
+ *   - `llm`  — LLM 排障日志(prompt / raw response / verdict 等),独立文件,
+ *     **不** mirror console(单条 tail+raw res 几 KB,刷屏 dev 控制台无价值)
+ *
+ *   分通道动机(2026-05-16):AI 状态复核每次约 2-3KB,5MB main 日志撑不到 1k 次
+ *   就被 BETA-031 设置变更、IPC 调用等普通条目挤出去,排"为什么某次判 idle"
+ *   要翻好几个 .N.log 文件才能凑齐 prompt+res。拆开后:main 看应用主线;
+ *   llm 看 AI 全量,各 5MB×7 天容量独立,互不干扰。
  *
  *   尊重 settings.advanced.logLevel:
  *   - 'INFO' (默认):info / warn / error 落盘
  *   - 'DEBUG':debug / info / warn / error 全落盘
- *
- *   日志线程通过 `fs.createWriteStream({ flags: 'a' })` 单实例追加;
- *   `flush` 等所有 pending 写完(退出前调)。
  *
  *   超过 5MB 强制按日内序号切;保留最近 7 天文件,启动时清理。
  *
@@ -21,6 +28,7 @@ import { promises as fs, createWriteStream, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
+type Channel = 'main' | 'llm';
 
 const LEVEL_ORDER: Record<Level, number> = {
   debug: 10,
@@ -37,18 +45,37 @@ interface PendingEntry {
   extra: unknown[];
 }
 
+interface ChannelState {
+  filePrefix: string;
+  stream: WriteStream | null;
+  currentDate: string;
+  currentSerial: number;
+  writtenBytes: number;
+  /** setLogDir 之前的日志先存内存,绑定后 flush */
+  pending: PendingEntry[];
+}
+
 let logDir: string | null = null;
 let minLevel: Level = 'info';
-let stream: WriteStream | null = null;
-let currentDate = '';
-let currentSerial = 0;
-let writtenBytes = 0;
 const LOG_FILE_SIZE_LIMIT = 5 * 1024 * 1024; // 5 MB
 const LOG_FILE_KEEP_DAYS = 7;
-
-// setLogDir 之前的日志先存内存,绑定后 flush(避免启动期日志丢失)
-const pending: PendingEntry[] = [];
 const PENDING_LIMIT = 500;
+
+function makeChannelState(filePrefix: string): ChannelState {
+  return {
+    filePrefix,
+    stream: null,
+    currentDate: '',
+    currentSerial: 0,
+    writtenBytes: 0,
+    pending: [],
+  };
+}
+
+const channels: Record<Channel, ChannelState> = {
+  main: makeChannelState('main'),
+  llm: makeChannelState('llm'),
+};
 
 function todayStr(): string {
   const d = new Date();
@@ -58,40 +85,40 @@ function todayStr(): string {
   return `${y}-${m}-${day}`;
 }
 
-function fileName(date: string, serial: number): string {
-  return serial === 0 ? `main-${date}.log` : `main-${date}.${serial}.log`;
+function fileName(prefix: string, date: string, serial: number): string {
+  return serial === 0 ? `${prefix}-${date}.log` : `${prefix}-${date}.${serial}.log`;
 }
 
-async function ensureStream(): Promise<void> {
+async function ensureStream(ch: ChannelState): Promise<void> {
   if (!logDir) return;
   const date = todayStr();
-  if (date !== currentDate) {
-    stream?.end();
-    stream = null;
-    currentDate = date;
-    currentSerial = 0;
-    writtenBytes = 0;
+  if (date !== ch.currentDate) {
+    ch.stream?.end();
+    ch.stream = null;
+    ch.currentDate = date;
+    ch.currentSerial = 0;
+    ch.writtenBytes = 0;
   }
-  if (writtenBytes >= LOG_FILE_SIZE_LIMIT && stream) {
-    stream.end();
-    stream = null;
-    currentSerial += 1;
-    writtenBytes = 0;
+  if (ch.writtenBytes >= LOG_FILE_SIZE_LIMIT && ch.stream) {
+    ch.stream.end();
+    ch.stream = null;
+    ch.currentSerial += 1;
+    ch.writtenBytes = 0;
   }
-  if (!stream) {
+  if (!ch.stream) {
     try {
       await fs.mkdir(logDir, { recursive: true });
     } catch {
       /* ignore */
     }
-    const fp = join(logDir, fileName(date, currentSerial));
+    const fp = join(logDir, fileName(ch.filePrefix, date, ch.currentSerial));
     try {
       const stat = await fs.stat(fp);
-      writtenBytes = stat.size;
+      ch.writtenBytes = stat.size;
     } catch {
-      writtenBytes = 0;
+      ch.writtenBytes = 0;
     }
-    stream = createWriteStream(fp, { flags: 'a', encoding: 'utf8' });
+    ch.stream = createWriteStream(fp, { flags: 'a', encoding: 'utf8' });
   }
 }
 
@@ -116,54 +143,93 @@ function format(entry: PendingEntry): string {
   return `${head} ${parts.join(' ')}\n`;
 }
 
-async function write(entry: PendingEntry): Promise<void> {
+async function write(
+  channel: Channel,
+  entry: PendingEntry,
+  mirrorConsole: boolean,
+): Promise<void> {
   if (LEVEL_ORDER[entry.level] < LEVEL_ORDER[minLevel]) return;
-  // console 镜像(始终,因为 dev / 启动期诊断需要)
-  const text = format(entry).trimEnd();
-  const consoleLog =
-    entry.level === 'error'
-      ? console.error
-      : entry.level === 'warn'
-        ? console.warn
-        : console.log;
-  consoleLog(text);
+  // console 镜像:main 通道始终 mirror(dev / 启动期诊断需要);
+  // llm 通道明确不 mirror(条目过大,会刷屏 dev console)。
+  if (mirrorConsole) {
+    const text = format(entry).trimEnd();
+    const consoleLog =
+      entry.level === 'error'
+        ? console.error
+        : entry.level === 'warn'
+          ? console.warn
+          : console.log;
+    consoleLog(text);
+  }
 
+  const ch = channels[channel];
   if (!logDir) {
-    if (pending.length < PENDING_LIMIT) pending.push(entry);
+    if (ch.pending.length < PENDING_LIMIT) ch.pending.push(entry);
     return;
   }
-  await ensureStream();
-  if (!stream) return;
+  await ensureStream(ch);
+  if (!ch.stream) return;
   const line = format(entry);
-  stream.write(line);
-  writtenBytes += Buffer.byteLength(line, 'utf8');
+  ch.stream.write(line);
+  ch.writtenBytes += Buffer.byteLength(line, 'utf8');
 }
 
-function log(level: Level, module: string, message: string, ...extra: unknown[]): void {
-  void write({ level, module, message, ts: Date.now(), extra });
+function log(
+  channel: Channel,
+  level: Level,
+  module: string,
+  message: string,
+  ...extra: unknown[]
+): void {
+  // RES-2:write 内部 await ensureStream() 可能因 fs.mkdir 失败抛错
+  // (磁盘满 / 权限 / 路径过长)。原先 `void write(...)` 会把 rejected
+  // Promise 抛丢,故障静默。这里捕获并直接 console.error,至少 dev /
+  // 启动期能看到一条诊断信息。
+  const mirrorConsole = channel === 'main';
+  void write(
+    channel,
+    { level, module, message, ts: Date.now(), extra },
+    mirrorConsole,
+  ).catch((err) => {
+    try {
+      console.error('[logger] write failed:', err);
+    } catch {
+      /* ignore — console 也坏了就只能放弃 */
+    }
+  });
 }
 
 export const logger = {
   debug: (module: string, message: string, ...extra: unknown[]): void =>
-    log('debug', module, message, ...extra),
+    log('main', 'debug', module, message, ...extra),
   info: (module: string, message: string, ...extra: unknown[]): void =>
-    log('info', module, message, ...extra),
+    log('main', 'info', module, message, ...extra),
   warn: (module: string, message: string, ...extra: unknown[]): void =>
-    log('warn', module, message, ...extra),
+    log('main', 'warn', module, message, ...extra),
   error: (module: string, message: string, ...extra: unknown[]): void =>
-    log('error', module, message, ...extra),
+    log('main', 'error', module, message, ...extra),
+
+  /**
+   * LLM 排障日志 — 写 `llm-YYYY-MM-DD.log`,不进主日志,不 mirror console。
+   * 永远 info 级(LLM 调用整条 prompt+res 就是排障证据,不分等级)。
+   * 用途:AI 状态复核 prompt/raw response/verdict、testConnection 详情等。
+   */
+  llm: (module: string, message: string, ...extra: unknown[]): void =>
+    log('llm', 'info', module, message, ...extra),
 
   /** 绑定日志目录;调用之前的日志会缓存到内存,绑定后批量 flush。 */
   async setLogDir(dir: string): Promise<void> {
     logDir = dir;
-    await ensureStream();
-    // flush pending
-    const flushed = pending.splice(0, pending.length);
-    for (const e of flushed) {
-      if (LEVEL_ORDER[e.level] < LEVEL_ORDER[minLevel]) continue;
-      const line = format(e);
-      stream?.write(line);
-      writtenBytes += Buffer.byteLength(line, 'utf8');
+    // 两个通道都建流并 flush 各自的 pending
+    for (const ch of Object.values(channels)) {
+      await ensureStream(ch);
+      const flushed = ch.pending.splice(0, ch.pending.length);
+      for (const e of flushed) {
+        if (LEVEL_ORDER[e.level] < LEVEL_ORDER[minLevel]) continue;
+        const line = format(e);
+        ch.stream?.write(line);
+        ch.writtenBytes += Buffer.byteLength(line, 'utf8');
+      }
     }
     // 启动时清理 > LOG_FILE_KEEP_DAYS 的旧文件(best effort)
     void this.purgeOld().catch(() => {});
@@ -174,24 +240,36 @@ export const logger = {
   },
 
   async flush(): Promise<void> {
-    await new Promise<void>((resolve) => {
-      if (!stream) {
-        resolve();
-        return;
-      }
-      // WriteStream.write 是异步的,end 之后才能保证完全 flush
-      // 但我们不能 end stream(否则下次写需要重建),改用 nextTick 让事件循环走一圈
-      setImmediate(() => resolve());
-    });
+    // RES-1:setImmediate 只是让出一个事件循环 tick,与 fs flush 无关 —
+    // WriteStream 内部 buffer 可能还有几行未落盘。这里写一个空字符串并
+    // 等 write 的 callback,callback 在 buffer flush 到 OS 后触发。
+    // 不 end() stream(否则下次写需要重建)。错误吞掉:flush 在 quit
+    // 路径调用,即便落盘失败也不能阻塞退出。
+    await Promise.all(
+      Object.values(channels).map((ch) => {
+        const s = ch.stream;
+        if (!s) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          try {
+            s.write('', () => resolve());
+          } catch {
+            resolve();
+          }
+        });
+      }),
+    );
   },
 
   async purgeOld(): Promise<void> {
     if (!logDir) return;
     const cutoff = Date.now() - LOG_FILE_KEEP_DAYS * 24 * 3600 * 1000;
+    const prefixes = Object.values(channels).map((c) => c.filePrefix);
     try {
       const entries = await fs.readdir(logDir);
       for (const name of entries) {
-        if (!name.startsWith('main-') || !name.endsWith('.log')) continue;
+        if (!name.endsWith('.log')) continue;
+        // 只清理已注册通道的文件,避免误删用户/其它工具丢进来的同名文件
+        if (!prefixes.some((p) => name.startsWith(`${p}-`))) continue;
         const fp = join(logDir, name);
         try {
           const st = await fs.stat(fp);
@@ -208,13 +286,15 @@ export const logger = {
   },
 
   _resetForTest(): void {
-    stream?.end();
-    stream = null;
+    for (const ch of Object.values(channels)) {
+      ch.stream?.end();
+      ch.stream = null;
+      ch.currentDate = '';
+      ch.currentSerial = 0;
+      ch.writtenBytes = 0;
+      ch.pending.length = 0;
+    }
     logDir = null;
     minLevel = 'info';
-    currentDate = '';
-    currentSerial = 0;
-    writtenBytes = 0;
-    pending.length = 0;
   },
 };

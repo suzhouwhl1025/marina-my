@@ -158,11 +158,17 @@ That's it. That's the product.
 - Tab drag-and-drop reordering
 - Tab tear-out to new window
 
-### V2.0 (Community-Driven)
+### V1.6 (In Planning — Beta Feedback Round)
 
-- macOS support
-- Linux support
+- **Linux support** (Ubuntu 22.04 GNOME as Tier 1; Fedora / CentOS Stream 9 / RHEL 9 as Tier 2 via `.rpm` + AppImage). No system-tray dependency on GNOME — Marina runs as a regular desktop app on Linux (`lifecycleModel: 'no-persistence'`), with a blocking modal on last-window-close when sessions are still running. File-manager integration via freedesktop standards (`.desktop` + `Categories=TerminalEmulator` + gsettings + update-alternatives), no Nautilus extension required. See [ADR-013](docs/软件定义书.md#adr-013) and [BETA-003](docs/beta反馈工单库-20260515.md#beta-003--linux-支持方案-a无托盘普通桌面-app).
+- i18n (Chinese + English)
+- AI assistant settings page (foundation for LLM status recheck)
+
+### V2.0 (Community / Long-Term)
+
+- macOS support (`lifecycleModel: 'dock-resident'`, native HIG)
 - WSL session integration
+- (Candidate) Daemon architecture — splitting Electron main into a background daemon + UI viewer, enabling sessions to survive UI crashes and updates across all three platforms. Not committed; evaluation window when crash/upgrade session loss becomes a frequent issue.
 
 ## Architecture (TL;DR)
 
@@ -193,12 +199,11 @@ npm test         # runs the backend test suite
 
 ## Help Wanted
 
-Marina is built and maintained by one person, currently focused on Windows. **The architecture is intentionally cross-platform-ready** — see [`src/main/platform/`](src/main/platform/) — but I won't be implementing or testing other platforms myself. Contributions are deeply appreciated:
+Marina is built and maintained by one person. **The architecture is intentionally cross-platform-ready** — see [`src/main/platform/`](src/main/platform/) and the `PlatformAdapter.lifecycleModel` field. Linux support is being implemented by the author for v1.6; macOS and other platforms are open for contributions:
 
 ### High Priority
 
-- [ ] **macOS support** — implement `src/main/platform/macos.ts`
-- [ ] **Linux support** — implement `src/main/platform/linux.ts`
+- [ ] **macOS support** — implement `src/main/platform/macos.ts` with `lifecycleModel: 'dock-resident'`. Electron's `window-all-closed` darwin default already aligns with macOS HIG (app stays in Dock); the cross-platform `<LastSessionConfirm />` modal should trigger on `Cmd+Q` / App Menu Quit when non-exited sessions exist.
 - [ ] **WSL session integration**
 
 ### Medium Priority

@@ -63,6 +63,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { Check, Maximize2, Minimize2, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
   EVENT_CHANNELS,
@@ -78,7 +79,39 @@ import { Icon } from './icons';
 import { useContextMenuApi, type ContextMenuItem } from './ContextMenu';
 import { useToast } from './Toast';
 import { useModal } from './Modal';
+import { useTranslation } from './LanguageProvider';
 import '@xterm/xterm/css/xterm.css';
+
+/**
+ * 浅色主题的 ANSI 256 色扩展表(索引 16-255,共 240 项)。
+ * 不设置时 xterm 用内置 240 色——按深色背景调的灰阶,232-255 上半段在浅底
+ * 上对比度 < 3:1,Claude Code 等 CLI 发 `\x1b[38;5;245m` dim 字会几乎不可见。
+ *
+ * 这里:
+ *   - 16-231 保留标准 xterm 6×6×6 cube(饱和色在浅底上一般够看,边缘 case
+ *     由 minimumContrastRatio 兜底)
+ *   - 232-255 灰阶斜率 *10 → *4,即 [#080808, #eeeeee] 压成 [#080808, #707070],
+ *     所有灰阶在 #fff8fb / #faf4ed 浅底上保持 ≥ 4.5:1
+ */
+function buildLightExtendedAnsi(): string[] {
+  const hex = (n: number) => n.toString(16).padStart(2, '0');
+  const rgb = (r: number, g: number, b: number) => `#${hex(r)}${hex(g)}${hex(b)}`;
+  const cube = [0, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+  const out: string[] = [];
+  for (let r = 0; r < 6; r++) {
+    for (let g = 0; g < 6; g++) {
+      for (let b = 0; b < 6; b++) {
+        out.push(rgb(cube[r], cube[g], cube[b]));
+      }
+    }
+  }
+  for (let n = 232; n <= 255; n++) {
+    const v = 8 + (n - 232) * 4;
+    out.push(rgb(v, v, v));
+  }
+  return out;
+}
+const LIGHT_EXTENDED_ANSI = buildLightExtendedAnsi();
 
 /**
  * 7 套主题对应的 xterm theme 颜色 (软件定义书 5.1.9)。
@@ -110,6 +143,11 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightWhite: '#e0def4',
   },
   'rose-pine-dawn': {
+    // BETA-035:浅底色下 ANSI bright 集对比度调到 WCAG AA(≥4.5:1)。
+    // 用户报告 Claude Code 在浅色主题下出现"浅底白字",根因是 brightBlack
+    // (常用于 dimmed 文字)对 #faf4ed 仅 ~3.0:1,brightYellow ~2.5:1。
+    // 这里把 brightBlack / brightYellow / brightCyan 调暗,其它 bright 项
+    // 保持与 normal 同色(Rose Pine Dawn 官方设计就是 bright=normal)。
     background: '#faf4ed',
     foreground: '#575279',
     cursor: '#575279',
@@ -123,14 +161,19 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     magenta: '#907aa9',
     cyan: '#d7827e',
     white: '#575279',
-    brightBlack: '#9893a5',
+    // 以下三项 BETA-035 调整后的对比度估算(对 #faf4ed):
+    // brightBlack #5e5a73:~6:1   ✓(原 #9893a5 ~3.0:1)
+    // brightYellow #a36e10:~5:1  ✓(原 #ea9d34 ~2.5:1)
+    // brightCyan #a35a55:~5:1    ✓(原 #d7827e ~3.0:1)
+    brightBlack: '#5e5a73',
     brightRed: '#b4637a',
     brightGreen: '#286983',
-    brightYellow: '#ea9d34',
+    brightYellow: '#a36e10',
     brightBlue: '#56949f',
     brightMagenta: '#907aa9',
-    brightCyan: '#d7827e',
+    brightCyan: '#a35a55',
     brightWhite: '#575279',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
   },
   'rose-pine-moon': {
     background: '#232136',
@@ -156,27 +199,30 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightWhite: '#e0def4',
   },
   cutie: {
-    background: '#fff5f9',
-    foreground: '#6b2e4f',
-    cursor: '#ff5d9e',
-    cursorAccent: '#fff5f9',
-    selectionBackground: '#ffccdf',
-    black: '#ffd9e8',
-    red: '#ff5d9e',
-    green: '#6fcf97',
-    yellow: '#ffb86b',
-    blue: '#6ec0e8',
-    magenta: '#c77dff',
-    cyan: '#7ad7d7',
-    white: '#6b2e4f',
-    brightBlack: '#b8809e',
-    brightRed: '#ff4d8d',
-    brightGreen: '#5dc488',
-    brightYellow: '#ffa54a',
-    brightBlue: '#5db4e0',
-    brightMagenta: '#b866f5',
-    brightCyan: '#65cbcb',
-    brightWhite: '#4a1a36',
+    // 樱花奶昔(Sakura Milk):奶白底 + 莓系深色文字,与 global.css [data-theme='cutie'] 一致;
+    // 所有 ANSI 色对 #fff8fb 背景对比度 ≥ 4.5:1(BETA-035 浅色标准)
+    background: '#fff8fb',
+    foreground: '#5c1d3e',
+    cursor: '#e91e63',
+    cursorAccent: '#fff8fb',
+    selectionBackground: '#f5c3d3',
+    black: '#5c1d3e',
+    red: '#c81258',
+    green: '#4d8a5e',
+    yellow: '#b8682e',
+    blue: '#7665b8',
+    magenta: '#b8347e',
+    cyan: '#4d7d9e',
+    white: '#5c1d3e',
+    brightBlack: '#8a4566',
+    brightRed: '#a8124a',
+    brightGreen: '#3a6b48',
+    brightYellow: '#8f4f1c',
+    brightBlue: '#5a4b96',
+    brightMagenta: '#9c2868',
+    brightCyan: '#3a6480',
+    brightWhite: '#3d0f28',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
   },
   business: {
     background: '#1d2733',
@@ -247,19 +293,127 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightCyan: '#61d6d6',
     brightWhite: '#f2f2f2',
   },
+  // BETA-033 — One Dark Pro (官方调色板)
+  'one-dark-pro': {
+    background: '#282c34',
+    foreground: '#abb2bf',
+    cursor: '#528bff',
+    cursorAccent: '#282c34',
+    selectionBackground: '#3e4451',
+    black: '#282c34',
+    red: '#e06c75',
+    green: '#98c379',
+    yellow: '#e5c07b',
+    blue: '#61afef',
+    magenta: '#c678dd',
+    cyan: '#56b6c2',
+    white: '#abb2bf',
+    brightBlack: '#5c6370',
+    brightRed: '#e06c75',
+    brightGreen: '#98c379',
+    brightYellow: '#e5c07b',
+    brightBlue: '#61afef',
+    brightMagenta: '#c678dd',
+    brightCyan: '#56b6c2',
+    brightWhite: '#ffffff',
+  },
+  // BETA-033 — Dracula (官方调色板)
+  dracula: {
+    background: '#282a36',
+    foreground: '#f8f8f2',
+    cursor: '#f8f8f2',
+    cursorAccent: '#282a36',
+    selectionBackground: '#44475a',
+    black: '#21222c',
+    red: '#ff5555',
+    green: '#50fa7b',
+    yellow: '#f1fa8c',
+    blue: '#bd93f9',
+    magenta: '#ff79c6',
+    cyan: '#8be9fd',
+    white: '#f8f8f2',
+    brightBlack: '#6272a4',
+    brightRed: '#ff6e6e',
+    brightGreen: '#69ff94',
+    brightYellow: '#ffffa5',
+    brightBlue: '#d6acff',
+    brightMagenta: '#ff92df',
+    brightCyan: '#a4ffff',
+    brightWhite: '#ffffff',
+  },
+  // BETA-033 — Tokyo Night (官方调色板)
+  'tokyo-night': {
+    background: '#1a1b26',
+    foreground: '#c0caf5',
+    cursor: '#c0caf5',
+    cursorAccent: '#1a1b26',
+    selectionBackground: '#283457',
+    black: '#15161e',
+    red: '#f7768e',
+    green: '#9ece6a',
+    yellow: '#e0af68',
+    blue: '#7aa2f7',
+    magenta: '#bb9af7',
+    cyan: '#7dcfff',
+    white: '#a9b1d6',
+    brightBlack: '#414868',
+    brightRed: '#f7768e',
+    brightGreen: '#9ece6a',
+    brightYellow: '#e0af68',
+    brightBlue: '#7aa2f7',
+    brightMagenta: '#bb9af7',
+    brightCyan: '#7dcfff',
+    brightWhite: '#c0caf5',
+  },
+  // BETA-033 — Catppuccin Mocha (官方调色板)
+  'catppuccin-mocha': {
+    background: '#1e1e2e',
+    foreground: '#cdd6f4',
+    cursor: '#f5e0dc',
+    cursorAccent: '#1e1e2e',
+    selectionBackground: '#585b70',
+    black: '#45475a',
+    red: '#f38ba8',
+    green: '#a6e3a1',
+    yellow: '#f9e2af',
+    blue: '#89b4fa',
+    magenta: '#f5c2e7',
+    cyan: '#94e2d5',
+    white: '#bac2de',
+    brightBlack: '#585b70',
+    brightRed: '#f38ba8',
+    brightGreen: '#a6e3a1',
+    brightYellow: '#f9e2af',
+    brightBlue: '#89b4fa',
+    brightMagenta: '#f5c2e7',
+    brightCyan: '#94e2d5',
+    brightWhite: '#a6adc8',
+  },
 };
 
 function getXtermTheme(themeId: ThemeId | undefined): ITheme {
   return XTERM_THEMES[themeId ?? 'rose-pine'] ?? XTERM_THEMES['rose-pine'];
 }
 
+/**
+ * 是否浅色主题 — 通过 extendedAnsi 引用相等判定(填了 LIGHT_EXTENDED_ANSI
+ * 的主题就是浅色)。配合 minimumContrastRatio,只在浅色主题打开对比度兜底,
+ * 避免无差别加深破坏深色主题里故意调淡的颜色(如 prompt hint、git diff
+ * context 行等)。
+ */
+function isLightTheme(themeId: ThemeId | undefined): boolean {
+  return getXtermTheme(themeId).extendedAnsi === LIGHT_EXTENDED_ANSI;
+}
+const LIGHT_THEME_MIN_CONTRAST = 4.5;
+
 interface TerminalViewProps {
   /**
-   * 必须满足 session.ownerWindowId === myWindowId — 父组件 MainPane 通过
+   * 必须满足 session.ownerWindowId === state.myWindowId — 父组件 MainPane 通过
    * getDisplayableSession 强制保证。这里不再做 isOwner=false 的占位 UI。
+   * (myWindowId prop 已删除:本窗口生命周期内不变,不参与 effect deps;
+   *  契约由父组件强制,不需要在本组件运行时再判断。)
    */
   session: SessionInfo;
-  myWindowId: string;
 }
 
 /**
@@ -287,7 +441,7 @@ function focusTerminal(
   termRef.current?.focus();
 }
 
-export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.Element {
+export function TerminalView({ session }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -295,6 +449,8 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
 
   const appState = useAppState();
   const dispatch = useAppDispatch();
+  const { t } = useTranslation();
+  const simpleMode = appState.simpleMode;
   const themeId = appState.settings.appearance?.theme;
   const fontSize = appState.settings.appearance?.terminalFontSize ?? 13;
   const fontFamily =
@@ -433,11 +589,16 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
 
       // bracketed paste 禁用 + 多行 → 走旧 confirm 兜底
       if (!bracketedPaste) {
-        // CPB-P3:trim 末尾换行后再算行数,避免 "ls\n" 这种单行带尾换行
-        // 被算作 2 行误触发 confirm
-        const normalized = text.replace(/\r\n?/g, '\n').replace(/\n$/, '');
-        const lineCount = normalized.split('\n').length;
+        // BETA-041:CPB-P3 原版 trim 用 .replace(/\n$/, '') 只剥一个尾换行,
+        // "ls\n\n" 仍被算成 2 行误触发 confirm。改为 split 后弹出所有尾部
+        // 空行,逻辑显式可读、不漏 case。
+        const lines = text.split(/\r\n|\r|\n/);
+        while (lines.length > 0 && lines[lines.length - 1] === '') {
+          lines.pop();
+        }
+        const lineCount = lines.length;
         if (lineCount > 1) {
+          const normalized = lines.join('\n');
           const previewRaw =
             normalized.length > 200
               ? normalized.slice(0, 200) + '…'
@@ -488,6 +649,27 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     });
   }, []);
 
+  // BETA-028:终端工具栏通过 window CustomEvent 触达本组件 — 清屏 / 唤搜索栏。
+  // detail.sessionId 必须匹配本实例的 session,否则忽略(多窗口时只有持有者响应)。
+  useEffect(() => {
+    const onClear = (e: Event): void => {
+      const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
+      if (sid && sid !== session.id) return;
+      handleClear();
+    };
+    const onOpenSearch = (e: Event): void => {
+      const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
+      if (sid && sid !== session.id) return;
+      handleOpenSearch();
+    };
+    window.addEventListener('marina:terminal-clear', onClear);
+    window.addEventListener('marina:terminal-open-search', onOpenSearch);
+    return () => {
+      window.removeEventListener('marina:terminal-clear', onClear);
+      window.removeEventListener('marina:terminal-open-search', onOpenSearch);
+    };
+  }, [session.id, handleClear, handleOpenSearch]);
+
   const handleCloseSearch = useCallback(() => {
     // 先清掉 SearchAddon 的高亮,否则关搜索栏后高亮还残留
     try {
@@ -522,11 +704,30 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     else search.findPrevious(text, opts);
   }, []);
 
+  // handlers 镜像到 ref:attachCustomKeyEventHandler 在 mount effect 内一次性
+  // 注册,deps 只 [session.id];直接闭包 handle* useCallback 会锁住"挂载那
+  // 一刻"的版本,后续 bracketedPaste / modal / rightClickMode 等设置变化
+  // 重建出的新 handle* 永远进不来 → Ctrl+Shift+V 不跟设置走(P1-1)。
+  // 同 toastRef 模式:每次渲染镜像当前函数,事件回调读 ref.current 即最新。
+  const handlersRef = useRef({
+    handleCopy,
+    handlePaste,
+    handleClear,
+    handleOpenSearch,
+    handleCloseSearch,
+  });
+  handlersRef.current = {
+    handleCopy,
+    handlePaste,
+    handleClear,
+    handleOpenSearch,
+    handleCloseSearch,
+  };
+
   // ── xterm 实例生命周期 ──
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-    void myWindowId;
 
     const term = new Terminal({
       fontFamily,
@@ -535,6 +736,11 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       cursorBlink: true,
       cursorStyle: 'bar',
       theme: initialTheme,
+      // 浅色主题打开 WCAG AA 对比度兜底:Claude Code 等 CLI 用 ANSI 256(走
+      // extendedAnsi)与 24-bit truecolor 输出 dim 字时,即使主题填了浅色调色板,
+      // 仍可能出现"浅底浅字"边缘 case;这里在浅色主题渲染层强制 ≥ 4.5:1。深色
+      // 主题保持默认 1(不干预),避免破坏深色场景里精心调淡的视觉层级。
+      minimumContrastRatio: isLightTheme(themeId) ? LIGHT_THEME_MIN_CONTRAST : 1,
       scrollback: 5000,
       // SearchAddon 的 registerDecoration 走 proposed API,关闭就触发
       // "You must set allowProposedApi option to true" → 错误边界。
@@ -601,10 +807,12 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       if (ev.isComposing || ev.keyCode === 229) return true;
       const isMod = ev.ctrlKey || ev.metaKey;
       const key = ev.key.toLowerCase();
+      // 走 ref 取最新 handler — bracketedPaste/modal 等设置变化时仍生效(P1-1)
+      const h = handlersRef.current;
 
       // Ctrl+F (Cmd+F on macOS) → 唤出搜索栏 — 仅在没 alt/shift 修饰时触发
       if (isMod && !ev.altKey && !ev.shiftKey && key === 'f') {
-        handleOpenSearch();
+        h.handleOpenSearch();
         return false;
       }
 
@@ -616,15 +824,15 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       if (isMod && !ev.altKey) {
         const hasSel = !!termRef.current?.getSelection();
         if (ev.shiftKey && key === 'c') {
-          if (hasSel) handleCopy();
+          if (hasSel) h.handleCopy();
           return false;
         }
         if (!ev.shiftKey && ev.key === 'Insert') {
-          if (hasSel) handleCopy();
+          if (hasSel) h.handleCopy();
           return false;
         }
         if (!ev.shiftKey && key === 'c' && hasSel) {
-          handleCopy();
+          h.handleCopy();
           // CPB-C3:Ctrl+C 复制后立即清选区 — 否则用户运行死循环想
           // Ctrl+C 终止时,前一次拖选的残留 selection 让 hasSel=true,
           // Ctrl+C 永远走"复制"分支不发 ^C → 程序停不下来。清掉
@@ -634,19 +842,19 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         }
         // 粘贴:Ctrl+Shift+V
         if (ev.shiftKey && key === 'v') {
-          void handlePaste();
+          void h.handlePaste();
           return false;
         }
       }
       // 粘贴:Shift+Insert(无 Ctrl)
       if (ev.shiftKey && !isMod && !ev.altKey && ev.key === 'Insert') {
-        void handlePaste();
+        void h.handlePaste();
         return false;
       }
 
       // Esc:仅在搜索栏可见时拦截 — 否则 Esc 应正常透传给终端 (vim 等需要)
       if (ev.key === 'Escape' && searchVisibleRef.current) {
-        handleCloseSearch();
+        h.handleCloseSearch();
         return false;
       }
       return true; // 其他键交给 xterm 默认处理
@@ -670,7 +878,63 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       },
     );
 
+    // BETA-019 workaround:alt-screen buffer (TUI 应用如 Claude Code / vim /
+    // htop / aider) 内关闭 cursorBlink,主 buffer (shell prompt) 内开启。
+    //
+    // 用户报告 Claude Code 跑一段时间后,自绘 spinner 重绘字符的末尾出现闪烁
+    // 输入光标。深入排查(详见 BETA-019 工单)未能定位根因 — patch
+    // `coreService.isCursorHidden` setter 抓 stack trace 显示 bug 时段并无异常
+    // 翻转,排除了 DECSTR / RIS / setMode/resetMode 路径污染的所有候选。
+    // 暂以业界通行启发式 workaround 兜底:alt buffer 期 = TUI 应用自管光标,
+    // 终端层闪烁仅徒增干扰。Windows Terminal / iTerm2 / kitty 同此策略。
+    //
+    // exited 态由 FLK-10 effect 设 cursorStyle='underline' 标识,此时 PTY 已死,
+    // 不再有 buffer 切换,只读 cursorStyle 即可跳过(避免与 FLK-10 互相覆盖)。
+    const bufferChangeDisposable = term.buffer.onBufferChange(() => {
+      if (term.options.cursorStyle === 'underline') return;
+      term.options.cursorBlink = term.buffer.active.type === 'normal';
+    });
+
     term.open(container);
+
+    // [IME-1 PROBE B] 临时探针:追踪 helper-textarea 的 composition 时序与
+    // keydown 229 事件,用来定位"中文 IME 按标点冲刷历史"的触发路径。
+    // 拿到 1-2 次真实复现日志后整体移除(连同 onData 内的 PROBE A)。
+    // 不挂 cleanup:listener 随 term.dispose() 移除 textarea 一起被 GC。
+    try {
+      const helperTa = container.querySelector(
+        '.xterm-helper-textarea',
+      ) as HTMLTextAreaElement | null;
+      if (helperTa) {
+        const trace = (tag: string) => (e: Event) => {
+          console.warn('[IME-EV]', {
+            t: performance.now().toFixed(1),
+            ev: tag,
+            data: (e as CompositionEvent).data ?? '',
+            taLen: helperTa.value.length,
+            taTail: helperTa.value.slice(-40),
+          });
+        };
+        helperTa.addEventListener('compositionstart', trace('start'));
+        helperTa.addEventListener('compositionupdate', trace('update'));
+        helperTa.addEventListener('compositionend', trace('end'));
+        helperTa.addEventListener('keydown', (e) => {
+          // 微软拼音标点 auto-convert 走 keyCode 229 + !isComposing 路径,
+          // 不经过 compositionstart — 只能从 keydown 抓
+          if (e.keyCode === 229) {
+            console.warn('[IME-EV]', {
+              t: performance.now().toFixed(1),
+              ev: 'kd229',
+              key: e.key,
+              taLen: helperTa.value.length,
+              taTail: helperTa.value.slice(-40),
+            });
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('[IME-1 PROBE B] attach failed', err);
+    }
 
     // PER-1:term.open 之后才能 load WebGL addon(需 canvas DOM 节点)。
     // try/catch 兜底:某些虚拟机 / 无 GPU 加速环境下 WebGL context 创建
@@ -792,6 +1056,10 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         }
         pending = [];
         replayed = true;
+        // BETA-018:scrollback 重放完后立即滚到底。xterm 默认把分片 write 留在
+        // 顶部 viewport,用户看到的是"从上往下刷屏"。重放是同步内容回灌,
+        // 不是历史浏览,应当锚定底部。
+        term.scrollToBottom();
       })
       .catch((err) => {
         console.warn('[TerminalView] get-scrollback failed, falling back', err);
@@ -799,6 +1067,8 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
         for (const c of pending) term.write(c.bytes);
         pending = [];
         replayed = true;
+        // BETA-018:fallback 路径同样滚到底,保持 viewport 一致行为
+        term.scrollToBottom();
       });
 
     // ResizeObserver — trailing debounce 150ms (用户勘误后续 #4)
@@ -884,6 +1154,23 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
     // XTM-7:打字时若有待定 resize,先 flush 再发输入 — 拖窗 + 立刻打字
     // 场景下避免 PTY 用旧 cols/rows 处理 prompt 折行错位。
     const dataHandler = term.onData((data) => {
+      // [IME-1 PROBE A] 临时探针:正常一次 IME 提交基本 ≤ 6 字,> 20 字
+      // 强烈怀疑被 CompositionHelper 的 substring(start) 把 textarea 历史
+      // 一起冲刷出来。head/tail + textarea 末尾足以判断是否子串包含关系。
+      // 拿到证据后整体移除(连同 term.open 后的 PROBE B)。
+      if (data.length > 20) {
+        const ta = container.querySelector(
+          '.xterm-helper-textarea',
+        ) as HTMLTextAreaElement | null;
+        console.warn('[IME-LEAK]', {
+          t: performance.now().toFixed(1),
+          len: data.length,
+          head: data.slice(0, 60),
+          tail: data.slice(-30),
+          taLen: ta?.value.length ?? -1,
+          taTail: ta?.value.slice(-60) ?? '',
+        });
+      }
       if (resizeTimer !== null) {
         clearTimeout(resizeTimer);
         resizeTimer = null;
@@ -923,6 +1210,7 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       cleanupOutput();
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
+      bufferChangeDisposable.dispose();
       searchAddon.dispose();
       // PER-1:WebGL addon 必须在 term.dispose 之前释放,否则 GL context
       // 句柄泄漏(显存累积,大量切 session 后会触发显卡警告)
@@ -937,18 +1225,26 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       searchRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, myWindowId]);
+  }, [session.id]);
 
   // 主题运行时切换
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     term.options.theme = getXtermTheme(themeId);
+    term.options.minimumContrastRatio = isLightTheme(themeId)
+      ? LIGHT_THEME_MIN_CONTRAST
+      : 1;
   }, [themeId]);
 
   // FLK-10:session.state='exited' 时 stop 光标闪烁,避免"会话已死但光标
   // 在闪"误导用户以为还能交互(配合 TYP-1 的 toast,死后输入有可见反馈)。
   // 状态回到 active/idle 时(实际不会发生,exited 是终态)恢复闪。
+  //
+  // BETA-019 workaround:not-exited 分支同时读 buffer.type — 在 alt buffer
+  // (Claude Code 等 TUI) 内保持 blink=false。否则 session.state idle↔active
+  // 切换会反复把 blink 强制设回 true,覆盖 onBufferChange listener 的关闭设置。
+  // cursorStyle 仍用作"exited 标识位",mount effect 内 onBufferChange 读它判 exited。
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -956,8 +1252,8 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       term.options.cursorBlink = false;
       term.options.cursorStyle = 'underline';
     } else {
-      term.options.cursorBlink = true;
       term.options.cursorStyle = 'bar';
+      term.options.cursorBlink = term.buffer.active.type === 'normal';
     }
   }, [session.state]);
 
@@ -1075,19 +1371,10 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
 
   // Windows Terminal 风格:拖文件进终端 → 把(必要时引号包裹的)路径作为
   // 输入发回 PTY。多文件用空格分隔。
-  // 修复:此前 .terminal-host 不处理 drop,事件透传到 Chromium/Win11 默认行
-  // 为 — Win11 屏幕顶端会弹"拖放到此处以共享"系统浮层。
-  const handleTerminalDragOver = useCallback(
-    (e: ReactDragEvent<HTMLDivElement>) => {
-      // dragover 必须 preventDefault 才能让 drop 事件真正触发;同时设
-      // dropEffect 让光标显示 "copy" 而非 "禁止"。
-      e.preventDefault();
-      e.stopPropagation();
-      e.dataTransfer.dropEffect = 'copy';
-    },
-    [],
-  );
-
+  //
+  // F12(DROP-1 重构):dragover preventDefault + dropEffect 现由 App.tsx
+  // 的 window 监听器统一处理(看 data-drop-zone 属性识别本元素)。这里
+  // 只剩 drop 消费逻辑。
   const handleTerminalDrop = useCallback(
     async (e: ReactDragEvent<HTMLDivElement>) => {
       e.preventDefault();
@@ -1202,12 +1489,38 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
   return (
     <div className="terminal-wrapper">
       <div className="terminal-statusbar">
-        <span className={statusDotClass} />
+        <span className={statusDotClass}>
+          {session.state === 'exited' && session.exitCode === 0 && (
+            <Check size={8} className="status-dot-icon ok" />
+          )}
+          {session.state === 'exited' &&
+            typeof session.exitCode === 'number' &&
+            session.exitCode !== 0 && (
+              <X size={8} className="status-dot-icon fail" />
+            )}
+        </span>
         <span className="status-text">
           {session.displayName} · pid {session.pid > 0 ? session.pid : '—'}
           {session.state === 'exited' &&
             ` · 已退出 (exitCode=${session.exitCode ?? 0})`}
         </span>
+        <button
+          type="button"
+          className="status-simple-toggle"
+          onClick={() => dispatch({ type: 'view/toggle-simple-mode' })}
+          title={
+            simpleMode
+              ? t('terminal.toolbar.fromSimple')
+              : t('terminal.toolbar.toSimple')
+          }
+          aria-label={
+            simpleMode
+              ? t('terminal.toolbar.fromSimple')
+              : t('terminal.toolbar.toSimple')
+          }
+        >
+          {simpleMode ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
+        </button>
         <span
           className="status-cwd"
           title={
@@ -1224,9 +1537,9 @@ export function TerminalView({ session, myWindowId }: TerminalViewProps): JSX.El
       <div
         className="terminal-host"
         ref={containerRef}
+        data-drop-zone="files"
         onContextMenu={handleContextMenu}
         onWheel={handleWheel}
-        onDragOver={handleTerminalDragOver}
         onDrop={handleTerminalDrop}
       />
       {searchVisible && (

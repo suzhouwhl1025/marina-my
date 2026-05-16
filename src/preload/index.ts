@@ -80,8 +80,12 @@ const api = {
   windowNumber,
 
   /** 协议版本握手 — handshake 第一步 (ipc-protocol.md 第 4 章) */
-  getProtocolVersion: (): Promise<{ protocolVersion: number; buildVersion: string }> =>
-    invoke(COMMAND_CHANNELS.APP_GET_PROTOCOL_VERSION, undefined),
+  getProtocolVersion: (): Promise<{
+    protocolVersion: number;
+    buildVersion: string;
+    /** DEV-COEXIST 2026-05-16:dev / portable / installed,titlebar 后缀用 */
+    buildType: 'dev' | 'portable' | 'installed';
+  }> => invoke(COMMAND_CHANNELS.APP_GET_PROTOCOL_VERSION, undefined),
 
   /** 通用命令调用,channel 名从 @shared/protocol 取常量 */
   invoke,

@@ -17,12 +17,14 @@
  */
 import {
   memo,
+  useEffect,
   useState,
   useMemo,
   useRef,
   type DragEvent,
   type MouseEvent,
 } from 'react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
   type AddBookmarkResponse,
@@ -30,16 +32,19 @@ import {
   type PickFolderResponse,
 } from '@shared/protocol';
 import type { PathNode, SessionInfo } from '@shared/types';
+import { disambiguatePathNames } from '@shared/path-display';
+import { useTranslation } from './LanguageProvider';
 import {
   findMyOwnedSessionId,
   useAppDispatch,
   useAppState,
   useAppStateRef,
 } from '../store';
-import { writeClipboardText } from '../clipboard';
 import { Icon, type IconName } from './icons';
 import { useContextMenuApi, type ContextMenuItem } from './ContextMenu';
 import { useToast } from './Toast';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
+import { buildSessionContextMenu } from './sessionContextMenu';
 
 /**
  * 状态点颜色 (软件定义书 6.2.4 状态指示):
@@ -51,9 +56,9 @@ import { useToast } from './Toast';
  * 防止变量缺失渲染成黑色 (软件定义书 5.1.9)。
  */
 const STATE_DOT_COLOR: Record<SessionInfo['state'], string> = {
-  active: 'var(--pine, #f0f)',
-  idle: 'var(--gold, #f0f)',
-  exited: 'var(--muted, #f0f)',
+  active: 'var(--color-success, #f0f)',
+  idle: 'var(--color-warning, #f0f)',
+  exited: 'var(--color-text-muted, #f0f)',
 };
 
 // ──────────────────────────────────────────────────────────────────
@@ -65,6 +70,7 @@ export function Sidebar(): JSX.Element {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const toast = useToast();
+  const { t } = useTranslation();
   const [dragOver, setDragOver] = useState(false);
 
   const handlePickFolder = async (): Promise<void> => {
@@ -117,22 +123,66 @@ export function Sidebar(): JSX.Element {
     }
   };
 
-  const handleDragOver = (e: DragEvent<HTMLDivElement>): void => {
-    e.preventDefault();
-    e.stopPropagation();
+  /**
+   * F12(DROP-1 架构重构):拖拽决策全部收拢到 App.tsx 的 window 监听器。
+   * Sidebar 不再 preventDefault / 不再设 dropEffect — 那些事 window 统
+   * 一管,通过 `data-drop-zone="files"` 标记声明"我接受"。
+   *
+   * 本组件这里只剩两件事:
+   *   1. onDragOver 维护视觉态(.drag-over 高亮 + 居中浮卡)
+   *   2. onDrop 消费 files → IPC bookmark:add
+   *
+   * 心跳超时(F8 引入)仍然保留:拖出窗口 / ESC 时没有可靠的 dragleave,
+   * 靠"150ms 没收到下一个 dragover 就清视觉态"兜底。
+   */
+  const dragHeartbeatRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearDragOverSoon = (): void => {
+    if (dragHeartbeatRef.current) clearTimeout(dragHeartbeatRef.current);
+    dragHeartbeatRef.current = setTimeout(() => {
+      setDragOver(false);
+      dragHeartbeatRef.current = null;
+    }, 150);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (dragHeartbeatRef.current) clearTimeout(dragHeartbeatRef.current);
+    };
+  }, []);
+
+  /**
+   * 检查当前拖拽内容是否含文件。
+   * 注:Chromium 的 DataTransfer.types 在 dragover 阶段对 OS 文件拖拽稳定
+   * 返回包含 "Files" 的数组。非文件来源(终端选区 / 网页文本拖拽)不含。
+   * 仅用于视觉态门控 — 避免拖文本时也跳出"放下添加为收藏"的浮卡。
+   */
+  const isFileDrag = (e: DragEvent<HTMLElement>): boolean => {
+    const types = e.dataTransfer?.types;
+    if (!types) return false;
+    for (let i = 0; i < types.length; i++) {
+      if (types[i] === 'Files') return true;
+    }
+    return false;
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLElement>): void => {
+    // 注意:这里不调 preventDefault / 不设 dropEffect — App.tsx 的 window
+    // 监听器是唯一决策点(它会通过 data-drop-zone 属性识别本元素是 drop
+    // zone 并设 'copy')。本 handler 只为视觉反馈服务。
+    if (!isFileDrag(e)) return;
     setDragOver(true);
+    clearDragOverSoon();
   };
 
-  const handleDragLeave = (e: DragEvent<HTMLDivElement>): void => {
-    // 只在真正离开容器时清,避免子元素 dragenter 引起 flash
-    if (e.currentTarget === e.target) setDragOver(false);
-  };
-
-  const handleDrop = async (e: DragEvent<HTMLDivElement>): Promise<void> => {
+  const handleDrop = async (e: DragEvent<HTMLElement>): Promise<void> => {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
-    // Electron 把 OS 拖拽的文件信息放在 dataTransfer.files,带原生 path
+    if (dragHeartbeatRef.current) {
+      clearTimeout(dragHeartbeatRef.current);
+      dragHeartbeatRef.current = null;
+    }
     const files = Array.from(e.dataTransfer.files);
     for (const file of files) {
       // file.path 是 Electron 提供的扩展属性 (浏览器标准 File API 没有),
@@ -152,30 +202,43 @@ export function Sidebar(): JSX.Element {
   };
 
   return (
-    <aside className="sidebar">
-      <div
-        className={`sidebar-bookmarks-dropzone${dragOver ? ' drag-over' : ''}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={(e) => void handleDrop(e)}
-      >
+    <aside
+      className={`sidebar${dragOver ? ' drag-over' : ''}`}
+      data-drop-zone="files"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          dispatch({ type: 'view/select-path', pathId: null });
+        }
+      }}
+      onDragOver={handleDragOver}
+      onDrop={(e) => void handleDrop(e)}
+    >
+      {/* F11(beta 勘误2 续 v4):撤回 F9 inset box-shadow / F10 overlay border —
+          sidebar 紧贴窗口左/下边,Win11 窗口圆角会吃掉绝对定位元素 inset:0 的
+          左/下 2px 边框。改用纯背景洗涤区分 drag-over 态,浮卡居中作为主要
+          视觉锚,完全不依赖边框渲染。pointer-events:none + aria-hidden 不挡 drop。 */}
+      <div className="sidebar-drop-hint" aria-hidden="true">
+        <span className="sidebar-drop-hint-icon">📁</span>
+        <span className="sidebar-drop-hint-label">{t('sidebar.dropHint')}</span>
+      </div>
+      <div className="sidebar-bookmarks-dropzone">
         <Category
-          title="收藏"
+          title={t('sidebar.category.bookmark')}
           iconName="bookmark"
           paths={state.pathTree.bookmarks}
           actionLabel="+"
-          actionTitle="选择文件夹添加到收藏"
+          actionTitle={t('sidebar.addBookmark.title')}
           onAction={() => void handlePickFolder()}
         />
         <Category
-          title="临时"
+          title={t('sidebar.category.temporary')}
           iconName="clock"
           paths={state.pathTree.temporary}
           actionLabel="+"
-          actionTitle="选择文件夹并新建一个临时终端"
+          actionTitle={t('sidebar.addTemporary.title')}
           onAction={() => void handlePickFolderForTemp()}
         />
-        <Category title="最近" iconName="history" paths={state.pathTree.recent} />
+        <Category title={t('sidebar.category.recent')} iconName="history" paths={state.pathTree.recent} />
       </div>
       <div className="sidebar-footer">
         <button
@@ -209,6 +272,8 @@ function Category({
   actionTitle,
   onAction,
 }: CategoryProps): JSX.Element {
+  // BETA-014:同 category 内末级文件夹同名时自动补父目录区分;手动命名的不参与。
+  const displayNames = useMemo(() => disambiguatePathNames(paths), [paths]);
   return (
     <section className="sidebar-category">
       <header className="sidebar-category-header">
@@ -234,16 +299,29 @@ function Category({
         <p className="sidebar-empty">空</p>
       ) : (
         <ul className="sidebar-paths">
-          {paths.map((p) => (
-            <PathItem key={p.id} node={p} />
-          ))}
+          {paths.map((p) => {
+            const override = displayNames.get(p.id);
+            return (
+              <PathItem
+                key={p.id}
+                node={p}
+                {...(override !== undefined ? { displayNameOverride: override } : {})}
+              />
+            );
+          })}
         </ul>
       )}
     </section>
   );
 }
 
-function PathItem({ node }: { node: PathNode }): JSX.Element {
+function PathItem({
+  node,
+  displayNameOverride,
+}: {
+  node: PathNode;
+  displayNameOverride?: string;
+}): JSX.Element {
   const state = useAppState();
   const dispatch = useAppDispatch();
   const ctxMenu = useContextMenuApi();
@@ -255,7 +333,9 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
     [node.sessionIds, state.sessions],
   );
   const activeCount = sessions.length;
-  const displayName = node.displayName ?? lastSegmentOf(node.path);
+  // BETA-014:优先用 Category 算好的去重名;退到本节点 displayName / 末段
+  const displayName =
+    displayNameOverride ?? node.displayName ?? lastSegmentOf(node.path);
 
   // M1-C:行内重命名 (仅收藏支持)
   const [renaming, setRenaming] = useState(false);
@@ -329,17 +409,9 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
     }
   };
 
-  // M1-C:复制到剪贴板帮助器
-  // 勘误第二轮:走 main 端 Electron clipboard (绕开 web Permission 权限拒绝)
-  const copyToClipboard = (text: string, label: string): void => {
-    void writeClipboardText(text).then((ok) => {
-      toast.push(
-        ok
-          ? { kind: 'success', message: `已复制 ${label}` }
-          : { kind: 'error', message: '复制失败' },
-      );
-    });
-  };
+  // M1-C:复制到剪贴板 — 抽到 useCopyToClipboard hook(P2-11),
+  // Sidebar/MainPane/TerminalView 多处行为一致。
+  const copyToClipboard = useCopyToClipboard();
 
   // M1-C:右键菜单 — 按分类组装条目
   const handleContextMenu = (e: MouseEvent<HTMLDivElement>): void => {
@@ -450,21 +522,33 @@ function PathItem({ node }: { node: PathNode }): JSX.Element {
   };
 
   return (
-    <li className={`path-item${selected ? ' selected' : ''}`}>
+    <li className={`path-item${selected ? ' selected' : ''}${node.invalid ? ' invalid' : ''}`}>
       <div
         className="path-item-row"
         onClick={handleSelect}
         onDoubleClick={() => void handleDoubleClick()}
         onContextMenu={handleContextMenu}
-        title={node.path}
+        title={node.invalid ? `${node.path}\n⚠️ 路径不可访问` : node.path}
       >
+        {/*
+          F2(beta 勘误2):左侧固定 12px 槽位,按优先级选一个内容渲染 —
+          展开箭头(有会话时)> 警告 icon(invalid 时)> 透明 placeholder。
+          三种状态用同一个槽位,保证所有路径行的 name 文本起始 x 坐标一致,
+          解决了 invalid 行 ⚠️ 把后续文字往右顶导致与其他行不对齐的问题。
+          有会话且 invalid 的极少数情况(session 创建后路径被删):展开
+          箭头优先,⚠️ 通过 title tooltip 提示。
+        */}
         {sessions.length > 0 ? (
           <span
-            className={`path-expand-arrow${expanded ? ' expanded' : ''}`}
+            className="path-expand-arrow"
             onClick={handleToggleExpand}
             aria-label={expanded ? '收起' : '展开'}
           >
-            ▶
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </span>
+        ) : node.invalid ? (
+          <span className="path-expand-arrow path-invalid-slot" aria-label="路径不可访问">
+            <AlertTriangle size={12} className="path-invalid-icon" />
           </span>
         ) : (
           <span className="path-expand-arrow placeholder" />
@@ -572,89 +656,29 @@ function SessionItemImpl({
       );
   };
 
-  // 勘误第二轮:走 main 端 Electron clipboard (绕开 web Permission 权限拒绝)。
-  // Sidebar 里有两个同名 helper(PathItem 与 SessionItem),早一处已迁移,这处
-  // 漏掉了 → 用户右键 session 复制 PID/cwd 仍走 navigator.clipboard 静默 reject。
-  const copyToClipboard = (text: string, label: string): void => {
-    void writeClipboardText(text).then((ok) => {
-      toast.push(
-        ok
-          ? { kind: 'success', message: `已复制 ${label}` }
-          : { kind: 'error', message: '复制失败' },
-      );
-    });
-  };
+  // 同 PathItem.copyToClipboard,统一走 useCopyToClipboard hook(P2-11)。
+  const copyToClipboard = useCopyToClipboard();
 
   const handleContextMenu = (e: MouseEvent<HTMLLIElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    const tpl = stateRef.current.templates.find((t) => t.id === session.templateId);
-    const fullCmd = tpl
-      ? `${tpl.command || '(纯 shell)'} ${tpl.args.join(' ')}`.trim()
-      : '(模板未找到)';
-
+    const variant: 'mine' | 'orphan' | 'other' = isMine
+      ? 'mine'
+      : ownedByOther
+        ? 'other'
+        : 'orphan';
     ctxMenu.open({
       x: e.clientX,
       y: e.clientY,
       title: session.displayName,
-      items: [
-        {
-          // 与 Tab 同口径:仅"其他窗口持有"时灰显;orphan / 本窗口持有 都允许。
-          // 原 `disabled: !isMine` 把 orphan 也灰掉,与 spec 6.3 不符。
-          label: '重命名…',
-          disabled: ownedByOther,
-          ...(ownedByOther ? { hint: '其他窗口持有,无法重命名' } : {}),
-          onSelect: beginRename,
-        },
-        {
-          label: '复制路径',
-          onSelect: () => copyToClipboard(session.pathId, '路径'),
-        },
-        {
-          label: '复制 cwd',
-          onSelect: () => copyToClipboard(session.currentCwd, 'cwd'),
-        },
-        {
-          label: `复制 PID${session.pid > 0 ? ` (${session.pid})` : ''}`,
-          disabled: session.pid <= 0,
-          onSelect: () => copyToClipboard(String(session.pid), 'PID'),
-        },
-        {
-          label: '在 Explorer 中显示',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path: session.pathId })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        { divider: true, label: '' },
-        {
-          label: `完整命令:${fullCmd}`,
-          disabled: true,
-          hint: fullCmd,
-        },
-        { divider: true, label: '' },
-        {
-          label: '关闭',
-          danger: true,
-          disabled: ownedByOther,
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId: session.id })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `关闭失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-      ],
+      items: buildSessionContextMenu(session, {
+        variant,
+        pathTree: stateRef.current.pathTree,
+        copyToClipboard,
+        toastError: (message) => toast.push({ kind: 'error', message }),
+        // Sidebar 端走"行内编辑"重命名(Tab 端走 Modal.prompt)
+        onRename: beginRename,
+      }),
     });
   };
 
@@ -741,7 +765,16 @@ function SessionItemImpl({
         className="session-state-dot"
         style={{ backgroundColor: STATE_DOT_COLOR[session.state] }}
         aria-label={`状态: ${session.state}`}
-      />
+      >
+        {session.state === 'exited' && session.exitCode === 0 && (
+          <Check size={9} className="session-state-dot-icon ok" />
+        )}
+        {session.state === 'exited' &&
+          typeof session.exitCode === 'number' &&
+          session.exitCode !== 0 && (
+            <X size={9} className="session-state-dot-icon fail" />
+          )}
+      </span>
       {renaming ? (
         <input
           ref={renameInputRef}

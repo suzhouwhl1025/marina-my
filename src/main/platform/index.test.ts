@@ -75,6 +75,8 @@ describe('getPlatformAdapter', () => {
       getProcessCwd: async () => null,
       setAutoStart: async () => {},
       isAutoStartEnabled: async () => false,
+      getRefreshedPath: () => process.env.PATH ?? '',
+      getDefaultBookmarkSeeds: () => [],
     };
     __setPlatformAdapterForTest(fakeAdapter);
     setPlatform('linux'); // linux 正常会 throw
@@ -92,6 +94,8 @@ describe('getPlatformAdapter', () => {
       getProcessCwd: async () => null,
       setAutoStart: async () => {},
       isAutoStartEnabled: async () => false,
+      getRefreshedPath: () => process.env.PATH ?? '',
+      getDefaultBookmarkSeeds: () => [],
     };
     __setPlatformAdapterForTest(fakeAdapter);
     expect(getPlatformAdapter()).toBe(fakeAdapter);

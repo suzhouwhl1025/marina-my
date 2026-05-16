@@ -29,8 +29,9 @@ import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
 import { getPlatformAdapter } from './platform';
+import { AIClient } from './ai-client';
 import { WindowsAdapter } from './platform/windows';
-import { parseOpenHere } from './argv-utils';
+import { parseOpenHere, parseSimpleMode } from './argv-utils';
 import { getBuildType } from './build-type';
 import { logger } from './logger';
 import type {
@@ -50,7 +51,55 @@ export function getIsQuitting(): boolean {
   return isQuitting;
 }
 
+/**
+ * BETA-043:并行 statSync 一遍所有路径,把不存在 / 非目录 / 无权限的路径喂给
+ * PathManager.setInvalidPaths。仅在 bootstrap 末尾调一次,不做后台周期扫
+ * (避免无谓 IO,且用户修了路径后随时可以手动重启刷新)。
+ */
+async function scanInvalidPathsAsync(pathManager: PathManager): Promise<void> {
+  const tree = pathManager.getTree();
+  const allPaths = [
+    ...tree.bookmarks,
+    ...tree.temporary,
+    ...tree.recent,
+  ];
+  const invalid: string[] = [];
+  for (const node of allPaths) {
+    try {
+      if (!existsSync(node.path)) {
+        invalid.push(node.path);
+        continue;
+      }
+      const st = statSync(node.path);
+      if (!st.isDirectory()) invalid.push(node.path);
+    } catch {
+      invalid.push(node.path);
+    }
+  }
+  if (invalid.length > 0) {
+    logger.info('main', `BETA-043 invalid paths detected: ${invalid.length}`);
+  }
+  pathManager.setInvalidPaths(invalid);
+}
+
 function bootstrap(): void {
+  // DEV-COEXIST(2026-05-16):dev 模式下改 app 名,让 npm run dev 与打包版
+  // Marina.exe 互不冲突。Electron 把以下 4 类资源全部按 `productName` 派生:
+  //   - app.getPath('userData') → %APPDATA%\Marina (dev) vs %APPDATA%\Marina
+  //   - requestSingleInstanceLock 的锁键(底层用 userData 目录)
+  //   - 日志目录(logger 走 join(userData, 'logs'))
+  //   - 任务栏 AppUserModelID(影响 Windows 任务栏分组)
+  // 必须在 requestSingleInstanceLock / getPath('userData') / setAppUserModelId
+  // 之前调用 — 一旦解析过,Electron 缓存了路径,改 name 不再生效。
+  //
+  // 同样的 portable 形态也独立一份,避免运行中的 portable 与已安装版互踩
+  // settings.json / 单实例锁。仅 installed 形态使用 "Marina" 原名。
+  if (!app.isPackaged) {
+    app.setName('Marina (dev)');
+  } else if (process.env['PORTABLE_EXECUTABLE_DIR']) {
+    app.setName('Marina (portable)');
+  }
+
   // M1-D:全局崩溃兜底 — daily driver 最大风险是"未捕获异常让主进程死掉,
   // 一刹那所有 PTY 全部消失,用户工作全丢"。装一层 net,只记日志不让进程退,
   // 已经损坏的状态由各 manager 自愈或下次操作时校验。
@@ -79,7 +128,14 @@ function bootstrap(): void {
   }
 
   const gotLock = app.requestSingleInstanceLock();
+  // 诊断条目保留:TIT-2 排查时这条 log 是定位 second-instance 路径的关键证据。
+  // logger.setLogDir 此时还没调,先进 pending 缓存,setLogDir 后 flush 入盘。
+  logger.info('main', 'requestSingleInstanceLock result', {
+    gotLock,
+    argv: process.argv,
+  });
   if (!gotLock) {
+    logger.info('main', 'second instance exiting (primary will handle)');
     app.quit();
     return;
   }
@@ -146,7 +202,7 @@ function bootstrap(): void {
             },
           });
         } catch (err) {
-          console.warn('[main] persist windowDefaults failed:', err);
+          logger.warn('main', 'persist windowDefaults failed', err);
         }
       },
     };
@@ -155,9 +211,21 @@ function bootstrap(): void {
   // second-instance:
   //   - `--open-here <path>` → 走 openPathInTerminal,按 settings.systemIntegration.explorerOpenIn 路由
   //   - 否则:已有窗口时聚焦最近活动的;否则新开 (M1-K 行为)
-  app.on('second-instance', (_event, argv) => {
+  app.on('second-instance', (_event, argv, workingDirectory, additionalData) => {
+    // TIT-2 诊断:把 second-instance 收到的全部信息落盘,定位 --open-here 丢失原因
+    logger.info('main', 'second-instance event received', {
+      argv,
+      workingDirectory,
+      additionalData,
+    });
     try {
       const requested = parseOpenHere(argv);
+      const simpleMode = parseSimpleMode(argv);
+      logger.info('main', 'second-instance parseOpenHere result', {
+        requested,
+        simpleMode,
+        idxOfFlag: argv.indexOf('--open-here'),
+      });
       if (requested) {
         const path = sanitizeOpenHerePath(requested);
         const mode = settingsManager.get().systemIntegration.explorerOpenIn;
@@ -165,6 +233,7 @@ function bootstrap(): void {
           { windowManager, sessionManager, templatesManager },
           path,
           mode,
+          simpleMode,
         ).catch((err) => logger.error('main', 'openPathInTerminal failed', err));
         return;
       }
@@ -176,7 +245,7 @@ function bootstrap(): void {
         windowManager.createWindowFromFactory();
       }
     } catch (err) {
-      console.error('[main] second-instance handler failed', err);
+      logger.error('main', 'second-instance handler failed', err);
     }
   });
 
@@ -259,9 +328,15 @@ function bootstrap(): void {
       logger.setLevel(
         settingsManager.get().advanced.logLevel === 'DEBUG' ? 'debug' : 'info',
       );
-      await pathManager.initialize();
+      const { bookmarksSource } = await pathManager.initialize();
+      logger.info('main', `bookmarks loaded from: ${bookmarksSource}`);
       const tmplSrc = await templatesManager.initialize();
       logger.info('main', `templates loaded from: ${tmplSrc}`);
+
+      // BETA-031:AI 助手客户端,settings 读取走 SettingsManager.get() 闭包,
+      // 用户改 key / provider 即刻生效;BETA-006 用同实例做状态复核。
+      const aiClient = new AIClient(() => settingsManager.get());
+      sessionManager.setAiClient(aiClient);
 
       installIpcLayer({
         windowManager,
@@ -269,6 +344,7 @@ function bootstrap(): void {
         settingsManager,
         sessionManager,
         templatesManager,
+        aiClient,
       });
 
       // ── 设置副作用 wiring ─────────────────────────────
@@ -293,6 +369,27 @@ function bootstrap(): void {
         // Explorer 右键集成不再走 settings — 它的开关由
         // cmd:explorer-integration:set-{classic,modern} 直接调用 platformAdapter,
         // 系统状态 = HKCU key / MSIX 包是否存在(现场查,不持久化在 settings.json)。
+      });
+
+      // 2026-05-16:干净安装时种入默认收藏(桌面 / 主目录),取代旧的"系统"
+      // 独立分组。bookmarksSource==='default' 表示 bookmarks.json 不存在,
+      // 是真正的首次启动 — addBookmark 内部会去重 + 持久化,后续启动直接读盘
+      // 拿到这些条目,不会重复种入。
+      if (bookmarksSource === 'default' && platformAdapter) {
+        const seeds = platformAdapter.getDefaultBookmarkSeeds();
+        for (const seed of seeds) {
+          try {
+            pathManager.addBookmark({ path: seed.path, displayName: seed.label });
+          } catch (err) {
+            logger.warn('main', `seed default bookmark failed: ${seed.path}`, err);
+          }
+        }
+      }
+
+      // BETA-043:启动期异步扫描所有 path,标记不可访问者。不做后台周期扫
+      // (一次启动只扫一遍;运行时新建 session spawn 前的 statSync 仍有兜底)。
+      scanInvalidPathsAsync(pathManager).catch((err) => {
+        logger.warn('main', 'scanInvalidPathsAsync failed', err);
       });
 
       // v1.5 改名遗留清理:EasyTerm 时代写入的右键菜单 key 若残留,会与 Marina
@@ -339,12 +436,21 @@ function bootstrap(): void {
       // 启动行为:--open-here 优先级最高 (Explorer 右键触发的冷启动 — 用户意图明确)。
       // 其次看 settings.behavior.startupBehavior:tray-only 不开窗,其他开窗。
       const startupOpenHere = parseOpenHere(process.argv);
+      const startupSimpleMode = parseSimpleMode(process.argv);
+      // TIT-2 诊断:与 second-instance 路径对比 — 冷启动 argv 形态是什么样
+      logger.info('main', 'cold-start parseOpenHere result', {
+        startupOpenHere,
+        startupSimpleMode,
+        argv: process.argv,
+      });
       const wantWindow =
         startupOpenHere !== null ||
         settingsManager.get().behavior.startupBehavior !== 'tray-only' ||
         smokeInteractive;
       if (wantWindow) {
-        const win = windowManager.createWindowFromFactory();
+        const win = windowManager.createWindowFromFactory({
+          simpleMode: startupSimpleMode,
+        });
         if (startupOpenHere !== null) {
           // 冷启动:在刚创建的窗口里起 session(忽略 explorerOpenIn=recent-window-tab,
           // 此时没有"最近"可用)。等 did-finish-load 后再 createSession,
@@ -445,10 +551,15 @@ async function openPathInTerminal(
   deps: OpenPathDeps,
   pathArg: string,
   mode: 'new-window' | 'recent-window-tab',
+  /**
+   * BETA-027:Explorer 简易模式入口。simple 时强制走 new-window 分支并注入
+   * ?mode=simple query;复用 recent-window-tab 的"已开普通窗口"无意义。
+   */
+  simpleMode = false,
 ): Promise<void> {
   const { windowManager, sessionManager, templatesManager } = deps;
 
-  if (mode === 'recent-window-tab') {
+  if (mode === 'recent-window-tab' && !simpleMode) {
     const recent = windowManager.getMostRecentlyActive();
     if (recent) {
       if (recent.isMinimized()) recent.restore();
@@ -468,9 +579,9 @@ async function openPathInTerminal(
     // 无最近活动窗口 → 降级新开
   }
 
-  // mode='new-window' 或 recent 降级:新开窗口,等 did-finish-load 再 createSession,
-  // 这样 evt:session:created 不会落在 renderer 还没订阅的空档。
-  const info = windowManager.createWindowFromFactory();
+  // mode='new-window' / recent 降级 / 简易模式:新开窗口,等 did-finish-load 再
+  // createSession,这样 evt:session:created 不会落在 renderer 还没订阅的空档。
+  const info = windowManager.createWindowFromFactory({ simpleMode });
   const target = windowManager.getById(info.id);
   if (!target) return;
   target.webContents.once('did-finish-load', () => {

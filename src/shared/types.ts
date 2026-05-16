@@ -17,7 +17,11 @@
 // ──────────────────────────────────────────────────────────────────
 
 /**
- * Path 在三栏侧栏中的归属分类 (软件定义书 4 节)。
+ * Path 在侧栏中的归属分类 (软件定义书 4 节)。
+ *
+ * 注:BETA-011 一度引入的 'system' 分类已在 2026-05-16 移除 — 桌面/主目录
+ * 改为干净安装时种入收藏(见 PathManager.initialize + PlatformAdapter
+ * .getDefaultBookmarkSeeds),不再是独立分组。
  */
 export type PathCategory = 'bookmarked' | 'temporary' | 'recent';
 
@@ -57,7 +61,12 @@ export type ThemeId =
   | 'cutie'
   | 'business'
   | 'ubuntu'
-  | 'windows-terminal';
+  | 'windows-terminal'
+  // BETA-033 起新增的 4 个深色主题
+  | 'one-dark-pro'
+  | 'dracula'
+  | 'tokyo-night'
+  | 'catppuccin-mocha';
 
 /**
  * 窗口外观风格 (M1-A 引入,Milestone 1)。
@@ -162,6 +171,11 @@ export interface PathNode {
   sessionIds: string[];
   /** 收藏路径才有: 双击新建终端的默认模板 */
   defaultTemplateId?: string;
+  /**
+   * BETA-043:启动期扫描发现该路径已不可访问(被外部删除 / 权限变化等)。
+   * 仅做 UI 标记(置灰 + ⚠️ icon),不自动从列表里清除,留给用户决定。
+   */
+  invalid?: boolean;
 }
 
 /**
@@ -189,11 +203,22 @@ export interface Settings {
   appearance: {
     theme: ThemeId;
     windowStyle: WindowStyle;             // M1-A:窗口风格 (windows / macos)
+    /**
+     * BETA-004 UI 语言。'system' 表示跟随系统 locale(app.getLocale()):
+     * zh-* 默认中文,其他默认英文。固定 'zh-CN' / 'en-US' 强制使用对应语言。
+     */
+    language: 'system' | 'zh-CN' | 'en-US';
     terminalFontFamily: string;
     terminalFontSize: number;
     terminalLineHeight: number;
     uiFontFamily: string;
     uiZoom: number;
+    /**
+     * BETA-023:macOS 风格红绿灯按钮在 hover 时是否显示 ×/−/+ 悬浮符号。
+     * 默认 false(保持 Marina 极简风,与 CP-4 勘误第二轮的决策一致);
+     * 设为 true 可恢复原生 macOS 观感。
+     */
+    macOSTrafficLightHoverSymbols: boolean;
   };
 
   /**
@@ -254,6 +279,42 @@ export interface Settings {
     logLevel: 'INFO' | 'DEBUG';
     activeIdleThresholdSeconds: number;
     // 注:v1.2 起 sessionTombstoneMinutes 已删除 (砍墓地,见 ADR-008)
+  };
+
+  /**
+   * BETA-031 AI 助手 — 第一个 LLM 集成点。默认全 disabled,用户在设置页主动
+   * 开启并填 API key 才生效。当前唯一 consumer 是 BETA-006(active→idle 跃迁
+   * LLM 复核,避免 Vite 等长输出工具被误判 idle)。
+   *
+   * API key 走 settings.json 持久化;不做加密(与其它持久化字段一致)。
+   * 备份导出导入会带这个字段,跨机器复制时需要小心 — README 已提示。
+   */
+  ai: {
+    /** null = 未启用;选 anthropic / openai 后激活 ai-client */
+    provider: 'anthropic' | 'openai' | null;
+    /** 任意明文,UI 显示时遮罩;空串视为未填 */
+    apiKey: string;
+    /**
+     * F6(beta 勘误2):自定义 Base URL。空串 = 走 SDK 默认 endpoint
+     * (api.anthropic.com / api.openai.com);填写后透传给 SDK constructor 的
+     * `baseURL` 字段。覆盖场景:代理网关、Azure OpenAI、自托管 LLM、企业
+     * 内网镜像。Anthropic 与 OpenAI 两个官方 SDK 都接受 `baseURL` 字段,
+     * 透传逻辑统一。
+     */
+    baseURL: string;
+    /** 例如 'claude-haiku-4-5-20251001' / 'gpt-4o-mini',空串走 provider 默认 */
+    model: string;
+    /** BETA-006:active→idle 跃迁前调 LLM 复核,默认关。开启需 apiKey 非空。 */
+    statusRecheckEnabled: boolean;
+    /**
+     * BETA-006 v2:喂给 LLM 的输入源。
+     * - 'raw'      = scrollback 最末 2KB 原始字节(含 ANSI 转义、PSReadLine 重绘
+     *                残影,LLM 看到的不是用户视觉上看到的)
+     * - 'headless' = main 端 @xterm/headless 维护的"已渲染"字符矩阵尾部 N 行,
+     *                无 ANSI / 无重绘残影,默认走这条
+     * - 'screenshot' = 多模态视觉,枚举值预留,UI 暂不暴露
+     */
+    statusRecheckSource: 'raw' | 'headless' | 'screenshot';
   };
 }
 

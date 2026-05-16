@@ -19,8 +19,10 @@
     <DisplayName>Marina Context Menu</DisplayName>
     <PublisherDisplayName>Marina Dev</PublisherDisplayName>
     <Logo>assets\StoreLogo.png</Logo>
-    <!-- Sparse Package 必需:声明 DLL/exe 实际在 ExternalLocation 指定的 Win32 路径下 -->
-    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+    <!-- 不声明 AllowExternalContent:MSIX 自包含 DLL/exe/assets (build.ps1 stage 进来),
+         走标准 Add-AppxPackage 安装到 WindowsApps,不走 sparse + ExternalLocation 路径.
+         之前声明了 AllowExternalContent=true 会让 Add-AppxPackage 报 0x80073CF9
+         "必须使用外部位置安装" — release install.ps1 不传 -ExternalLocation,矛盾. -->
   </Properties>
 
   <Dependencies>

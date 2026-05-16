@@ -59,6 +59,10 @@ export const COMMAND_CHANNELS = {
   SESSION_SEND_INPUT: 'cmd:session:send-input',
   SESSION_RESIZE: 'cmd:session:resize',
   SESSION_GET_SCROLLBACK: 'cmd:session:get-scrollback',
+  /** BETA-028:导出 scrollback 为 UTF-8 字符串,供终端工具栏"复制全部"按钮 */
+  SESSION_EXPORT_SCROLLBACK: 'cmd:session:export-scrollback',
+  /** BETA-028:清空 main 端的 scrollback ring buffer(配合 term.clear() 使用) */
+  SESSION_CLEAR_SCROLLBACK: 'cmd:session:clear-scrollback',
   /** M1-C:重命名 session(只改 displayName,内部仍由 sessionId 标识) */
   SESSION_RENAME: 'cmd:session:rename',
   /**
@@ -67,6 +71,12 @@ export const COMMAND_CHANNELS = {
    * 的任务进度标题重新生效。
    */
   SESSION_CLEAR_MANUAL_RENAME: 'cmd:session:clear-manual-rename',
+  /**
+   * 右键 Tab → "在新窗口中打开"。原子地把 session 从调用方窗口释放,
+   * 创建新窗口并把所有权直接转给新窗口,新窗口启动时从 URL ?selectSessionId
+   * 读到目标后 dispatch select-session 自动切到该 session。
+   */
+  SESSION_OPEN_IN_NEW_WINDOW: 'cmd:session:open-in-new-window',
 
   // Bookmark / Path 域
   BOOKMARK_ADD: 'cmd:bookmark:add',
@@ -99,6 +109,8 @@ export const COMMAND_CHANNELS = {
   SYSTEM_OPEN_EXTERNAL: 'cmd:system:open-external',
   /** 当前构建形态 dev / portable / installed,供渲染端决定是否禁用系统集成 UI */
   SYSTEM_GET_BUILD_TYPE: 'cmd:system:get-build-type',
+  /** BETA-039:返回 app.getPath('userData'),让设置页显示真实数据目录而非硬编码 */
+  SYSTEM_GET_DATA_DIR: 'cmd:system:get-data-dir',
 
   // Explorer 集成域 —— 不进 settings.json,现场查 + 操作系统状态
   /** 综合查询:buildType + Win 版本 + 经典菜单 + Win11 新菜单 + 证书 + MSIX 包 */
@@ -118,6 +130,9 @@ export const COMMAND_CHANNELS = {
    */
   SYSTEM_CLIPBOARD_READ_TEXT: 'cmd:system:clipboard-read-text',
   SYSTEM_CLIPBOARD_WRITE_TEXT: 'cmd:system:clipboard-write-text',
+
+  /** BETA-031:AI 助手测试连接 — 主进程用 SDK 跑一次 ping,返回成功 / 错误描述 */
+  AI_TEST_CONNECTION: 'cmd:ai:test-connection',
 } as const;
 
 export type CommandChannel = (typeof COMMAND_CHANNELS)[keyof typeof COMMAND_CHANNELS];
@@ -174,6 +189,12 @@ export interface EventEnvelope<P = unknown> {
 export interface GetProtocolVersionResponse {
   protocolVersion: typeof PROTOCOL_VERSION;
   buildVersion: string;
+  /**
+   * DEV-COEXIST(2026-05-16):构建形态。renderer 据此在标题栏后缀显示
+   * "(dev)" / "(portable)",避免 dev 实例与打包版同时跑时误认。
+   * 与 SYSTEM_GET_BUILD_TYPE 同源,只是放进握手响应里,首次握手就拿到。
+   */
+  buildType: 'dev' | 'portable' | 'installed';
 }
 
 export interface GetSnapshotPayload {
@@ -292,6 +313,17 @@ export interface GetScrollbackResponse {
 
 export interface ReleaseSessionPayload {
   sessionId: string;
+}
+
+export interface OpenSessionInNewWindowPayload {
+  sessionId: string;
+  /** true → 新窗口以简易模式启动(隐藏 Sidebar/Tab bar)。默认 false。 */
+  simpleMode?: boolean;
+}
+
+export interface OpenSessionInNewWindowResponse {
+  windowId: string;
+  windowNumber: number;
 }
 
 export interface FocusSessionOwnerPayload {

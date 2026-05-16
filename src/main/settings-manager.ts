@@ -36,12 +36,15 @@ export const DEFAULT_SETTINGS: Settings = {
   appearance: {
     theme: 'rose-pine',
     windowStyle: 'windows',
+    language: 'system',
     terminalFontFamily:
       "'Cascadia Mono', 'JetBrains Mono', 'Consolas', 'LXGW WenKai Mono', monospace",
     terminalFontSize: 13,
     terminalLineHeight: 1.2,
     uiFontFamily: "'LXGW WenKai', system-ui, sans-serif",
     uiZoom: 1.0,
+    // BETA-023 macOS 红绿灯悬浮符号,默认关(与 CP-4 勘误第二轮决策一致)
+    macOSTrafficLightHoverSymbols: false,
   },
   shell: {
     defaultShellId: '',
@@ -64,6 +67,18 @@ export const DEFAULT_SETTINGS: Settings = {
     logLevel: 'INFO',
     activeIdleThresholdSeconds: 2,
   },
+  // BETA-031 AI 助手默认全 disabled,用户开启 + 填 key 后才生效
+  ai: {
+    provider: null,
+    apiKey: '',
+    // F6(beta 勘误2):自定义 endpoint,空串走 SDK 默认地址
+    baseURL: '',
+    model: '',
+    statusRecheckEnabled: false,
+    // BETA-006 v2:默认走 headless(已渲染文本),消除 ANSI 噪音与 PSReadLine
+    // 重绘残影。老用户升级后字段缺失也会因为 SettingsManager.merge 走 default。
+    statusRecheckSource: 'headless',
+  },
 };
 
 const VALID_THEMES: ThemeId[] = [
@@ -74,6 +89,11 @@ const VALID_THEMES: ThemeId[] = [
   'business',
   'ubuntu',
   'windows-terminal',
+  // BETA-033
+  'one-dark-pro',
+  'dracula',
+  'tokyo-night',
+  'catppuccin-mocha',
 ];
 
 /**
@@ -230,6 +250,12 @@ export class SettingsManager extends EventEmitter {
 export function stripUnknownLegacyFields<T>(raw: T): T {
   if (!raw || typeof raw !== 'object') return raw;
   const obj = raw as Record<string, unknown>;
+  let next: Record<string, unknown> | null = null;
+  const ensureClone = (): Record<string, unknown> => {
+    if (!next) next = { ...obj };
+    return next;
+  };
+
   if (
     obj['systemIntegration'] &&
     typeof obj['systemIntegration'] === 'object' &&
@@ -237,12 +263,33 @@ export function stripUnknownLegacyFields<T>(raw: T): T {
   ) {
     const si = obj['systemIntegration'] as Record<string, unknown>;
     if ('explorerContextMenu' in si) {
-      const next = { ...obj, systemIntegration: { ...si } };
-      delete (next['systemIntegration'] as Record<string, unknown>)['explorerContextMenu'];
-      return next as T;
+      const cloned = ensureClone();
+      const siClone = { ...si };
+      delete siClone['explorerContextMenu'];
+      cloned['systemIntegration'] = siClone;
     }
   }
-  return raw;
+
+  // 2026-05-16:'系统'独立分组已废除(桌面/主目录改为安装时默认收藏),
+  // 老 settings.json 残留的 appearance.showSystemPaths / appearance.systemPaths
+  // 在加载时静默剥掉 — 不剥的话 deepMerge 会把它们带进运行时 Settings 对象 +
+  // 导出归档,污染未来读者。
+  if (
+    obj['appearance'] &&
+    typeof obj['appearance'] === 'object' &&
+    !Array.isArray(obj['appearance'])
+  ) {
+    const ap = obj['appearance'] as Record<string, unknown>;
+    if ('showSystemPaths' in ap || 'systemPaths' in ap) {
+      const cloned = ensureClone();
+      const apClone = { ...ap };
+      delete apClone['showSystemPaths'];
+      delete apClone['systemPaths'];
+      cloned['appearance'] = apClone;
+    }
+  }
+
+  return (next ?? raw) as T;
 }
 
 export function deepMerge<T>(target: T, partial: DeepPartial<T> | undefined): T {

@@ -157,11 +157,17 @@ Marina 给你:
 - 标签页拖拽改顺序
 - 标签页拖出 = 拆分到新窗口
 
-### V2.0(社区驱动)
+### V1.6(规划中 — beta 反馈回合)
 
-- macOS 支持
-- Linux 支持
+- **Linux 支持**(Ubuntu 22.04 GNOME 为 Tier 1;Fedora / CentOS Stream 9 / RHEL 9 为 Tier 2,走 `.rpm` + AppImage)。**不复刻 Windows 托盘心智**:GNOME 自 3.x 起官方移除 system tray,Marina 在 Linux 上作为普通桌面 app 运行(`lifecycleModel: 'no-persistence'`),关闭最后一个窗口且仍有非 exited session 时弹同一个跨平台二次确认 modal。文件管理器集成走 freedesktop 标准(`.desktop` + `Categories=TerminalEmulator` + gsettings + update-alternatives),**不写 Nautilus 扩展**。详见 [ADR-013](docs/软件定义书.md#adr-013) 与 [BETA-003](docs/beta反馈工单库-20260515.md#beta-003--linux-支持方案-a无托盘普通桌面-app)。
+- i18n(中文 + 英文)
+- AI 助手设置页(LLM 状态复核的基础)
+
+### V2.0(社区 / 长期)
+
+- macOS 支持(`lifecycleModel: 'dock-resident'`,原生 HIG)
 - WSL session 集成
+- (候选)daemon 架构 — 拆 Electron 主进程为后台 daemon + UI 观察窗,让 session 跨 UI 崩溃 / 升级存活。**未承诺**,等到崩溃/升级丢 session 成为高频反馈时再立项评估
 
 ## 架构(简述)
 
@@ -192,12 +198,11 @@ npm test         # 跑后端测试
 
 ## Help Wanted
 
-Marina 由我一个人构建维护,目前只关注 Windows。**架构已经为跨平台准备好** — 见 [`src/main/platform/`](src/main/platform/) — 但我不会自己实现或测试其它平台。欢迎贡献:
+Marina 由我一个人构建维护。**架构已经为跨平台准备好** — 见 [`src/main/platform/`](src/main/platform/) 与 `PlatformAdapter.lifecycleModel` 字段。Linux 支持由作者本人在 v1.6 实施;macOS 等仍开放给社区贡献:
 
 ### 高优先级
 
-- [ ] **macOS 支持** — 实现 `src/main/platform/macos.ts`
-- [ ] **Linux 支持** — 实现 `src/main/platform/linux.ts`
+- [ ] **macOS 支持** — 实现 `src/main/platform/macos.ts`,`lifecycleModel: 'dock-resident'`。Electron `window-all-closed` darwin 默认分支已贴合 macOS HIG(app 留在 Dock);跨平台 `<LastSessionConfirm />` modal 在 `Cmd+Q` / App Menu Quit 且仍有非 exited session 时触发。
 - [ ] **WSL session 集成**
 
 ### 中优先级

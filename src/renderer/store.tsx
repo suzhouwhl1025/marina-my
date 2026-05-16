@@ -45,6 +45,7 @@ import {
 } from '@shared/protocol';
 import type {
   Bookmark,
+  PathNode,
   PathTree,
   SessionInfo,
   Settings,
@@ -91,9 +92,20 @@ export interface AppState {
    * 没跑够,用它当 fallback。
    */
   lastTerminalDims: { cols: number; rows: number };
+
+  /**
+   * BETA-027:简易页面模式 — 隐藏 Sidebar / Tab bar,只保留 WindowChrome
+   * + 终端区。从 Explorer 右键"在 Marina 简易终端中打开"启动时默认 true;
+   * 也可通过工具栏按钮(BETA-028)在普通页面里切换。本窗口私有,不跨窗口同步。
+   */
+  simpleMode: boolean;
 }
 
-const EMPTY_TREE: PathTree = { bookmarks: [], temporary: [], recent: [] };
+const EMPTY_TREE: PathTree = {
+  bookmarks: [],
+  temporary: [],
+  recent: [],
+};
 
 // ──────────────────────────────────────────────────────────────────
 // Action
@@ -114,6 +126,8 @@ export type AppAction =
   | { type: 'view/select-path'; pathId: string | null }
   | { type: 'view/select-session'; sessionId: string | null }
   | { type: 'view/toggle-path-expand'; pathId: string }
+  | { type: 'view/toggle-simple-mode' }
+  | { type: 'view/set-simple-mode'; value: boolean }
   | { type: 'view/expand-path'; pathId: string }
   | { type: 'view/enter-settings' }
   | { type: 'view/exit-settings' }
@@ -143,7 +157,9 @@ function reducer(state: AppState, action: AppAction): AppState {
         templates: s.templates,
         defaultTemplateId: s.defaultTemplateId,
         settings: s.settings,
-        bookmarks: extractBookmarks(s.pathTree),
+        // bookmarks 不从 pathTree 派生 — 完整列表由 evt:bookmarks:updated
+        // 单独同步,snapshot 期先置空,等首个 bookmarks/update 来填。
+        bookmarks: [],
         selectedPathId: state.selectedPathId ?? firstBookmark?.id ?? null,
       };
     }
@@ -161,12 +177,21 @@ function reducer(state: AppState, action: AppAction): AppState {
       // (释放本窗口旧 owner) 到达时,selectedSessionId 已是新 session,
       // displayable 不会闪到 EmptyPathState (用户勘误后续 #1 闪 + 现象)。
       if (action.session.ownerWindowId === state.myWindowId) {
+        // BETA-042:新 session 自动展开所属 path。覆盖两个场景:
+        // (a) Explorer 右键"在 Marina 终端打开"开新窗口时,sidebar 默认折叠,
+        //     用户看不到刚创建的 session
+        // (b) 模板按钮 / + 双击在已折叠 path 上创建 session 时,直观应展开
+        const expandedPathIds = new Set(state.expandedPathIds);
+        if (action.session.pathId) {
+          expandedPathIds.add(action.session.pathId);
+        }
         return {
           ...state,
           sessions,
           selectedSessionId: action.session.id,
           // 同时确保 selectedPathId 是新 session 的 path
           selectedPathId: action.session.pathId || state.selectedPathId,
+          expandedPathIds,
         };
       }
       return { ...state, sessions };
@@ -275,6 +300,12 @@ function reducer(state: AppState, action: AppAction): AppState {
       return { ...state, expandedPathIds: expanded };
     }
 
+    case 'view/toggle-simple-mode':
+      return { ...state, simpleMode: !state.simpleMode };
+
+    case 'view/set-simple-mode':
+      return { ...state, simpleMode: action.value };
+
     case 'view/expand-path': {
       if (state.expandedPathIds.has(action.pathId)) return state;
       const expanded = new Set(state.expandedPathIds);
@@ -325,18 +356,17 @@ function reducer(state: AppState, action: AppAction): AppState {
   }
 }
 
-function extractBookmarks(tree: PathTree): Bookmark[] {
-  // PathTree 的 bookmarks 节点不直接含 Bookmark 详情;CP-2 只用 PathNode
-  // 渲染侧栏,完整 Bookmark 列表通过 evt:bookmarks:updated 单独同步。
-  // 此处返回空,等 evt:bookmarks:updated 来填。
-  void tree;
-  return [];
-}
-
-function findPathNode(
+/**
+ * 在三栏(bookmarks / temporary / recent)里找指定 pathId 的 PathNode。
+ *
+ * 公共导出:多处需要按 pathId 拿完整 PathNode(选中路径 / Tab 右键拿 cwd /
+ * 历史搜索 等),曾经有调用方在外面重写过这条 fallback 链(MainPane Tab 内
+ * 找 path 字段,P2-13)。统一从这里导出。
+ */
+export function findPathNode(
   tree: PathTree,
   pathId: string,
-): { sessionIds: string[] } | undefined {
+): PathNode | undefined {
   return (
     tree.bookmarks.find((p) => p.id === pathId) ??
     tree.temporary.find((p) => p.id === pathId) ??
@@ -364,6 +394,8 @@ export function makeDefaultState(myWindowId: string, myWindowNumber: number): Ap
     expandedPathIds: new Set(),
     inSettingsView: false,
     lastTerminalDims: { cols: 120, rows: 30 },
+    // BETA-027:默认普通页面;Explorer 简易模式打开时在 startup 显式 dispatch set
+    simpleMode: false,
   };
 }
 

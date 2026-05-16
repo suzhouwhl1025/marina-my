@@ -24,6 +24,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type ReactNode,
@@ -33,7 +34,6 @@ import {
   type AddTemplatePayload,
   type AddTemplateResponse,
   type ExplorerIntegrationStatus,
-  type GetPsCommandsResponse,
   type ImportSettingsResponse,
   type ListShellsResponse,
   type ExportSettingsResponse,
@@ -61,6 +61,10 @@ import {
   type FontEntry,
 } from './font-detection';
 import { Icon, type IconName } from './icons';
+import { useModal } from './Modal';
+import { TemplateIcon } from './TemplateIcon';
+import { useToast } from './Toast';
+import { useTranslation } from './LanguageProvider';
 
 type CategoryId =
   | 'appearance'
@@ -68,24 +72,21 @@ type CategoryId =
   | 'behavior'
   | 'data'
   | 'system-integration'
+  | 'ai'
   | 'advanced'
   | 'about';
 
-interface CategoryDef {
-  id: CategoryId;
-  iconName: IconName;
-  title: string;
-}
-
-// CP-4 勘误 #11:用 lucide 图标替换原有 Emoji
-const CATEGORIES: CategoryDef[] = [
-  { id: 'appearance', iconName: 'appearance', title: '外观' },
-  { id: 'shell', iconName: 'shell', title: 'Shell 与启动' },
-  { id: 'behavior', iconName: 'behavior', title: '行为' },
-  { id: 'data', iconName: 'data', title: '数据' },
-  { id: 'system-integration', iconName: 'systemIntegration', title: '系统集成' },
-  { id: 'advanced', iconName: 'advanced', title: '高级' },
-  { id: 'about', iconName: 'about', title: '关于' },
+// CP-4 勘误 #11:用 lucide 图标替换原有 Emoji。BETA-031 新增 'AI 助手'。
+// BETA-004:title 改 i18n key,渲染时由 t() 转。
+const CATEGORIES: Array<{ id: CategoryId; iconName: IconName; titleKey: string }> = [
+  { id: 'appearance', iconName: 'appearance', titleKey: 'settings.category.appearance' },
+  { id: 'shell', iconName: 'shell', titleKey: 'settings.category.shell' },
+  { id: 'behavior', iconName: 'behavior', titleKey: 'settings.category.behavior' },
+  { id: 'data', iconName: 'data', titleKey: 'settings.category.data' },
+  { id: 'system-integration', iconName: 'systemIntegration', titleKey: 'settings.category.systemIntegration' },
+  { id: 'ai', iconName: 'ai', titleKey: 'settings.category.ai' },
+  { id: 'advanced', iconName: 'advanced', titleKey: 'settings.category.advanced' },
+  { id: 'about', iconName: 'about', titleKey: 'settings.category.about' },
 ];
 
 // 把 settings update 走 IPC 的副作用集中,所有控件都用这个
@@ -103,6 +104,7 @@ async function updateSettings(
 
 export function SettingsView(): JSX.Element {
   const dispatch = useAppDispatch();
+  const { t } = useTranslation();
   const [active, setActive] = useState<CategoryId>('appearance');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -117,12 +119,12 @@ export function SettingsView(): JSX.Element {
           type="button"
           className="settings-close"
           onClick={handleClose}
-          title="关闭设置"
-          aria-label="关闭设置"
+          title={t('settings.close')}
+          aria-label={t('settings.close')}
         >
           ×
         </button>
-        <h1 className="settings-title">设置</h1>
+        <h1 className="settings-title">{t('settings.title')}</h1>
         {errorMsg && (
           <span className="settings-error" role="alert">
             <Icon name="alertTriangle" size={12} /> {errorMsg}
@@ -141,7 +143,7 @@ export function SettingsView(): JSX.Element {
               <span className="settings-nav-icon" aria-hidden="true">
                 <Icon name={c.iconName} size={14} />
               </span>
-              <span className="settings-nav-label">{c.title}</span>
+              <span className="settings-nav-label">{t(c.titleKey)}</span>
             </button>
           ))}
         </nav>
@@ -170,6 +172,8 @@ function CategoryPanel({ categoryId, setError }: CategoryPanelProps): JSX.Elemen
       return <DataPanel setError={setError} />;
     case 'system-integration':
       return <SystemIntegrationPanel setError={setError} />;
+    case 'ai':
+      return <AiPanel setError={setError} />;
     case 'advanced':
       return <AdvancedPanel setError={setError} />;
     case 'about':
@@ -183,14 +187,19 @@ function CategoryPanel({ categoryId, setError }: CategoryPanelProps): JSX.Elemen
 // 外观分类
 // ──────────────────────────────────────────────────────────────────
 
-const THEMES: Array<{ id: ThemeId; label: string; tone: string }> = [
-  { id: 'rose-pine', label: 'Rose Pine', tone: '深色 · 默认' },
+const THEMES: Array<{ id: ThemeId; label: string; tone: '深色' | '浅色'; note?: string }> = [
+  { id: 'rose-pine', label: 'Rose Pine', tone: '深色', note: '默认' },
   { id: 'rose-pine-dawn', label: 'Rose Pine Dawn', tone: '浅色' },
-  { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色变体' },
-  { id: 'cutie', label: 'Cutie', tone: '奶油粉 · Kawaii' },
-  { id: 'business', label: 'Business', tone: '商务蓝灰' },
-  { id: 'ubuntu', label: 'Ubuntu', tone: '经典棕紫' },
-  { id: 'windows-terminal', label: 'Windows Terminal', tone: 'Campbell 配色' },
+  { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色' },
+  { id: 'cutie', label: 'Cutie', tone: '浅色', note: 'Kawaii' },
+  { id: 'business', label: 'Business', tone: '深色' },
+  { id: 'ubuntu', label: 'Ubuntu', tone: '深色' },
+  { id: 'windows-terminal', label: 'Windows Terminal', tone: '深色' },
+  // BETA-033 起新增的 4 个流行深色主题
+  { id: 'one-dark-pro', label: 'One Dark Pro', tone: '深色' },
+  { id: 'dracula', label: 'Dracula', tone: '深色' },
+  { id: 'tokyo-night', label: 'Tokyo Night', tone: '深色' },
+  { id: 'catppuccin-mocha', label: 'Catppuccin Mocha', tone: '深色' },
 ];
 
 function AppearancePanel({
@@ -207,6 +216,8 @@ function AppearancePanel({
   const terminalLineHeight = a?.terminalLineHeight ?? 1.2;
   const uiFontFamily = a?.uiFontFamily ?? '';
   const uiZoom = a?.uiZoom ?? 1;
+
+  const language = a?.language ?? 'system';
 
   // CP-4 勘误 #3:用 queryLocalFonts 真实枚举系统字体,推荐字体置顶。
   // 异步加载,装载前用 probeFonts(推荐) 快速兜底,UX 上看是"先出推荐再补全"。
@@ -243,34 +254,33 @@ function AppearancePanel({
         label="主题"
         hint="所有窗口立即同步;xterm 颜色与 UI 同步切换"
       >
-        <div className="settings-theme-grid">
+        {/* BETA-032:主题选择改纯文本列表 + tone tag,不再色卡 */}
+        <ul className="settings-theme-list" role="radiogroup" aria-label="主题">
           {THEMES.map((t) => (
-            <label
+            <li
               key={t.id}
-              className={`settings-theme-card${theme === t.id ? ' selected' : ''}`}
-              data-theme={t.id}
-            >
-              <input
-                type="radio"
-                name="theme"
-                value={t.id}
-                checked={theme === t.id}
-                onChange={() =>
-                  void updateSettings({ appearance: { theme: t.id } }, setError)
+              className={`settings-theme-row${theme === t.id ? ' active' : ''}`}
+              role="radio"
+              aria-checked={theme === t.id}
+              tabIndex={0}
+              onClick={() =>
+                void updateSettings({ appearance: { theme: t.id } }, setError)
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void updateSettings({ appearance: { theme: t.id } }, setError);
                 }
-              />
-              <span className="settings-theme-swatch" aria-hidden="true">
-                <span className="swatch-base" />
-                <span className="swatch-iris" />
-                <span className="swatch-pine" />
-                <span className="swatch-gold" />
-                <span className="swatch-love" />
+              }}
+            >
+              <span className="theme-name">{t.label}</span>
+              <span className={`theme-tone-tag tone-${t.tone === '深色' ? 'dark' : 'light'}`}>
+                {t.tone}
+                {t.note ? ` · ${t.note}` : ''}
               </span>
-              <span className="settings-theme-name">{t.label}</span>
-              <span className="settings-theme-tone">{t.tone}</span>
-            </label>
+            </li>
           ))}
-        </div>
+        </ul>
       </SettingRow>
 
       <SettingRow
@@ -370,6 +380,49 @@ function AppearancePanel({
           }
         />
       </SettingRow>
+
+      {/* BETA-004:语言切换 */}
+      <SettingRow
+        label="语言 / Language"
+        hint="切换 UI 显示语言;'跟随系统'下 zh-* 系统显示中文,其他显示英文"
+      >
+        <select
+          className="settings-input"
+          value={language}
+          onChange={(e) =>
+            void updateSettings(
+              { appearance: { language: e.target.value as 'system' | 'zh-CN' | 'en-US' } },
+              setError,
+            )
+          }
+        >
+          <option value="system">跟随系统 / System</option>
+          <option value="zh-CN">中文</option>
+          <option value="en-US">English</option>
+        </select>
+      </SettingRow>
+
+      {/* BETA-023:macOS 风格红绿灯悬浮符号 */}
+      {windowStyle === 'macos' && (
+        <SettingRow
+          label="红绿灯悬浮符号"
+          hint="macOS 风格下,鼠标移到红绿灯按钮上是否显示 ×/−/+;默认关(更克制)"
+        >
+          <label className="settings-checkbox">
+            <input
+              type="checkbox"
+              checked={a?.macOSTrafficLightHoverSymbols ?? false}
+              onChange={(e) =>
+                void updateSettings(
+                  { appearance: { macOSTrafficLightHoverSymbols: e.target.checked } },
+                  setError,
+                )
+              }
+            />
+            <span>启用</span>
+          </label>
+        </SettingRow>
+      )}
     </section>
   );
 }
@@ -522,6 +575,7 @@ function TemplateList({
   const state = useAppState();
   const templates = state.templates;
   const defaultId = state.defaultTemplateId;
+  const modal = useModal();
 
   const handleSetDefault = (id: string): void => {
     setError(null);
@@ -532,8 +586,16 @@ function TemplateList({
       });
   };
 
-  const handleDelete = (id: string): void => {
-    if (!confirm('确认删除这个自定义模板?该操作不可撤销。')) return;
+  const handleDelete = async (id: string): Promise<void> => {
+    // CPB-P2 / FOC-5 一致化:原生 confirm 关闭后焦点不可控,且不走主题样式。
+    // 统一走 modal.confirm,与项目其他危险操作风格一致。
+    const ok = await modal.confirm({
+      title: '删除自定义模板',
+      message: '该操作不可撤销。删除后任何引用此模板的会话仍可运行,但新建终端时不会再出现。',
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return;
     setError(null);
     window.api
       .invoke(COMMAND_CHANNELS.TEMPLATE_DELETE, { id })
@@ -546,7 +608,12 @@ function TemplateList({
     <div className="template-list">
       {templates.map((t) => (
         <div key={t.id} className="template-list-item">
-          <span className="template-list-icon">{t.icon}</span>
+          <span className="template-list-icon">
+            {/* P2-14:与 MainPane.TemplateLaunchButton 一致 — builtin 走 lucide
+                矢量,自定义模板 fallback emoji。原 {t.icon} 让 builtin 列表里
+                也只显示 emoji 与启动按钮视觉脱节。 */}
+            <TemplateIcon template={t} size={16} />
+          </span>
           <span className="template-list-name">{t.name}</span>
           {t.isBuiltin && <span className="template-list-tag">内置</span>}
           {t.id === defaultId && <span className="template-list-tag default">默认</span>}
@@ -574,7 +641,7 @@ function TemplateList({
               <button
                 type="button"
                 className="settings-button danger"
-                onClick={() => handleDelete(t.id)}
+                onClick={() => void handleDelete(t.id)}
               >
                 删除
               </button>
@@ -841,9 +908,9 @@ function TemplateEditor({
           onClick={() => void handleSave()}
           disabled={saving || !draft.name.trim()}
           style={{
-            background: 'var(--iris, #f0f)',
-            color: 'var(--base, #f0f)',
-            borderColor: 'var(--iris, #f0f)',
+            background: 'var(--color-accent-special, #f0f)',
+            color: 'var(--color-bg-primary, #f0f)',
+            borderColor: 'var(--color-accent-special, #f0f)',
           }}
         >
           {saving ? '保存中…' : isCreate ? '创建' : '保存'}
@@ -868,7 +935,6 @@ function BehaviorPanel({
   const state = useAppState();
   const b = state.settings.behavior;
   const startupBehavior = b?.startupBehavior ?? 'open-window';
-  const autoStart = b?.autoStart ?? false;
   const confirmOnQuit = b?.confirmOnQuit ?? true;
   const selectOnCopy = b?.selectOnCopy ?? true;
   const terminalRightClick = b?.terminalRightClick ?? 'menu';
@@ -918,25 +984,6 @@ function BehaviorPanel({
             仅启动到托盘
           </label>
         </div>
-      </SettingRow>
-
-      <SettingRow
-        label="开机启动"
-        hint="Windows 启动时自动启动 Marina(写 Run 注册表)"
-      >
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={autoStart}
-            onChange={(e) =>
-              void updateSettings(
-                { behavior: { autoStart: e.target.checked } },
-                setError,
-              )
-            }
-          />
-          <span>开机启动</span>
-        </label>
       </SettingRow>
 
       <SettingRow
@@ -1031,6 +1078,23 @@ function DataPanel({
 }): JSX.Element {
   const [busy, setBusy] = useState<'export' | 'import' | null>(null);
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  // BETA-039:从主进程取真实 userData 路径(app.getPath('userData')),
+  // portable / dev / 自定义 userData 场景下 UI 都准确;首次渲染前显示占位。
+  const [dataDir, setDataDir] = useState<string>('…');
+  useEffect(() => {
+    let cancelled = false;
+    window.api
+      .invoke<unknown, { dataDir: string }>(COMMAND_CHANNELS.SYSTEM_GET_DATA_DIR, {})
+      .then((res) => {
+        if (!cancelled && res?.dataDir) setDataDir(res.dataDir);
+      })
+      .catch(() => {
+        // 静默:UI 退回到占位文本;真实路径取不到不影响其他功能。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleOpenDataDir = (): void => {
     setError(null);
@@ -1083,7 +1147,7 @@ function DataPanel({
 
       <SettingRow label="数据目录" hint="所有 Marina 配置文件存放处">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span className="settings-info-text">%APPDATA%\Marina</span>
+          <span className="settings-info-text" title={dataDir}>{dataDir}</span>
           <button type="button" className="settings-button" onClick={handleOpenDataDir}>
             在 Explorer 中打开
           </button>
@@ -1144,10 +1208,11 @@ function SystemIntegrationPanel({
   const state = useAppState();
   const sys = state.settings?.systemIntegration;
   const openIn = sys?.explorerOpenIn ?? 'new-window';
+  const autoStart = state.settings.behavior?.autoStart ?? false;
+  const toast = useToast();
 
   const [status, setStatus] = useState<ExplorerIntegrationStatus | null>(null);
   const [busy, setBusy] = useState<'classic' | 'modern' | null>(null);
-  const [psCommands, setPsCommands] = useState<GetPsCommandsResponse | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -1163,15 +1228,6 @@ function SystemIntegrationPanel({
 
   useEffect(() => {
     void refreshStatus();
-    void window.api
-      .invoke<undefined, GetPsCommandsResponse>(
-        COMMAND_CHANNELS.EXPLORER_INTEGRATION_GET_PS_COMMANDS,
-        undefined,
-      )
-      .then(setPsCommands)
-      .catch(() => {
-        /* PS 命令展示是可选功能,失败静默 */
-      });
   }, [refreshStatus]);
 
   const handleSet = async (
@@ -1192,6 +1248,14 @@ function SystemIntegrationPanel({
       setStatus(res.status);
       if (!res.ok) {
         setError(res.message || `操作失败 (${kind})`);
+      } else if (kind === 'modern') {
+        // BETA-044:Win11 新菜单 install/uninstall 后,MSIX 加载有 OS 级延迟
+        // (不是 Marina bug)。提示用户重启电脑确保生效;不做"一键重启 Explorer"
+        // 按钮(用户选了最保守的方案)。详见 docs/known-issues.md。
+        toast.push({
+          kind: 'info',
+          message: '右键菜单已更新,确保设置生效请重启计算机',
+        });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1200,21 +1264,28 @@ function SystemIntegrationPanel({
     }
   };
 
-  const copyToClipboard = async (text: string, label: string): Promise<void> => {
-    try {
-      const ok = await window.api.clipboard.writeText(text);
-      if (!ok) throw new Error('写入剪贴板失败');
-      setError(`已复制 ${label} 到剪贴板`);
-      // 1.5 秒后清掉这个"伪错误"提示
-      setTimeout(() => setError(null), 1500);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">系统集成</h2>
+
+      <SettingRow
+        label="开机启动"
+        hint="Windows 启动时自动启动 Marina(写 Run 注册表)"
+      >
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={autoStart}
+            onChange={(e) =>
+              void updateSettings(
+                { behavior: { autoStart: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          <span>开机启动</span>
+        </label>
+      </SettingRow>
 
       {/* —— Win11 新菜单卡片 —— */}
       <ExplorerIntegrationCard
@@ -1237,11 +1308,6 @@ function SystemIntegrationPanel({
           ) : null
         }
         certInfo={status?.cert ?? null}
-        psInstallCommand={psCommands?.installModern ?? null}
-        psUninstallCommand={psCommands?.uninstallModern ?? null}
-        psLabelInstall="安装命令"
-        psLabelUninstall="卸载命令"
-        onCopy={(text, label) => void copyToClipboard(text, label)}
       />
 
       {/* —— 经典右键菜单卡片 —— */}
@@ -1254,11 +1320,6 @@ function SystemIntegrationPanel({
         onToggle={(next) => void handleSet('classic', next)}
         detail={null}
         certInfo={null}
-        psInstallCommand={psCommands?.installClassic ?? null}
-        psUninstallCommand={psCommands?.uninstallClassic ?? null}
-        psLabelInstall="注册命令"
-        psLabelUninstall="移除命令"
-        onCopy={(text, label) => void copyToClipboard(text, label)}
       />
 
       {/* —— 打开方式(纯偏好,保留在 settings.json) —— */}
@@ -1314,11 +1375,6 @@ interface ExplorerIntegrationCardProps {
   onToggle: (enabled: boolean) => void;
   detail: ReactNode;
   certInfo: ExplorerIntegrationStatus['cert'];
-  psInstallCommand: string | null;
-  psUninstallCommand: string | null;
-  psLabelInstall: string;
-  psLabelUninstall: string;
-  onCopy: (text: string, label: string) => void;
 }
 
 function ExplorerIntegrationCard({
@@ -1330,11 +1386,6 @@ function ExplorerIntegrationCard({
   onToggle,
   detail,
   certInfo,
-  psInstallCommand,
-  psUninstallCommand,
-  psLabelInstall,
-  psLabelUninstall,
-  onCopy,
 }: ExplorerIntegrationCardProps): JSX.Element {
   const isUnsupported = status === 'unsupported';
   const isEnabled = status === 'enabled';
@@ -1383,29 +1434,221 @@ function ExplorerIntegrationCard({
         </div>
       )}
 
-      {(psInstallCommand || psUninstallCommand) && (
-        <div className="explorer-integration-actions">
-          {psInstallCommand && (
-            <button
-              type="button"
-              className="settings-button"
-              onClick={() => onCopy(psInstallCommand, psLabelInstall)}
-            >
-              复制 {psLabelInstall}
-            </button>
-          )}
-          {psUninstallCommand && (
-            <button
-              type="button"
-              className="settings-button"
-              onClick={() => onCopy(psUninstallCommand, psLabelUninstall)}
-            >
-              复制 {psLabelUninstall}
-            </button>
-          )}
-        </div>
-      )}
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// AI 助手分类(BETA-031)
+// ──────────────────────────────────────────────────────────────────
+
+function AiPanel({
+  setError,
+}: {
+  setError: (msg: string | null) => void;
+}): JSX.Element {
+  const state = useAppState();
+  const toast = useToast();
+  const ai = state.settings.ai;
+  const provider = ai?.provider ?? null;
+  const apiKey = ai?.apiKey ?? '';
+  const baseURL = ai?.baseURL ?? '';
+  const model = ai?.model ?? '';
+  const statusRecheckEnabled = ai?.statusRecheckEnabled ?? false;
+  const statusRecheckSource = ai?.statusRecheckSource ?? 'headless';
+  const [testing, setTesting] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  const handleTest = async (): Promise<void> => {
+    setError(null);
+    setTesting(true);
+    try {
+      const res = await window.api.invoke<undefined, { ok: boolean; message: string }>(
+        COMMAND_CHANNELS.AI_TEST_CONNECTION,
+        undefined,
+      );
+      toast.push({
+        kind: res.ok ? 'success' : 'error',
+        message: res.message || (res.ok ? '连接成功' : '连接失败'),
+      });
+    } catch (err) {
+      toast.push({
+        kind: 'error',
+        message: `测试失败:${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <section className="settings-panel">
+      <h2 className="settings-panel-title">AI 助手</h2>
+      <p className="settings-panel-hint">
+        Marina 第一个 LLM 集成点。当前唯一用途是 BETA-006:active→idle 跃迁前
+        让 LLM 看一眼 scrollback,避免 Vite 等长输出工具被误判 idle。
+        所有 API 调用走主进程,不暴露 key 到 renderer。
+      </p>
+
+      <SettingRow label="服务商" hint="选择后才会激活其它字段">
+        <select
+          className="settings-input"
+          value={provider ?? ''}
+          onChange={(e) => {
+            const v = e.target.value;
+            void updateSettings(
+              {
+                ai: { provider: v === '' ? null : (v as 'anthropic' | 'openai') },
+              },
+              setError,
+            );
+          }}
+        >
+          <option value="">未启用</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </SettingRow>
+
+      {provider !== null && (
+        <>
+          <SettingRow label="API key" hint="存储于本地 settings.json,导出时会带出">
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                className="settings-input"
+                value={apiKey}
+                placeholder={provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
+                onChange={(e) =>
+                  void updateSettings({ ai: { apiKey: e.target.value } }, setError)
+                }
+                style={{ minWidth: 280 }}
+              />
+              <button
+                type="button"
+                className="settings-button"
+                onClick={() => setShowKey((v) => !v)}
+              >
+                {showKey ? '隐藏' : '显示'}
+              </button>
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            label="Base URL"
+            hint="留空走官方默认;代理网关 / Azure OpenAI / 自托管 LLM 在此覆盖"
+          >
+            <input
+              type="text"
+              className="settings-input"
+              value={baseURL}
+              placeholder={
+                provider === 'anthropic'
+                  ? 'https://api.anthropic.com'
+                  : 'https://api.openai.com/v1'
+              }
+              onChange={(e) =>
+                void updateSettings({ ai: { baseURL: e.target.value } }, setError)
+              }
+              style={{ minWidth: 320 }}
+              spellCheck={false}
+            />
+          </SettingRow>
+
+          <SettingRow label="模型" hint="留空走默认(haiku / gpt-4o-mini)">
+            <input
+              type="text"
+              className="settings-input"
+              value={model}
+              placeholder={
+                provider === 'anthropic'
+                  ? 'claude-haiku-4-5-20251001'
+                  : 'gpt-4o-mini'
+              }
+              onChange={(e) =>
+                void updateSettings({ ai: { model: e.target.value } }, setError)
+              }
+              style={{ minWidth: 280 }}
+            />
+          </SettingRow>
+
+          <SettingRow label="测试连接" hint="跑一次最小 ping 请求验证 key 有效">
+            <button
+              type="button"
+              className="settings-button"
+              onClick={() => void handleTest()}
+              disabled={testing || !apiKey.trim()}
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+          </SettingRow>
+
+          <div className="settings-privacy-notice" role="note">
+            <strong>隐私提示</strong> · 开启“状态复核”后,Marina 在每次
+            active→idle 跃迁时会把以下数据通过 HTTPS 发送给你配置的 AI 服务商
+            (可能是第三方,如 Kimi / DeepSeek / OpenAI / Anthropic):
+            <ul>
+              <li>
+                <strong>终端尾部内容</strong> — 最近约 40 行已渲染文本
+                (会包含你看到的命令、输出、错误信息、API 输出等)
+              </li>
+              <li>
+                <strong>按键时间元数据</strong> — 最近 ≤20 个按键的
+                <em>时间戳 + 类别</em>(char / enter / backspace / other),
+                <strong>不包含按键内容</strong>,不会泄露密码 / token / 命令体
+              </li>
+            </ul>
+            如果你正在处理敏感信息(密码、私有代码、客户数据),建议先关闭复核;
+            纯 Anthropic / OpenAI 官方 endpoint 走他们的 API 数据策略,
+            自托管 / 代理网关请确认你的数据流向。
+          </div>
+
+          <SettingRow
+            label="状态复核(BETA-006)"
+            hint="active→idle 跃迁前让 LLM 复核;失败时回退原阈值,不阻塞"
+          >
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={statusRecheckEnabled}
+                onChange={(e) =>
+                  void updateSettings(
+                    { ai: { statusRecheckEnabled: e.target.checked } },
+                    setError,
+                  )
+                }
+                disabled={!apiKey.trim()}
+              />
+              <span>启用</span>
+            </label>
+          </SettingRow>
+
+          <SettingRow
+            label="复核输入源"
+            hint="raw=原始字节(含 ANSI 转义);headless=已渲染的字符矩阵(推荐,无重绘残影)"
+          >
+            <select
+              className="settings-input"
+              value={statusRecheckSource}
+              onChange={(e) =>
+                void updateSettings(
+                  {
+                    ai: {
+                      statusRecheckSource: e.target.value as 'raw' | 'headless',
+                    },
+                  },
+                  setError,
+                )
+              }
+              disabled={!statusRecheckEnabled}
+            >
+              <option value="headless">headless (已渲染文本)</option>
+              <option value="raw">raw (原始字节)</option>
+            </select>
+          </SettingRow>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1504,7 +1747,7 @@ function AdvancedPanel({
           </button>
         ) : (
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <span style={{ color: 'var(--love, #f0f)', fontSize: 12 }}>
+            <span style={{ color: 'var(--color-danger, #f0f)', fontSize: 12 }}>
               确认重置?
             </span>
             <button
@@ -1550,12 +1793,12 @@ function AboutPanel(): JSX.Element {
   // build define 在 dev 模式可能未定义,做个兜底
   // (vite 实际上 dev 时也会做 string 替换,但为了万无一失)
   const commit =
-    typeof __EASYTERM_BUILD_COMMIT__ !== 'undefined'
-      ? __EASYTERM_BUILD_COMMIT__
+    typeof __MARINA_BUILD_COMMIT__ !== 'undefined'
+      ? __MARINA_BUILD_COMMIT__
       : 'dev';
   const builtAt =
-    typeof __EASYTERM_BUILD_TIME__ !== 'undefined'
-      ? __EASYTERM_BUILD_TIME__
+    typeof __MARINA_BUILD_TIME__ !== 'undefined'
+      ? __MARINA_BUILD_TIME__
       : 'dev';
 
   // app 版本号通过 handshake 已经拿到,从 store 读不太合适 (store 里没存)
@@ -1684,10 +1927,14 @@ function NumberInput({
   const [text, setText] = useState<string>(
     formatPercent ? `${Math.round(value * 100)}` : `${value}`,
   );
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // value (来自 main 广播) 变化时同步内部 text — 只在不聚焦时同步,
-  // 否则用户正在输入会被覆盖。简化:每次都同步,行为略糙但 V1 可接受。
+  // value (来自 main 广播) 变化时同步内部 text。仅在 input 当前不聚焦时
+  // 同步:跨窗口场景下另一窗口在改字号/UI 缩放等会广播 SETTINGS_CHANGED,
+  // 若本地正在输入则会被无条件覆盖(FBK-3)。聚焦时跳过,blur/commit 时
+  // 自然走 onChange 路径,不丢用户输入。
   useEffect(() => {
+    if (inputRef.current && document.activeElement === inputRef.current) return;
     setText(formatPercent ? `${Math.round(value * 100)}` : `${value}`);
   }, [value, formatPercent]);
 
@@ -1713,6 +1960,7 @@ function NumberInput({
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
       <input
+        ref={inputRef}
         type="number"
         className="settings-input numeric"
         value={text}
@@ -1725,7 +1973,7 @@ function NumberInput({
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         }}
       />
-      {formatPercent && <span style={{ color: 'var(--subtle, #f0f)' }}>%</span>}
+      {formatPercent && <span style={{ color: 'var(--color-text-secondary, #f0f)' }}>%</span>}
     </span>
   );
 }
@@ -1734,6 +1982,10 @@ function NumberInput({
  * M1-I:模板编辑器环境变量输入框 — 默认遮罩(显示 ***),点眼睛切真实。
  * 模糊视觉用 CSS filter blur,真值始终在 input value 里,不影响保存。
  * 复制粘贴时浏览器拿真值;肉眼看不见。
+ *
+ * 安全:遮罩仅靠"显示/隐藏"按钮显式切换。早期版本把 hover/focus 也作为
+ * 自动 reveal,被审计判定与 hint("防被旁人看到 API key")矛盾 — 鼠标偶然
+ * 路过即明文,违背设计意图。现回归"显式开关"。
  */
 function EnvTextarea({
   value,
@@ -1757,11 +2009,6 @@ function EnvTextarea({
           filter: revealed ? 'none' : 'blur(4px)',
           transition: 'filter 120ms ease',
         }}
-        // 鼠标 hover 时短暂取消遮罩(可读但操作完恢复),user-friendly
-        onMouseEnter={() => setRevealed(true)}
-        onMouseLeave={() => setRevealed(false)}
-        onFocus={() => setRevealed(true)}
-        onBlur={() => setRevealed(false)}
       />
       <button
         type="button"

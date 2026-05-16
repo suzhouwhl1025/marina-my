@@ -11,7 +11,7 @@
  */
 import { useEffect, useState } from 'react';
 import { PROTOCOL_VERSION } from '@shared/protocol';
-import { AppStateProvider, useAppState, useIpcSync } from './store';
+import { AppStateProvider, useAppDispatch, useAppState, useIpcSync } from './store';
 import { Sidebar } from './components/Sidebar';
 import { MainPane } from './components/MainPane';
 import { SettingsView } from './components/SettingsView';
@@ -19,32 +19,63 @@ import { WindowChrome } from './components/WindowChrome';
 import { ContextMenuProvider } from './components/ContextMenu';
 import { ToastProvider } from './components/Toast';
 import { ModalProvider } from './components/Modal';
+import { LanguageProvider } from './components/LanguageProvider';
 
 type HandshakeState =
   | { status: 'pending' }
-  | { status: 'ok'; buildVersion: string }
+  | { status: 'ok'; buildVersion: string; buildType: 'dev' | 'portable' | 'installed' }
   | { status: 'mismatch'; mainVersion: number; rendererVersion: number }
   | { status: 'error'; message: string };
 
 export function App(): JSX.Element {
   const [handshake, setHandshake] = useState<HandshakeState>({ status: 'pending' });
 
-  // 全窗口兜底:吃掉所有未消费的 dragover/drop。
-  // Why: 未被 preventDefault 的拖放事件会触发两个不想要的默认行为 ——
+  // F12(DROP-1 重构):window 层成为拖拽决策的"唯一权威"。
+  //
+  // 历史:F9-F11 让 Sidebar 自己 preventDefault + 设 dropEffect='copy',
+  // 然后 window 兜底靠 e.defaultPrevented 判断是否被消费 — 两个 handler
+  // 独立判断"光标在不在 sidebar 内",在 Chromium dragover 节流空帧 +
+  // React 合成事件派发时序的双重干扰下,偶尔不同步,光标在 copy/⊘ 间闪。
+  //
+  // 现在:子组件不再碰 preventDefault / dropEffect。所有决策集中到这
+  // 一个 native 监听器,通过 e.target.closest('[data-drop-zone]') 同步
+  // 判断 — 一次事件,一个决策,不可能"两个 handler 抢答"。
+  //
+  // 关键:dragenter 和 dragover 都要 preventDefault!HTML5 DnD 规范明文
+  // 规定 "both ... must be cancelled to allow dropping"。光标跨越子元
+  // 素边界时,事件序列是 dragleave(旧)→ dragenter(新)→ dragover(新)。
+  // 如果只挂 dragover,dragenter 期间新元素被 Chromium 默认判定为"非
+  // drop target",光标会闪一帧 ⊘ 再被下一个 dragover 改回 copy —
+  // F12.1 修复的就是这个症状。
+  //
+  // 子组件只剩两件事:
+  //   (1) 在自己的根 element 加 data-drop-zone="..."(声明"我接受")
+  //   (2) onDrop 处理消费逻辑(读 files、IPC 等);可选 onDragOver
+  //       仅维护视觉态(高亮/浮卡),与决策完全解耦。
+  //
+  // 浏览器默认行为(必须吃掉):
   //   (a) Chromium 把窗口导航到 file:///... ;
-  //   (b) Win11 在屏幕顶端弹出"拖放到此处以共享"系统浮层。
-  // 真正要消费 drop 的区域(Sidebar 收藏夹、TerminalView 终端区)在自己
-  // 的 onDrop 里读 dataTransfer.files;它们的 React 合成事件在 bubble 阶
-  // 段早于此窗口监听触发,因此不冲突。
+  //   (b) Win11 屏幕顶端弹"拖放到此处以共享"系统浮层。
   useEffect(() => {
-    const block = (e: globalThis.DragEvent): void => {
+    const handleDragEnterOver = (e: globalThis.DragEvent): void => {
+      e.preventDefault();
+      const target = e.target instanceof Element ? e.target : null;
+      const inDropZone = target?.closest('[data-drop-zone]') ?? null;
+      if (e.dataTransfer) e.dataTransfer.dropEffect = inDropZone ? 'copy' : 'none';
+    };
+    const handleDrop = (e: globalThis.DragEvent): void => {
+      // drop zone 自己的 React onDrop 在 bubble 阶段先跑过(读完 files、
+      // preventDefault);此处兜底吃掉所有"未消费"drop,防止 Chromium
+      // navigate 到 file://。preventDefault 幂等,无条件调用即可。
       e.preventDefault();
     };
-    window.addEventListener('dragover', block);
-    window.addEventListener('drop', block);
+    window.addEventListener('dragenter', handleDragEnterOver);
+    window.addEventListener('dragover', handleDragEnterOver);
+    window.addEventListener('drop', handleDrop);
     return () => {
-      window.removeEventListener('dragover', block);
-      window.removeEventListener('drop', block);
+      window.removeEventListener('dragenter', handleDragEnterOver);
+      window.removeEventListener('dragover', handleDragEnterOver);
+      window.removeEventListener('drop', handleDrop);
     };
   }, []);
 
@@ -58,7 +89,7 @@ export function App(): JSX.Element {
     }
     window.api
       .getProtocolVersion()
-      .then(({ protocolVersion, buildVersion }) => {
+      .then(({ protocolVersion, buildVersion, buildType }) => {
         if (protocolVersion !== PROTOCOL_VERSION) {
           setHandshake({
             status: 'mismatch',
@@ -67,7 +98,7 @@ export function App(): JSX.Element {
           });
           return;
         }
-        setHandshake({ status: 'ok', buildVersion });
+        setHandshake({ status: 'ok', buildVersion, buildType });
       })
       .catch((err: unknown) => {
         setHandshake({
@@ -109,20 +140,60 @@ export function App(): JSX.Element {
       myWindowId={window.api.windowId}
       myWindowNumber={window.api.windowNumber}
     >
-      <ConnectedShell buildVersion={handshake.buildVersion} />
+      <ConnectedShell
+        buildVersion={handshake.buildVersion}
+        buildType={handshake.buildType}
+      />
     </AppStateProvider>
   );
 }
 
-function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element {
+function ConnectedShell({
+  buildVersion,
+  buildType,
+}: {
+  buildVersion: string;
+  buildType: 'dev' | 'portable' | 'installed';
+}): JSX.Element {
   const sync = useIpcSync();
   const state = useAppState();
+  const dispatch = useAppDispatch();
 
   const currentTheme = state.settings.appearance?.theme ?? 'rose-pine';
   const windowStyle = state.settings.appearance?.windowStyle ?? 'windows';
   const uiZoom = state.settings.appearance?.uiZoom ?? 1;
   const uiFontFamily = state.settings.appearance?.uiFontFamily ?? '';
   const terminalFontFamily = state.settings.appearance?.terminalFontFamily ?? '';
+
+  // BETA-027:Explorer 简易模式入口走 query string ?mode=simple,渲染端在
+  // startup 阶段把它转成 dispatch view/set-simple-mode。冷启动一次性,不监听变化。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('mode') === 'simple') {
+      dispatch({ type: 'view/set-simple-mode', value: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 右键 Tab → "在新窗口中打开":?selectSessionId=X。等 snapshot 加载完(此时
+  // sessions 已包含新 owner 信息)再 dispatch 选中,避免选到不存在的 session。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!sync.ready) return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSessionId = params.get('selectSessionId');
+    if (!initialSessionId) return;
+    dispatch({
+      type: 'view/focus-requested',
+      selectSessionId: initialSessionId,
+    });
+    // 一次性,清掉 query 防止刷新 / DevTools 重载时重新触发
+    const url = new URL(window.location.href);
+    url.searchParams.delete('selectSessionId');
+    window.history.replaceState({}, '', url.toString());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.ready]);
 
   // 即时同步 uiZoom 到 webFrame.setZoomFactor (preload 桥)。
   // 必须在 early return 之前 — React Hooks 规则:每次渲染调用顺序须一致。
@@ -149,6 +220,17 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
     }
   }, [uiFontFamily, terminalFontFamily]);
 
+  // F3(beta 勘误2):把 data-theme 同时挂在 <html> 上 — 否则 ContextMenu /
+  // Modal / Toast 这类 Provider 渲染的 DOM 节点在 .app-root 之外(它们包裹
+  // .app-root 作为子节点,自己的 portal-like 节点是 .app-root 的兄弟),
+  // 拿不到 data-theme 选择器定义的 CSS 变量,只能 fallback 到 :root 的
+  // rose-pine 默认值。挂到 <html> 后所有 DOM 节点都在主题作用域内。
+  // (旧版仍保留 .app-root 上的 data-theme,内部已大量按它写过 CSS 选择器,
+  // 同时挂两处不冲突,新主题切换路径以 <html> 为准。)
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', currentTheme);
+  }, [currentTheme]);
+
   if (sync.error) {
     return (
       <FullPagePlaceholder
@@ -165,6 +247,7 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
   }
 
   return (
+    <LanguageProvider>
     <ToastProvider>
       <ModalProvider>
         <ContextMenuProvider>
@@ -172,10 +255,21 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
             className="app-root with-shell"
             data-theme={currentTheme}
             data-window-style={windowStyle}
+            data-simple-mode={state.simpleMode ? 'true' : 'false'}
           >
-            <WindowChrome windowStyle={windowStyle} buildVersion={buildVersion} />
+            <WindowChrome
+              windowStyle={windowStyle}
+              buildVersion={buildVersion}
+              buildType={buildType}
+            />
             {state.inSettingsView ? (
               <SettingsView />
+            ) : state.simpleMode ? (
+              // BETA-027:简易页面 — 隐藏 Sidebar / Tab bar,只保留 WindowChrome
+              // + 终端区。退出简易模式的入口现在嵌在 terminal-statusbar 里(pid 之后)。
+              <div className="app-body simple-mode">
+                <MainPane />
+              </div>
             ) : (
               <div className="app-body">
                 <Sidebar />
@@ -186,6 +280,7 @@ function ConnectedShell({ buildVersion }: { buildVersion: string }): JSX.Element
         </ContextMenuProvider>
       </ModalProvider>
     </ToastProvider>
+    </LanguageProvider>
   );
 }
 

@@ -16,7 +16,9 @@
  *
  * @AGENTS.md 8.2: 不要"顺手"实现 macOS,V1 只 Windows。
  */
-import type { PlatformAdapter, ShellInfo } from './index';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { DefaultBookmarkSeed, PlatformAdapter, ShellInfo } from './index';
 
 const NOT_IMPLEMENTED =
   '[MacOSAdapter] macOS support not implemented yet. ' +
@@ -43,5 +45,17 @@ export class MacOSAdapter implements PlatformAdapter {
   }
   async isAutoStartEnabled(): Promise<boolean> {
     throw new Error(NOT_IMPLEMENTED);
+  }
+  getRefreshedPath(): string {
+    // macOS 子进程从 launchd / login shell 继承 env;BETA-001 的 Windows-only
+    // 注册表广播痛点不存在,直接返回 process.env.PATH。
+    return process.env.PATH ?? '';
+  }
+  getDefaultBookmarkSeeds(): DefaultBookmarkSeed[] {
+    const home = homedir();
+    return [
+      { label: '桌面', path: join(home, 'Desktop') },
+      { label: '主目录', path: home },
+    ];
   }
 }

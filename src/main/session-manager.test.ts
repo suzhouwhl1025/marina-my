@@ -20,6 +20,7 @@ import {
   SessionManager,
   SessionManagerError,
   inferDisplayName,
+  looksLikeShellStartupGarbage,
   type PtySpawnFn,
 } from './session-manager';
 import { Osc1337Parser } from './osc1337-parser';
@@ -168,11 +169,21 @@ function makeStubSettingsManager(
     appearance: {
       theme: 'rose-pine',
       windowStyle: 'windows',
+      language: 'system',
       terminalFontFamily: '',
       terminalFontSize: 13,
       terminalLineHeight: 1.2,
       uiFontFamily: '',
       uiZoom: 1,
+      macOSTrafficLightHoverSymbols: false,
+    },
+    ai: {
+      provider: null,
+      apiKey: '',
+      baseURL: '',
+      model: '',
+      statusRecheckEnabled: false,
+      statusRecheckSource: 'headless',
     },
     shell: { defaultShellId: '', newTerminalShellPolicy: 'default' },
     behavior: {
@@ -226,6 +237,13 @@ function makeFakeAdapter(opts: FakeAdapterOpts = {}): PlatformAdapter {
     },
     async isAutoStartEnabled() {
       return false;
+    },
+    getRefreshedPath() {
+      // 测试默认走 process.env.PATH,不触发 reg query。
+      return process.env.PATH ?? '';
+    },
+    getDefaultBookmarkSeeds() {
+      return [];
     },
   };
 }
@@ -308,7 +326,7 @@ describe('SessionManager — createSession', () => {
     expect(info.originalCwd).toBe('C:\\proj\\a');
     expect(info.currentCwd).toBe('C:\\proj\\a');
     expect(info.ownerWindowId).toBe('w-1');
-    expect(info.state).toBe('active');
+    expect(info.state).toBe('idle');
     expect(info.cols).toBe(80);
     expect(info.exitCode).toBeUndefined();
     expect(path.attached).toEqual([{ sessionId: info.id, path: 'C:\\proj\\a' }]);
@@ -385,7 +403,7 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
     vi.useRealTimers();
   });
 
-  it('初始 state=active', async () => {
+  it('初始 state=idle (BETA-008:语义反转,active=命令执行中)', async () => {
     const { mgr } = makeManager();
     const info = await mgr.createSession({
       pathId: '/p',
@@ -394,7 +412,7 @@ describe('SessionManager — 状态机 (active / idle / exited)', () => {
       cols: 80,
       rows: 24,
     });
-    expect(info.state).toBe('active');
+    expect(info.state).toBe('idle');
   });
 
   it('无输出超过 idle 阈值 → state=idle', async () => {
@@ -867,6 +885,148 @@ describe('SessionManager — OSC 0/1/2 标题 (displayName 自动跟随)', () =>
     fp.emitData('\x1b]0;Same\x07');
     expect(changesAfterFirst.filter((c) => c.displayName !== undefined)).toEqual([]);
     expect(mgr.get(info.id)!.displayName).toBe('Same');
+  });
+
+  // TIT-1:powershell.exe / cmd.exe / Git Bash 启动时把窗口标题设成自己的 exe
+  // 路径(ConPTY 把 SetConsoleTitle() 翻译成 OSC 0),Git Bash 默认 PS1 又每次
+  // prompt 重发 "MINGW64:<cwd>"。这些"裸路径"标题不应该覆盖 Marina 的友好名。
+  it('TIT-1 启动垃圾:整段是 Windows exe 路径 → 拒,保留 "PowerShell"', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const before = info.displayName;
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+
+    fp.emitData('\x1b]0;C:\\Windows\\System32\\cmd.exe\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+  });
+
+  it('TIT-1 启动垃圾:Git Bash 默认 PS1 "MINGW64:<path>" → 拒', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const before = info.displayName;
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;MINGW64:/c/Users/HP/Desktop/work/SimHDL\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+
+    fp.emitData('\x1b]0;MINGW32:/c/foo\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+
+    fp.emitData('\x1b]0;MSYS:/usr/local\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+  });
+
+  it('TIT-1 启动垃圾:裸 "/usr/bin/bash" / "cmd.exe" → 拒', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const before = info.displayName;
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;/usr/bin/bash\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+
+    fp.emitData('\x1b]0;cmd.exe\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+
+    fp.emitData('\x1b]0;pwsh.exe\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(before);
+  });
+
+  it('TIT-1 合法标题:CLI 工具发的 "vim /etc/hosts" → 放行', async () => {
+    const { mgr } = makeManager();
+    const info = await mgr.createSession({
+      pathId: '/p',
+      templateId: 'shell',
+      ownerWindowId: 'w',
+      cols: 80,
+      rows: 24,
+    });
+    const fp = FakePty.instances[0]!;
+    fp.emitData('\x1b]0;vim /etc/hosts\x07');
+    expect(mgr.get(info.id)!.displayName).toBe('vim /etc/hosts');
+
+    // Claude Code 自定义标题(含路径但有描述前缀)— 必须放行
+    fp.emitData('\x1b]0;✻ Claude · ~/p (working…)\x07');
+    expect(mgr.get(info.id)!.displayName).toBe(
+      '✻ Claude · ~/p (working…)',
+    );
+
+    // 其他常见合法标题
+    fp.emitData('\x1b]0;node app.js\x07');
+    expect(mgr.get(info.id)!.displayName).toBe('node app.js');
+
+    fp.emitData('\x1b]0;make -j4\x07');
+    expect(mgr.get(info.id)!.displayName).toBe('make -j4');
+  });
+});
+
+describe('looksLikeShellStartupGarbage (TIT-1)', () => {
+  // 拒绝面:这些是 powershell.exe / cmd.exe / Git Bash 启动期自动发的标题,
+  // 全部覆盖 displayName 会把 Marina 的 "PowerShell" / "Bash" 友好名搞没。
+  it.each([
+    'C:\\Windows\\System32\\cmd.exe',
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    'C:/Program Files/PowerShell/7/pwsh.exe',
+    'D:\\tools\\bash.exe',
+    '\\\\server\\share\\bin\\sh.exe',
+    '/usr/bin/bash',
+    '/bin/zsh',
+    'MINGW64:/c/Users/HP/Desktop/work',
+    'MINGW32:/c/foo',
+    'MINGWARM:/c/foo',
+    'MSYS:/usr/local',
+    'MSYS2:/c/code',
+    'mingw64:/c/lower-case-also',
+    'cmd.exe',
+    'powershell.exe',
+    'pwsh.exe',
+    'Bash.EXE',
+  ])('%s → 启动垃圾', (title) => {
+    expect(looksLikeShellStartupGarbage(title)).toBe(true);
+  });
+
+  // 放行面:CLI 工具改标题是核心功能,不能误杀。规律:**路径只是标题的
+  // 一部分,前后有别的内容**(命令名 / 描述 / Unicode 装饰)。
+  it.each([
+    'vim /etc/hosts',
+    'nano C:\\Users\\me\\notes.txt',
+    'node app.js',
+    'make -j4',
+    'npm install',
+    '✻ Claude · ~/p (working…)', // ✻ Claude · ~/p (working…)
+    'cargo build',
+    'python script.py',
+    'PowerShell',
+    'Bash',
+    'editing notes.md',
+    'connecting to db...',
+    'tail -f /var/log/app.log',
+    '$ git status',
+  ])('%s → 合法标题', (title) => {
+    expect(looksLikeShellStartupGarbage(title)).toBe(false);
+  });
+
+  // 边界:空串、纯空格(由 sanitizeTitle 处理掉,但 helper 自身也得稳)
+  it('空串不算启动垃圾(由 sanitizeTitle 上层短路)', () => {
+    expect(looksLikeShellStartupGarbage('')).toBe(false);
   });
 });
 

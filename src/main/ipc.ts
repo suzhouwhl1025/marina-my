@@ -77,6 +77,8 @@ import {
   type PickFolderResponse,
   type QuitPayload,
   type QuitResponse,
+  type OpenSessionInNewWindowPayload,
+  type OpenSessionInNewWindowResponse,
   type ReleaseSessionPayload,
   type RemoveBookmarkPayload,
   type RemoveFromRecentPayload,
@@ -106,6 +108,7 @@ import type { PathManager } from './path-manager';
 import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
 import type { TemplatesManager } from './templates-manager';
+import type { AIClient } from './ai-client';
 import { setQuitting } from './index';
 
 export interface IpcLayerDeps {
@@ -114,9 +117,12 @@ export interface IpcLayerDeps {
   settingsManager: SettingsManager;
   sessionManager: SessionManager;
   templatesManager: TemplatesManager;
+  /** BETA-031:可选,未注入时 AI_TEST_CONNECTION 返回 ok:false */
+  aiClient?: AIClient;
 }
 
 let installed = false;
+let aiClient: AIClient | undefined;
 
 /**
  * 注册全部 IPC handler 与事件桥接。整个应用只能调用一次。
@@ -124,6 +130,7 @@ let installed = false;
 export function installIpcLayer(deps: IpcLayerDeps): void {
   if (installed) throw new Error('[ipc] installIpcLayer() already called');
   installed = true;
+  aiClient = deps.aiClient;
   registerCommandHandlers(deps);
   wireEventBroadcasts(deps);
 }
@@ -167,6 +174,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     (): GetProtocolVersionResponse => ({
       protocolVersion: PROTOCOL_VERSION,
       buildVersion: app.getVersion(),
+      buildType: getBuildType(),
     }),
   );
 
@@ -261,6 +269,10 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
+      // takeOwnership=false 时直接传空 owner — createSession 内部
+      // `input.ownerWindowId || null` 会落到 info.ownerWindowId = null。
+      // 不要先创建带 owner 再 releaseOwner:那条路径在 owner=='' 时已被
+      // 折叠为 null,后续 releaseOwner 会因 null !== envelope.windowId 抛 NotOwner。
       const session = await sessionManager.createSession({
         pathId: pathId ?? '',
         templateId: effectiveTemplateId,
@@ -269,10 +281,6 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         rows,
         ...(shellId ? { shellIdOverride: shellId } : {}),
       });
-      // 若不接管 ownership (罕见,默认接管),把 owner 改为 null
-      if (!takeOwnership) {
-        sessionManager.releaseOwner(session.id, envelope.windowId);
-      }
       const pathTreeChanged =
         JSON.stringify(pathManager.getTree()) !== oldTreeJson;
       return { session, pathTreeChanged };
@@ -328,9 +336,92 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
   );
 
   ipcMain.handle(
+    COMMAND_CHANNELS.SESSION_EXPORT_SCROLLBACK,
+    (
+      _e,
+      envelope: CommandEnvelope<{ sessionId: string }>,
+    ): { text: string } => {
+      // BETA-028:工具栏"复制全部"按钮 → 返回 UTF-8 字符串
+      return sessionManager.exportScrollback(envelope.payload.sessionId);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SESSION_CLEAR_SCROLLBACK,
+    (
+      _e,
+      envelope: CommandEnvelope<{ sessionId: string }>,
+    ): void => {
+      // BETA-028:工具栏"清屏"按钮配合 term.clear() 使用
+      sessionManager.clearScrollback(envelope.payload.sessionId);
+    },
+  );
+
+  ipcMain.handle(
     COMMAND_CHANNELS.SESSION_RELEASE,
     (_e, envelope: CommandEnvelope<ReleaseSessionPayload>): void => {
       sessionManager.releaseOwner(envelope.payload.sessionId, envelope.windowId);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SESSION_OPEN_IN_NEW_WINDOW,
+    (
+      _e,
+      envelope: CommandEnvelope<OpenSessionInNewWindowPayload>,
+    ): OpenSessionInNewWindowResponse => {
+      const { sessionId } = envelope.payload;
+      const session = sessionManager.get(sessionId);
+      if (!session) {
+        throw makeIpcError('SessionNotFound', `sessionId="${sessionId}"`);
+      }
+      // 允许两种情况:
+      //   1) 当前 owner 就是调用方 → 先释放再 claim 给新窗口(经典"移到新窗口")
+      //   2) session 是 orphan(无主) → 不需要释放,直接 claim 给新窗口
+      // 拒绝:其他窗口正持有 — 跨窗口偷会话不在本协议允许范围。
+      if (
+        session.ownerWindowId !== null &&
+        session.ownerWindowId !== envelope.windowId
+      ) {
+        throw makeIpcError(
+          'NotOwner',
+          `sessionId="${sessionId}" 由其他窗口持有(${session.ownerWindowId}),不能从此窗口移动`,
+        );
+      }
+      // 同步:若是调用方持有则先 release,然后造新窗口 + claim — 新窗口拉
+      // snapshot 时已经是它持有的状态,renderer 从 URL ?selectSessionId 读到
+      // 目标后直接 dispatch 选中,没有跨进程时序竞争。
+      if (session.ownerWindowId === envelope.windowId) {
+        sessionManager.releaseOwner(sessionId, envelope.windowId);
+      }
+      // 从调用方窗口的当前 bounds 计算级联偏移,避免新窗口完全盖在旧窗口上。
+      // getNormalBounds 排除最大化/全屏的扩展尺寸,所以即使调用方是 maximized,
+      // 新窗口也会落到"该窗口被还原后的位置 + 偏移",不会撑满屏幕。
+      const callerWin = windowManager.getById(envelope.windowId);
+      const cascadeBounds = (() => {
+        if (!callerWin || callerWin.isDestroyed()) return undefined;
+        const b = callerWin.getNormalBounds();
+        const CASCADE = 32;
+        return {
+          width: b.width,
+          height: b.height,
+          x: b.x + CASCADE,
+          y: b.y + CASCADE,
+          maximized: false,
+        };
+      })();
+      const info = windowManager.createWindowFromFactory({
+        selectSessionId: sessionId,
+        ...(envelope.payload.simpleMode ? { simpleMode: true } : {}),
+        ...(cascadeBounds ? { initialBounds: cascadeBounds } : {}),
+      });
+      try {
+        sessionManager.claimOwner(sessionId, info.id);
+      } catch (err) {
+        // 极小概率:在 release 与 claim 之间另一个窗口抢先 claim。session 留
+        // 在那里(orphan 或被抢),新窗口仍开出来,只是不会自动 select。
+      }
+      return { windowId: info.id, windowNumber: info.number };
     },
   );
 
@@ -567,6 +658,24 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     COMMAND_CHANNELS.SYSTEM_GET_BUILD_TYPE,
     (_e, _envelope: CommandEnvelope<undefined>) => {
       return { buildType: getBuildType() };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_GET_DATA_DIR,
+    (_e, _envelope: CommandEnvelope<undefined>): { dataDir: string } => {
+      // BETA-039:UI 设置页用真实绝对路径替代硬编码 %APPDATA%\Marina,
+      // 在 portable / dev / 自定义 userData 场景下也保持准确。
+      return { dataDir: app.getPath('userData') };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.AI_TEST_CONNECTION,
+    async (_e, _envelope: CommandEnvelope<undefined>) => {
+      // BETA-031:AI 助手设置页"测试连接"按钮调用。失败信息透传 UI。
+      if (!aiClient) return { ok: false, message: 'AI client 未初始化' };
+      return aiClient.testConnection();
     },
   );
 

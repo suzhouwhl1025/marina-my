@@ -52,9 +52,17 @@ import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { SettingsManager } from './settings-manager';
+import type { AIClient } from './ai-client';
+// @xterm/headless 是纯 CommonJS(无 ESM exports 字段),Electron 主进程
+// ESM loader 不接受 named import — 必须 default import 拿整个 module 再
+// 解构。类型用 `InstanceType<typeof HeadlessTerminal>` 推,避免重复声明。
+import xtermHeadless from '@xterm/headless';
+const { Terminal: HeadlessTerminal } = xtermHeadless;
+type HeadlessTerminal = InstanceType<typeof HeadlessTerminal>;
 import { Osc1337Parser } from './osc1337-parser';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
+import { logger } from './logger';
 
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
 
@@ -109,6 +117,58 @@ const EMIT_BATCH_MS = 8;
  * 直接稳定在 active(初始即 active),grace 结束后正常切 idle。
  */
 const STARTUP_GRACE_MS = 1500;
+
+/**
+ * BETA-006 v2.2:按键事件 ring buffer 上限 + 保留窗口。
+ *
+ * 用于 recheckIdle 元数据(scrollback 末"prompt> some text"两种情况完全
+ * 同形,光看 tail 区分不开"用户在敲字"vs"命令在跑")。20 条 × 30s 窗口够
+ * LLM 看到最近的输入节奏(节奏一致 = 正在打字,完全静止 = 等输出)。
+ *
+ * **隐私**:这里只记**时间戳 + 按键类别**(char / enter / backspace / other),
+ * 永远不记按键内容(密码 / token / 命令体)。详见 classifyInput。
+ */
+const RECENT_KEYS_CAP = 20;
+const RECENT_KEYS_TTL_MS = 30_000;
+
+/**
+ * BETA-006 v2.2:按键类别。**绝不记内容,只记类别**(隐私保护)。
+ *
+ * - char: 可打印字符(单个 ASCII 字母 / 数字 / 标点 / 单个 CJK 字符 UTF-8)
+ * - enter: \r 或 \n(提交)
+ * - backspace: \b 或 \x7f(删除)
+ * - other: 控制字符 / 方向键 / 粘贴块 / 其它(对 active/idle 判断信号弱)
+ */
+type KeyKind = 'char' | 'enter' | 'backspace' | 'other';
+
+interface KeyEvent {
+  /** Date.now() */
+  ts: number;
+  kind: KeyKind;
+}
+
+/**
+ * BETA-006 v2.2:按键类别识别。**不解析内容,只看头几个字节模式**。
+ *
+ * 输入 `text` 是 sendInput 一次写入 PTY 的字节流(xterm onData 通常一次一个
+ * 逻辑按键;粘贴可能一次几百字符)。识别规则保守 — 拿不准就归 `other`。
+ */
+function classifyInput(text: string): KeyKind {
+  if (text === '\r' || text === '\n' || text === '\r\n') return 'enter';
+  if (text === '\x7f' || text === '\b') return 'backspace';
+  // ESC 起头 = CSI / SS3 / OSC 等控制序列(方向键、F 键、bracketed paste 标记等)
+  if (text.startsWith('\x1b')) return 'other';
+  if (text.length === 1) {
+    const code = text.charCodeAt(0);
+    // 单字节控制字符 (Ctrl+letter 等) 归 other
+    if (code < 0x20 || code === 0x7f) return 'other';
+    return 'char';
+  }
+  // 多字节但短(≤4 字节)— 很可能是单个 CJK 字符的 UTF-8 编码
+  if (text.length <= 4) return 'char';
+  // 再长就当粘贴块/其它 — 不暴露具体长度也是隐私考虑
+  return 'other';
+}
 
 /**
  * Input echo quiet 窗口(抖动源 C/E)。
@@ -253,6 +313,26 @@ interface ManagedSession {
    */
   inputQuietUntil: number;
   /**
+   * BETA-006 v2.1:用户上次按 Enter (\r 或 \n) 的时刻 (ms epoch)。
+   * 0 = 从未按过。recheckIdle 把"距上次 Enter 多久"作为元数据喂给 LLM,
+   * 帮它区分"长命令在跑(Enter 刚按过)"与"用户在打字但没提交(Enter 老
+   * 没按过)"— scrollback 末尾两种情况文本相同,LLM 单看 tail 无法区分。
+   */
+  lastEnterAt: number;
+  /**
+   * BETA-006 v2.1:用户上次任何按键 sendInput 的时刻 (ms epoch)。
+   * 0 = 从未输入。配合 lastEnterAt 让 LLM 判断"敲了字但没回车"的边界:
+   * lastInputAt 近 + lastEnterAt 远 → 用户在打字 → idle。
+   */
+  lastInputAt: number;
+  /**
+   * BETA-006 v2.2:最近按键事件 ring buffer(时间戳 + 类别,**不存内容**)。
+   * 上限 RECENT_KEYS_CAP 条 + RECENT_KEYS_TTL_MS 窗口,sendInput 时维护。
+   * 让 LLM 看到"用户最近敲键的节奏":连续 char 流 = 在打字,只有一个 enter
+   * 后归零 = 命令在跑,no events = 完全闲置。详见 classifyInput 注释。
+   */
+  recentKeys: KeyEvent[];
+  /**
    * 用户是否已手动改过 displayName。一旦为 true,后续 OSC 0/1/2 标题事件
    * 不再覆盖 displayName — 手动改名优先级永久高于 shell 标题(Claude Code、
    * Windows Terminal hostname 等会持续刷标题,不锁住会冲掉用户的命名)。
@@ -268,6 +348,15 @@ interface ManagedSession {
    */
   pendingEmit: { bytes: Buffer; lastSeq: number } | null;
   pendingEmitTimer: NodeJS.Timeout | null;
+  /**
+   * BETA-006 v2:headless terminal 镜像。每个 session 跟着 PTY passthrough
+   * 字节同步 write,buffer 维护"已渲染"字符矩阵 — 复核时读这里拿干净文本,
+   * 跳过 ANSI 转义和 PSReadLine 重绘残影,LLM 看到的与用户视觉一致。
+   *
+   * null = 该 session 没有 headless 镜像(理论上 createSession 总会建,
+   * 留 null 是为了 destroy 后访问安全)。
+   */
+  headlessTerm: HeadlessTerminal | null;
 }
 
 export interface CreateSessionInput {
@@ -447,6 +536,15 @@ export class SessionManager extends EventEmitter {
     );
 
     const env = buildSpawnEnv(process.env, SPAWN_ENV_SKIP);
+    // BETA-001:Windows 上 process.env.PATH 是启动时的快照,装新软件后不会自动
+    // 刷新。每次 spawn 前从注册表合并最新 PATH 覆写过去,确保新装的 python.exe /
+    // node.exe 立刻可用。失败回退 process.env.PATH(已在 env 里),不阻塞 spawn。
+    const refreshedPath = this.platformAdapter.getRefreshedPath();
+    if (refreshedPath) {
+      env.PATH = refreshedPath;
+      // Windows 部分组件读 Path(不是 PATH),冗余赋值一份保持兼容
+      env.Path = refreshedPath;
+    }
     Object.assign(env, launchParams.env);
     Object.assign(env, template.env);
 
@@ -487,7 +585,7 @@ export class SessionManager extends EventEmitter {
       pid: pty.pid,
       displayName: pickDisplayName(template, shell),
       ownerWindowId: input.ownerWindowId || null,
-      state: 'active',
+      state: 'idle',
       createdAt: Date.now(),
     };
 
@@ -507,9 +605,21 @@ export class SessionManager extends EventEmitter {
       resizeQuietUntil: 0,
       startupGraceUntil: Date.now() + this.startupGraceMs,
       inputQuietUntil: 0,
+      lastEnterAt: 0,
+      lastInputAt: 0,
+      recentKeys: [],
       manuallyRenamed: false,
       pendingEmit: null,
       pendingEmitTimer: null,
+      // BETA-006 v2:headless 镜像,scrollback 行数 1000 够装最近几屏 + 历史。
+      // allowProposedApi:translateBufferLineToString 是 proposed api,xterm 5.x
+      // 长期稳定,proposed 只是流程慢。
+      headlessTerm: new HeadlessTerminal({
+        cols: info.cols,
+        rows: info.rows,
+        scrollback: 1000,
+        allowProposedApi: true,
+      }),
     };
     this.sessions.set(sessionId, managed);
 
@@ -525,15 +635,21 @@ export class SessionManager extends EventEmitter {
       this.startCwdPolling(managed);
     }, CWD_GRACE_MS);
 
-    // CP-4 勘误 #5:初始 state='active' 时立即起 idle 计时器。
+    // BETA-008(2026-05-15)推翻 CP-4 勘误 #5 的"初始 active"设计:
     //
-    // 原 bug:有的 shell 启动期第一波 PTY 数据可能是纯 OSC 1337(passthrough 为空),
-    // 此时 markActive 不被调用,scheduleIdleCheck 永不启动,state 永远卡在 'active'。
-    // 表现 = 用户看到"终端状态卡在活跃"(绿点不变黄)。
+    // 旧语义:active = 最近有字节 / idle = N 秒无输出。这导致新建终端瞬间是绿色 active,
+    // 用户感知为"刚建就闪绿",且 startup banner 字节流让状态点反复跳。
     //
-    // 修复:创建时直接 schedule 一次 idle 检查;后续任何有效字节流到达 markActive
-    // 会重置该 timer,不影响"有输出 → 保持 active"的语义。
-    this.scheduleIdleCheck(managed);
+    // 新语义(v1.7 起):
+    //   active(绿) = **用户的命令正在执行**
+    //   idle(黄)  = 等待命令(含 banner 期 + prompt 等待)
+    //   exited(灰) = 进程已退出(不变)
+    //
+    // 因此创建时直接 state='idle',无需 scheduleIdleCheck 兜底 — markActive 仅在
+    // grace 期外的真字节流到达时触发,grace 内 banner 字节会跳过 markActive,
+    // 状态自然停在 idle 不跳。"OSC-only banner 卡 active"的旧 bug 同步消失。
+    //
+    // 对应工单库 BETA-008、软件定义书 8.3 节(ADR-014)。
 
     // 把 session 挂到 path 上 (PathManager 自动触发分类流转 + emit)
     this.pathManager.attachSession(sessionId, input.pathId);
@@ -722,6 +838,11 @@ export class SessionManager extends EventEmitter {
     if (!managed) return { accepted: false, reason: 'session-not-found' };
     if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
+    // BETA-006 v2.1:把"上次任意输入""上次按 Enter"两个时刻打戳,recheckIdle
+    // 把它们作为元数据喂给 LLM 区分"长命令在跑"vs"用户打字未提交"。
+    // 注意 lastInputAt 在每次 sendInput 都更新,即使内容只是箭头键 / Ctrl-X。
+    const now = Date.now();
+    managed.lastInputAt = now;
     // CUR-1:用户按 Enter (\r 或 \n) → 关闭 input quiet 窗口,让紧随的
     // 真实命令输出立即触发 markActive。否则 200ms 内的真输出被压成
     // "状态点保持 idle 黄色",直到 200ms 后才变绿 — 用户视角"按 Enter
@@ -729,8 +850,24 @@ export class SessionManager extends EventEmitter {
     // 普通按键(非 Enter)仍走原逻辑顺延 quiet 窗口。
     if (text.includes('\r') || text.includes('\n')) {
       managed.inputQuietUntil = 0;
+      managed.lastEnterAt = now;
     } else {
-      managed.inputQuietUntil = Date.now() + this.inputQuietMs;
+      managed.inputQuietUntil = now + this.inputQuietMs;
+    }
+    // BETA-006 v2.2:按键事件 ring buffer。**绝不存内容,只存时间戳+类别**。
+    // 进:classifyInput 返回 char/enter/backspace/other,push 一条。
+    // 出:超 TTL 或超 cap 的从头部移除(典型 ring buffer)。
+    const kind = classifyInput(text);
+    managed.recentKeys.push({ ts: now, kind });
+    const cutoff = now - RECENT_KEYS_TTL_MS;
+    while (
+      managed.recentKeys.length > 0 &&
+      (managed.recentKeys[0]?.ts ?? Infinity) < cutoff
+    ) {
+      managed.recentKeys.shift();
+    }
+    while (managed.recentKeys.length > RECENT_KEYS_CAP) {
+      managed.recentKeys.shift();
     }
     // TYP-2:pty.write 在 ConPTY pipe half-closed / 子进程已死但 onExit 还
     // 没到达等 race 情况下会同步抛错。原来无 try/catch → IPC handle 把
@@ -740,8 +877,9 @@ export class SessionManager extends EventEmitter {
     try {
       managed.pty.write(text);
     } catch (err) {
-      console.warn(
-        `[SessionManager] pty.write failed sid=${sessionId}: ${
+      logger.warn(
+        'SessionManager',
+        `pty.write failed sid=${sessionId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -783,9 +921,17 @@ export class SessionManager extends EventEmitter {
     managed.info.rows = dims.rows;
     try {
       managed.pty.resize(dims.cols, dims.rows);
+      // BETA-006 v2:headless 镜像跟随 resize,buffer 折行才能与用户视觉对齐。
+      // 失败忽略(headless 自己内部数组大小,不该抛 — 真抛了也不阻塞 PTY resize)。
+      try {
+        managed.headlessTerm?.resize(dims.cols, dims.rows);
+      } catch {
+        /* ignore */
+      }
     } catch (err) {
-      console.warn(
-        `[SessionManager] resize ignored sid=${sessionId} ${dims.cols}x${dims.rows}: ${
+      logger.warn(
+        'SessionManager',
+        `resize ignored sid=${sessionId} ${dims.cols}x${dims.rows}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -832,6 +978,29 @@ export class SessionManager extends EventEmitter {
     };
   }
 
+  /**
+   * BETA-028:返回 scrollback 的 UTF-8 字符串(供"复制全部"工具栏按钮)。
+   * 大 scrollback 用 Buffer→string 一次性转换,在 2MB 上限下可接受。
+   */
+  exportScrollback(sessionId: string): { text: string } {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return { text: '' };
+    return { text: managed.scrollback.toString('utf8') };
+  }
+
+  /**
+   * BETA-028:清空 main 端 scrollback ring buffer。配合 renderer 的
+   * term.clear() 使用 —— 否则下次 TerminalView 重挂载时会把已"看似清空"
+   * 的历史又回灌一遍。
+   *
+   * scrollbackLastSeq 不重置,保持序列号单调,避免 pending replay 出错。
+   */
+  clearScrollback(sessionId: string): void {
+    const managed = this.sessions.get(sessionId);
+    if (!managed) return;
+    managed.scrollback = Buffer.alloc(0);
+  }
+
   // ──────────────────────────────────────────────────────────────────
   // 内部:PTY 数据处理
   // ──────────────────────────────────────────────────────────────────
@@ -872,15 +1041,20 @@ export class SessionManager extends EventEmitter {
       const seq = managed.outputSeq++;
       this.queueEmit(managed, parsed.passthrough, seq);
 
+      // BETA-006 v2:同步喂给 headless terminal — write 是异步的(内部
+      // 调度到 next tick),但读 buffer 是同步的且会反映已 write 完的部分。
+      // 复核时 buffer 可能比 PTY 实际状态滞后几 ms,可接受 — 复核本来
+      // 就在 thresholdSec 静默后触发,几 ms 误差无关紧要。
+      managed.headlessTerm?.write(parsed.passthrough);
+
       // 状态机:有输出 → active,重置 idle 计时器。
       // 跳过 markActive 的三种 quiet 窗口(scrollback / sessionOutput 仍正常,
       // 只跳过 markActive):
       //   - resize quiet (CP-3 勘误 #3 v2):避免 ConPTY/SIGWINCH 重绘字节让
       //     tab 闪绿;TerminalView mount 时也无条件触发此窗口
       //   - startup grace (M1-I):session 初创 1.5s 内的 banner/prompt 输出
-      //     视作"应有的启动声",不让它"创建 → 立即 active → 1.5s 后 idle"
-      //     这套抖动闪过去;创建时 state='active' + scheduleIdleCheck 已起好,
-      //     grace 内 markActive 跳过,grace 结束后正常变 idle
+      //     视作"应有的启动声",BETA-008 后初始 state='idle',grace 期 banner
+      //     字节跳过 markActive,自然停在 idle 不闪绿
       //   - input echo quiet (抖动源 C/E):压住 sendInput 后 200ms 内的 echo /
       //     TUI 重绘字节,避免"敲键自己点亮状态点"
       const now = Date.now();
@@ -891,13 +1065,9 @@ export class SessionManager extends EventEmitter {
       ) {
         this.markActive(managed);
       } else if (now < managed.startupGraceUntil) {
-        // STM-4:grace 期内有字节流入,虽然跳过 markActive(避免抖动),
-        // 但仍重置 idle timer — 否则 banner 在 1.49s 才结束的极端 case
-        // 下,createSession 起的 idle timer 2s 到点 fire → "刚结束 banner
-        // 就 idle"。重置后 idle timer 顺延,grace 后实际进 idle 的时机
-        // = 最后一条 banner 字节 + activeIdleThresholdSeconds(默认 2s),
-        // 符合用户预期。
-        this.scheduleIdleCheck(managed);
+        // BETA-008 后:grace 期内初始 state='idle',banner 字节流不让它变 active,
+        // 但也不需要 scheduleIdleCheck 兜底(根本就在 idle)。
+        // markActive 流程在 grace 期外才走,scheduleIdleCheck 由 markActive 自己起。
       }
     }
   }
@@ -997,6 +1167,18 @@ export class SessionManager extends EventEmitter {
     if (!this.sessions.has(managed.info.id)) return; // 已被 closeSession 清理过
     if (managed.info.state === 'exited') return; // 防御性:不双发
 
+    // STM-1:在 emit sessionExited 之前把 pending 字节段先 flush 出去,
+    // 保证 renderer 看到的因果序是"最后一段输出 → exited",而不是相反。
+    // 否则 PER-2 引入的 8ms 聚合窗口可能含 PTY 退出前最后一波字节,等到
+    // exited 已发出后才 fire → renderer 收到"已退出 session 的延迟输出"。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
+    }
+    if (managed.pendingEmit) {
+      this.flushPendingEmit(managed);
+    }
+
     // emit session-exited 事件 (用于通知 renderer 显示 exitCode 等)
     const payload: SessionExitedPayload = {
       sessionId: managed.info.id,
@@ -1052,13 +1234,23 @@ export class SessionManager extends EventEmitter {
       try {
         managed.pty.kill();
       } catch (err) {
-        console.warn(
-          `[SessionManager] kill failed sid=${sid}: ${
+        logger.warn(
+          'SessionManager',
+          `kill failed sid=${sid}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       }
       managed.pty = null;
+    }
+    // BETA-006 v2:释放 headless terminal,免得 buffer 行随 GC 慢慢飘
+    if (managed.headlessTerm) {
+      try {
+        managed.headlessTerm.dispose();
+      } catch {
+        /* ignore */
+      }
+      managed.headlessTerm = null;
     }
     this.sessions.delete(sid);
     this.pathManager.detachSession(sid);
@@ -1084,12 +1276,106 @@ export class SessionManager extends EventEmitter {
     const ms = Math.max(100, thresholdSec * 1000);
     managed.idleTimer = setTimeout(() => {
       managed.idleTimer = null;
-      if (managed.info.state === 'active') {
-        managed.info.state = 'idle';
-        this.emitStateChanged(managed, { state: 'idle' });
+      if (managed.info.state !== 'active') return;
+      // BETA-006:active→idle 跃迁前给 LLM 看一眼 scrollback 尾部判断。
+      // 仅在用户开启 statusRecheckEnabled 且 aiClient.isConfigured() 时生效。
+      // 失败 / LLM 异常时回退到原行为(直接转 idle),不阻塞主流程。
+      const s = this.settingsManager.get();
+      if (
+        s.ai?.statusRecheckEnabled &&
+        this.aiClient &&
+        this.aiClient.isConfigured()
+      ) {
+        // BETA-006 v2:按 settings.ai.statusRecheckSource 选输入源。
+        // headless = 从 @xterm/headless buffer 拿"已渲染"文本(无 ANSI 噪音 /
+        // 无 PSReadLine 重绘残影),raw = 保留旧路径(scrollback 末 2KB 原始
+        // 字节)。screenshot 暂未实现 → fallback 到 raw。
+        const source = s.ai.statusRecheckSource ?? 'headless';
+        const tail =
+          source === 'headless' && managed.headlessTerm
+            ? this.getHeadlessTail(managed, 40)
+            : managed.scrollback
+                .subarray(Math.max(0, managed.scrollback.length - 2048))
+                .toString('utf8');
+        // BETA-006 v2.1:把"上次 Enter / 上次任意输入距今多久"喂给 LLM,
+        // 帮它区分"长命令在跑"vs"用户打字未按回车"。
+        // BETA-006 v2.2:再附最近按键事件 ring buffer(类别+时间,无内容),
+        // 让 LLM 看到节奏 — 连续 char 流 = 在打字,只一个 enter 后归零 = 命令在跑。
+        const now = Date.now();
+        const meta = {
+          enterAgeMs: managed.lastEnterAt ? now - managed.lastEnterAt : null,
+          inputAgeMs: managed.lastInputAt ? now - managed.lastInputAt : null,
+          recentKeys: managed.recentKeys.map((k) => ({
+            ageMs: now - k.ts,
+            kind: k.kind,
+          })),
+        };
+        this.aiClient
+          .recheckIdle(tail, meta)
+          .then((verdict) => {
+            if (verdict === 'keep-active') {
+              // LLM 判定还在跑 → 重新调度,不转 idle
+              if (managed.info.state === 'active') this.scheduleIdleCheck(managed);
+              return;
+            }
+            if (managed.info.state === 'active') {
+              managed.info.state = 'idle';
+              this.emitStateChanged(managed, { state: 'idle' });
+            }
+          })
+          .catch((err) => {
+            logger.warn('SessionManager', 'BETA-006 LLM recheck failed, fallback', err);
+            if (managed.info.state === 'active') {
+              managed.info.state = 'idle';
+              this.emitStateChanged(managed, { state: 'idle' });
+            }
+          });
+        return;
       }
+      // 默认路径:直接转 idle
+      managed.info.state = 'idle';
+      this.emitStateChanged(managed, { state: 'idle' });
     }, ms);
   }
+
+  /**
+   * BETA-006 v2:从 headless terminal buffer 拿最后 maxRows 行非空文本。
+   *
+   * 实现:buffer.active 是当前 viewport(含 scrollback),从 baseY..baseY+rows
+   * 是可视区,baseY 之前是 scrollback。从 buffer 末尾向上扫,跳过纯空白行,
+   * 收集 maxRows 行,反转后用 \n 拼接。
+   *
+   * 为什么不直接取 viewport(rows 行):viewport 末尾可能有几行空白(光标
+   * 还没到底),会浪费 LLM 看的窗口。从末尾找非空更接近"用户视觉看到的最后
+   * 几行内容"。
+   *
+   * 不剪空格 / 不 strip 尾空白 — buffer 已经是"渲染后"的字符矩阵,没有
+   * ANSI 转义,自然干净。
+   */
+  private getHeadlessTail(managed: ManagedSession, maxRows: number): string {
+    if (!managed.headlessTerm) return '';
+    const buf = managed.headlessTerm.buffer.active;
+    // buf.length 是 scrollback + viewport 总行数
+    const total = buf.length;
+    const lines: string[] = [];
+    for (let y = total - 1; y >= 0 && lines.length < maxRows; y--) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      const text = line.translateToString(true); // trim trailing whitespace
+      if (lines.length === 0 && text === '') continue; // 跳过末尾空行
+      lines.push(text);
+    }
+    return lines.reverse().join('\n');
+  }
+
+  /**
+   * BETA-031:bootstrap 启动后注入 AIClient,供 BETA-006 状态复核使用。
+   * 可空(测试场景不注入);需要后从 settings.ai 现读配置。
+   */
+  setAiClient(client: AIClient | null): void {
+    this.aiClient = client;
+  }
+  private aiClient: AIClient | null = null;
 
   // ──────────────────────────────────────────────────────────────────
   // 内部:OSC 1337 cwd 处理
@@ -1126,11 +1412,17 @@ export class SessionManager extends EventEmitter {
    *   也防恶意 OSC 注入超长字符串
    * - 去前后空白后为空 → 忽略(有的 shell 启动期会发空标题清屏,不动当前名)
    * - 与现有 displayName 相同 → no-op,不发广播
+   * - TIT-1:整段就是 shell exe 路径 / MINGW prefix 的"启动垃圾"标题 →
+   *   忽略,不让 powershell.exe / cmd.exe / Git Bash 把 sidebar 里的友好名
+   *   ("PowerShell" / "Bash")覆盖成 "C:\Windows\System32\cmd.exe"。
+   *   合法 CLI 工具标题(vim / claude / make ...)前后有描述性内容,
+   *   不会被 looksLikeShellStartupGarbage 误判,详见该函数注释。
    */
   private handleOscTitle(managed: ManagedSession, rawTitle: string): void {
     if (managed.manuallyRenamed) return;
     const cleaned = sanitizeTitle(rawTitle);
     if (!cleaned) return;
+    if (looksLikeShellStartupGarbage(cleaned)) return;
     if (cleaned === managed.info.displayName) return;
     managed.info.displayName = cleaned;
     this.emitStateChanged(managed, { displayName: cleaned });
@@ -1187,6 +1479,14 @@ export class SessionManager extends EventEmitter {
     if (managed.cwdPollTimer) {
       clearInterval(managed.cwdPollTimer);
       managed.cwdPollTimer = null;
+    }
+    // STM-2:pendingEmitTimer 也是 session 生命周期内的计时器,clearTimers
+    // 必须一并清理。否则 session 已 exited 但 timer 还在 8ms 后 fire,
+    // 走 flushPendingEmit emit 一段 sessionOutput,renderer 收到"已退出 session
+    // 的延迟输出"。调用方若需要在清理前先 flush,应在调 clearTimers 之前自行 flush。
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
     }
   }
 
@@ -1269,6 +1569,53 @@ function pickShell(
 function pickDisplayName(template: Template, shell: ShellInfo): string {
   if (template.command) return template.name;
   return inferDisplayName(shell.executablePath);
+}
+
+/**
+ * OSC 标题"启动垃圾"识别(TIT-1):
+ *
+ * ⚠️ 这是一个 workaround,不是根治。详见
+ * `docs/issues/tit-1-osc-title-shell-startup-garbage.md` —— 有用户实测体感
+ * 与代码考古结论之间未对齐的缺口,某处可能有过一道屏障后来失效了,真正
+ * 根因尚未定位。下次回归此现象时先读那份 issue 文档。
+ *
+ * Windows 上 powershell.exe / cmd.exe 启动时调 Win32 SetConsoleTitle()
+ * 把窗口标题设成自己的 exe 路径,ConPTY 把这次调用翻译成 OSC 0 序列发给
+ * xterm 消费者;Git Bash 默认 PS1 又在每次 prompt 时主动发
+ * `\e]0;MINGW64:<cwd>\a`。这些"shell 启动 / 内置 prompt"产出的标题对
+ * Marina 用户而言全是噪声 — 他们希望 tab 显示的是 "PowerShell" / "Bash"
+ * 或自己跑的工具名(vim / claude / node ...),不是 shell 自己的 exe 路径
+ * 或 cwd 重复。
+ *
+ * 但绝不能误杀 CLI 工具的合法标题。CLI 工具(vim / claude / make ...)
+ * 的标题特征是 **路径只是更长描述的一部分** —— "vim /etc/hosts" /
+ * "✻ Claude · ~/p (working…)" / "make -j4"。所以判别规则是:
+ *
+ *   整段标题 *本身就是* 一个裸路径 → 启动垃圾 → 拒
+ *   标题里 *包含* 路径但前后有别的内容 → 合法 → 放行
+ *
+ * 用 ^...$ 完整匹配实现这一区分。
+ */
+export function looksLikeShellStartupGarbage(title: string): boolean {
+  // 关键判别:整段标题 *以路径前缀起手* 即视为垃圾 —— 不要求剩余部分无
+  // 空格,因为 "C:\Program Files\..." 这种合法 Windows 路径含空格。
+  // 真实 CLI 工具的标题永远是 verb-leading("vim C:\foo" / "nano /etc/hosts"
+  // / "✻ Claude ..."),不会以裸盘符或裸 "/" 起手,所以 ^ 锚就够区分。
+
+  // 1. Windows 盘符路径起手 — "C:\..." / "C:/..." / "D:\Program Files\..."
+  if (/^[A-Za-z]:[\\/]/.test(title)) return true;
+  // 2. UNC 路径起手 — "\\server\share\..."
+  if (/^\\\\/.test(title)) return true;
+  // 3. Unix 绝对路径起手 — "/usr/bin/bash"
+  if (title.startsWith('/')) return true;
+  // 4. Git Bash / MSYS2 默认 PS1 前缀 — 每次 prompt 重复发
+  //    "MINGW64:<cwd>" / "MINGW32:..." / "MSYS:..." / "MSYS2:..."
+  if (/^(MINGW(32|64|ARM)?|MSYS\d?):/i.test(title)) return true;
+  // 5. 裸 exe 文件名(无空格,以 .exe 结尾)— "cmd.exe" / "pwsh.exe"
+  //    "Visual Studio Code.exe" 等空格 exe 名作为 *启动期* 标题极其罕见,
+  //    放过比误杀稳。
+  if (/^\S+\.exe$/i.test(title)) return true;
+  return false;
 }
 
 /**
@@ -1403,6 +1750,12 @@ function createNoopAdapter(): PlatformAdapter {
     },
     async isAutoStartEnabled() {
       return false;
+    },
+    getRefreshedPath() {
+      return process.env.PATH ?? '';
+    },
+    getDefaultBookmarkSeeds() {
+      return [];
     },
   };
 }

@@ -30,6 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import type { WindowInfo } from '@shared/types';
+import { logger } from './logger';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -65,6 +66,18 @@ export interface CreateWindowOptions {
     y: number;
     maximized: boolean;
   }) => void;
+  /**
+   * BETA-027:Explorer 简易模式入口 — 注入 query mode=simple,renderer 在
+   * startup 时 dispatch view/set-simple-mode,首次渲染就跳过 Sidebar/Tab bar。
+   */
+  simpleMode?: boolean;
+  /**
+   * 右键 Tab → "在新窗口中打开":新窗口启动后从 URL ?selectSessionId 读到
+   * 目标 session,自动 dispatch view/focus-requested 切到该 session。ownership
+   * 由调用方在创建窗口前后通过 SessionManager.claimOwner 完成,这里只负责
+   * 把 hint 透传到 renderer 启动阶段。
+   */
+  selectSessionId?: string;
 }
 
 export interface IWindowManager {
@@ -204,7 +217,7 @@ export class WindowManager implements IWindowManager {
           });
         }
       } catch (err) {
-        console.warn('[WindowManager] onBeforeClose save bounds failed:', err);
+        logger.warn('WindowManager', 'onBeforeClose save bounds failed', err);
       }
     });
 
@@ -217,7 +230,7 @@ export class WindowManager implements IWindowManager {
           handler(windowId);
         } catch (err) {
           // 一个 handler 出错不能影响其他 handler 或主流程
-          console.error(`[WindowManager] onClosed handler threw for ${windowId}:`, err);
+          logger.error('WindowManager', `onClosed handler threw for ${windowId}`, err);
         }
       }
     });
@@ -241,7 +254,12 @@ export class WindowManager implements IWindowManager {
     });
 
     // dev 模式从 Vite dev server 拉,build 后从本地文件加载
-    const queryString = `?windowId=${encodeURIComponent(windowId)}&windowNumber=${windowNumber}`;
+    // BETA-027:simpleMode=true 时附加 ?mode=simple,renderer 启动时一次性 dispatch
+    const simpleFlag = options.simpleMode ? '&mode=simple' : '';
+    const selectFlag = options.selectSessionId
+      ? `&selectSessionId=${encodeURIComponent(options.selectSessionId)}`
+      : '';
+    const queryString = `?windowId=${encodeURIComponent(windowId)}&windowNumber=${windowNumber}${simpleFlag}${selectFlag}`;
     if (isDev && process.env.ELECTRON_RENDERER_URL) {
       void win.loadURL(process.env.ELECTRON_RENDERER_URL + queryString);
     } else {
@@ -278,8 +296,9 @@ export class WindowManager implements IWindowManager {
     // 用户感知"窗口闪一下重新加载",但所有 session(在 main 端)继续活,
     // PTY 不受影响,scrollback 通过 get-scrollback 重新拉到新 renderer。
     win.webContents.on('render-process-gone', (_e, details) => {
-      console.error(
-        `[WindowManager] renderer process gone (window ${windowNumber}): reason=${details.reason} exitCode=${details.exitCode}`,
+      logger.error(
+        'WindowManager',
+        `renderer process gone (window ${windowNumber}): reason=${details.reason} exitCode=${details.exitCode}`,
       );
       if (details.reason === 'clean-exit' || win.isDestroyed()) return;
       // 防御:reload 自身可能失败(罕见,通常 renderer 进程刚崩 reload
@@ -287,20 +306,23 @@ export class WindowManager implements IWindowManager {
       try {
         win.webContents.reload();
       } catch (err) {
-        console.error(
-          `[WindowManager] reload after crash failed (window ${windowNumber}):`,
+        logger.error(
+          'WindowManager',
+          `reload after crash failed (window ${windowNumber})`,
           err,
         );
       }
     });
     win.webContents.on('did-fail-load', (_e, errorCode, errorDescription, validatedURL) => {
-      console.error(
-        `[WindowManager] did-fail-load (window ${windowNumber}): code=${errorCode} desc=${errorDescription} url=${validatedURL}`,
+      logger.error(
+        'WindowManager',
+        `did-fail-load (window ${windowNumber}): code=${errorCode} desc=${errorDescription} url=${validatedURL}`,
       );
     });
     win.webContents.on('preload-error', (_e, preloadPath, error) => {
-      console.error(
-        `[WindowManager] preload-error (window ${windowNumber}): preload="${preloadPath}"`,
+      logger.error(
+        'WindowManager',
+        `preload-error (window ${windowNumber}): preload="${preloadPath}"`,
         error,
       );
     });
@@ -322,7 +344,7 @@ export class WindowManager implements IWindowManager {
       try {
         handler(info, win);
       } catch (err) {
-        console.error(`[WindowManager] onCreated handler threw for ${windowId}:`, err);
+        logger.error('WindowManager', `onCreated handler threw for ${windowId}`, err);
       }
     }
 
@@ -417,10 +439,13 @@ export class WindowManager implements IWindowManager {
   /**
    * 工厂入口:使用 createOptionsProvider 提供的 options 创建窗口。
    * IPC / 托盘等"非首窗"创建路径应调这个,而不是直接 createWindow()。
+   *
+   * @param extraOpts BETA-027 起接受 { simpleMode } 等附加 opt,与 provider
+   *   返回值合并(extraOpts 优先)。
    */
-  createWindowFromFactory(): WindowInfo {
+  createWindowFromFactory(extraOpts: Partial<CreateWindowOptions> = {}): WindowInfo {
     const opts = this.createOptionsProvider ? this.createOptionsProvider() : {};
-    return this.createWindow(opts);
+    return this.createWindow({ ...opts, ...extraOpts });
   }
 
   /**

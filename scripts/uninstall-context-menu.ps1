@@ -1,11 +1,18 @@
+# !!! KEEP THIS FILE PURE ASCII -- DO NOT add non-ASCII characters !!!
+# See src/shell-hooks/pwsh.ps1 header for the full rationale (ENC-1).
+# Regression guard: src/main/shipped-scripts-ascii.test.ts.
+#
+# ---------------------------------------------------------------------------
 # scripts/uninstall-context-menu.ps1
 #
-# 卸载 Marina Win11 新右键菜单。仅移除 MSIX 包,证书保留(下次重启用免 UAC)。
+# Uninstall the Marina Win11 right-click menu. Removes the MSIX package
+# only; the cert is kept (avoids a UAC prompt on next install).
 #
-# Marina 设置页面 "Win11 新菜单 → 关闭" 触发此脚本。
-# Marina 卸载流程也走这个(installer.nsh 直接 powershell 调 Get-AppxPackage|Remove)。
+# Triggered by Settings -> "Win11 new menu -> Disable" and by the Marina
+# uninstaller (installer.nsh calls powershell + Get-AppxPackage|Remove).
 #
-# 包不存在视为成功(幂等)。失败打 stderr + 非 0 退出。
+# Package-not-installed is treated as success (idempotent). Failures go
+# to stderr with non-zero exit.
 
 [CmdletBinding()]
 param()
@@ -14,16 +21,16 @@ $ErrorActionPreference = 'Stop'
 
 $pkg = Get-AppxPackage -Name 'Marina.ContextMenu' -ErrorAction SilentlyContinue
 if ($null -eq $pkg) {
-    Write-Output "Marina.ContextMenu 未安装,跳过。"
+    Write-Output "Marina.ContextMenu is not installed, skipping."
     exit 0
 }
 
-Write-Output "移除 $($pkg.Name) $($pkg.Version)"
+Write-Output "Removing $($pkg.Name) $($pkg.Version)"
 try {
     Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
-    Write-Output "完成。"
+    Write-Output "Done."
     exit 0
 } catch {
-    Write-Error "Remove-AppxPackage 失败:$($_.Exception.Message)"
+    Write-Error "Remove-AppxPackage failed: $($_.Exception.Message)"
     exit 4
 }

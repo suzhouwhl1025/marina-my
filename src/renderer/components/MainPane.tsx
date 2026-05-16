@@ -40,12 +40,14 @@ import {
   useAppState,
 } from '../store';
 import { TerminalView } from './TerminalView';
-import { writeClipboardText } from '../clipboard';
 import { focusTerminalDom } from '../focus';
 import { Icon, type IconName } from './icons';
+import { TemplateIcon } from './TemplateIcon';
 import { useContextMenuApi } from './ContextMenu';
 import { useToast } from './Toast';
 import { useModal } from './Modal';
+import { useCopyToClipboard } from '../hooks/useCopyToClipboard';
+import { buildSessionContextMenu } from './sessionContextMenu';
 
 interface DetectedShell {
   id: string;
@@ -53,25 +55,23 @@ interface DetectedShell {
   executablePath: string;
 }
 
-/**
- * 勘误第二轮 #4:把内置模板 id 映射到 lucide 图标。已知 builtin 走矢量图标
- * (templateShell/templateClaudeCode/templateCodex/templateOpenCode);
- * 未知 / 自定义 模板回退到 template.icon emoji 字符串。
- */
-function builtinTemplateIcon(id: string): IconName | null {
-  switch (id) {
-    case 'shell':
-      return 'templateShell';
-    case 'claude-code':
-      return 'templateClaudeCode';
-    case 'codex':
-      return 'templateCodex';
-    case 'opencode':
-      return 'templateOpenCode';
-    default:
-      return null;
-  }
-}
+// ── 终端尺寸估算用常量(P2-25) ──
+// 这是"PTY spawn 前的兜底估算":xterm 实际 mount 后由 fitAddon 写回真实
+// cols/rows,本估算只在 SESSION_CREATE 还没拿到真实尺寸时给一个合理初值。
+//
+// MONO_CHAR_ASPECT:等宽字符宽 / 字号 的经验比例。Cascadia / JBM / consolas
+// 等程序员字体在多数字号下宽高比稳定在 0.55-0.62 之间,取 0.6 是中位估值。
+// 即便偏离 ±10%,估算的 cols 偏差也只是 ±10% — fitAddon mount 后立即纠正。
+const MONO_CHAR_ASPECT = 0.6;
+// TerminalView 容器周围的固定 chrome:左右各 ~12px 内边距,顶部 tabbar 32px +
+// statusbar 24px = 56px。这两个常量配合容器 clientWidth/Height 估出可用区域。
+const TERMINAL_HOST_PADDING_X = 24;
+const TERMINAL_HOST_CHROME_Y = 56;
+// 兜底下限:就算容器尺寸异常(0 或负),也至少给 PTY 一个 spawn 能跑起来的初值。
+const MIN_COLS = 20;
+const MIN_ROWS = 5;
+
+// builtinTemplateIcon 已抽到 TemplateIcon 组件复用(P2-14)。
 
 /**
  * shell id → lucide 图标。WindowsAdapter.getShellCandidates 用的 id
@@ -139,12 +139,12 @@ export function MainPane(): JSX.Element {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const charWidth = fontSize * 0.6;
+    const charWidth = fontSize * MONO_CHAR_ASPECT;
     const cellHeight = fontSize * lineHeight;
-    const usableW = Math.max(0, el.clientWidth - 16);
-    const usableH = Math.max(0, el.clientHeight - 56);
-    const cols = Math.max(20, Math.floor(usableW / charWidth));
-    const rows = Math.max(5, Math.floor(usableH / cellHeight));
+    const usableW = Math.max(0, el.clientWidth - TERMINAL_HOST_PADDING_X);
+    const usableH = Math.max(0, el.clientHeight - TERMINAL_HOST_CHROME_Y);
+    const cols = Math.max(MIN_COLS, Math.floor(usableW / charWidth));
+    const rows = Math.max(MIN_ROWS, Math.floor(usableH / cellHeight));
     dispatch({ type: 'view/update-terminal-dims', dims: { cols, rows } });
   }, [dispatch, fontSize, lineHeight]);
 
@@ -158,17 +158,19 @@ export function MainPane(): JSX.Element {
 
   return (
     <main className="main-pane" ref={containerRef}>
-      <TabBar
-        sessions={sessions}
-        selectedSessionId={state.selectedSessionId}
-        showBlankTab={!displayable}
-      />
+      {/* BETA-027:简易模式下 Tab bar 隐藏(浮动工具栏由 App.tsx 直接渲染) */}
+      {!state.simpleMode && (
+        <TabBar
+          sessions={sessions}
+          selectedSessionId={state.selectedSessionId}
+          showBlankTab={!displayable}
+        />
+      )}
       {displayable ? (
         <TerminalView
           // 用 sessionId 作 key,确保切换时彻底重建 xterm 实例
           key={displayable.id}
           session={displayable}
-          myWindowId={state.myWindowId}
         />
       ) : (
         <EmptyPathState pathId={state.selectedPathId} />
@@ -191,6 +193,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const dispatch = useAppDispatch();
   const toast = useToast();
   const [creating, setCreating] = useState(false);
+  const displayPath = pathId;
   // 勘误第二轮 #3:启动期拉一次 detectShells,缓存到组件状态。SessionManager
   // 内部已 cache,所以二次以上调用是 O(1)。
   const [shells, setShells] = useState<DetectedShell[] | null>(null);
@@ -252,7 +255,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
 
   return (
     <div className="empty-path-state">
-      <p className="empty-hint">在 <code>{pathId}</code> 新建终端</p>
+      <p className="empty-hint">在 <code>{displayPath}</code> 新建终端</p>
 
       {shells && shells.length > 0 && (
         <div className="empty-section">
@@ -303,9 +306,6 @@ function TemplateLaunchButton({
   creating: boolean;
   onLaunch: () => void;
 }): JSX.Element {
-  // 勘误第二轮 #4:已知 builtin id 走 lucide 矢量图标;其他模板(自定义)
-  // 仍渲染用户输入的 icon 字符串(emoji / 文本)。
-  const builtinIconName = builtinTemplateIcon(template.id);
   return (
     <button
       type="button"
@@ -315,11 +315,7 @@ function TemplateLaunchButton({
       title={template.command ? `${template.name} — 启动命令: ${template.command}` : template.name}
     >
       <span className="template-icon">
-        {builtinIconName ? (
-          <Icon name={builtinIconName} size={18} />
-        ) : (
-          template.icon
-        )}
+        <TemplateIcon template={template} size={18} />
       </span>
       <span className="template-label">{template.name}</span>
     </button>
@@ -407,135 +403,46 @@ function Tab({ session, myWindowId, selected }: TabProps): JSX.Element {
         ? 'orphan'
         : 'other';
 
-  // 勘误第二轮:走 main 端 Electron clipboard (绕开 web Permission 权限拒绝)
-  const copyToClipboard = (text: string, label: string): void => {
-    void writeClipboardText(text).then((ok) => {
-      toast.push(
-        ok
-          ? { kind: 'success', message: `已复制 ${label}` }
-          : { kind: 'error', message: '复制失败' },
-      );
-    });
-  };
+  // 复制到剪贴板 — 统一走 useCopyToClipboard hook(P2-11)。
+  const copyToClipboard = useCopyToClipboard();
 
   const handleContextMenu = (e: MouseEvent<HTMLButtonElement>): void => {
     e.preventDefault();
     e.stopPropagation();
-    const path =
-      state.pathTree.bookmarks.find((p) => p.id === session.pathId)?.path ||
-      state.pathTree.temporary.find((p) => p.id === session.pathId)?.path ||
-      state.pathTree.recent.find((p) => p.id === session.pathId)?.path ||
-      session.originalCwd;
-
     ctxMenu.open({
       x: e.clientX,
       y: e.clientY,
       title: session.displayName,
-      items: [
-        {
-          // 用户测试发现"始终灰显":原代码用 `variant !== 'mine'`,
-          // 把 orphan(无主)session 也灰掉了。spec 6.3 与 milestone-1
-          // 工作记录 §2.3 描述是"**不是本窗口持有时**灰显"。orphan 不属
-          // 于"他人持有",应可重命名。改为仅 'other' 时灰显。
-          label: '重命名…',
-          disabled: variant === 'other',
-          ...(variant === 'other' ? { hint: '其他窗口持有,无法重命名' } : {}),
-          onSelect: async () => {
-            // CPB-P2 同款改造:window.prompt → 自绘 Modal.prompt。
-            // 原生 prompt 关闭后焦点漂到 body,这里 Modal.prompt 内置
-            // previousActiveElement 归还。
-            const next = await modal.prompt({
-              title: '重命名会话',
-              message: '为此会话指定新的显示名(不影响 sessionId)',
-              defaultValue: session.displayName,
-              confirmLabel: '保存',
-            });
-            if (next === null) return;
-            const trimmed = next.trim();
-            if (!trimmed) return;
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_RENAME, {
-                sessionId: session.id,
-                newDisplayName: trimmed,
-              })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `重命名失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
+      items: buildSessionContextMenu(session, {
+        variant,
+        pathTree: state.pathTree,
+        copyToClipboard,
+        toastError: (message) => toast.push({ kind: 'error', message }),
+        onRename: async () => {
+          // Tab 端走 Modal.prompt(Sidebar 端走行内编辑,两者菜单"内容"对齐
+          // 但触发体验各按各侧的惯例)。
+          const next = await modal.prompt({
+            title: '重命名会话',
+            message: '为此会话指定新的显示名(不影响 sessionId)',
+            defaultValue: session.displayName,
+            confirmLabel: '保存',
+          });
+          if (next === null) return;
+          const trimmed = next.trim();
+          if (!trimmed) return;
+          window.api
+            .invoke(COMMAND_CHANNELS.SESSION_RENAME, {
+              sessionId: session.id,
+              newDisplayName: trimmed,
+            })
+            .catch((err: unknown) =>
+              toast.push({
+                kind: 'error',
+                message: `重命名失败:${err instanceof Error ? err.message : String(err)}`,
+              }),
+            );
         },
-        {
-          // STM-3:恢复 OSC 标题自动更新 — 用户手改名后,Claude Code 等
-          // 持续刷标题的程序被锁(manuallyRenamed=true),此项重置标志位
-          // 让 OSC 0/1/2 标题事件再次生效。仅在 'mine' / 'orphan' 显示
-          // (与 '重命名' 同条件)。
-          label: '恢复自动标题',
-          disabled: variant === 'other',
-          ...(variant === 'other' ? { hint: '其他窗口持有,无法修改' } : {}),
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLEAR_MANUAL_RENAME, {
-                sessionId: session.id,
-              })
-              .then(() => {
-                toast.push({
-                  kind: 'info',
-                  message: '已恢复 — shell / agent 的标题将再次自动更新',
-                });
-              })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `恢复失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        {
-          label: '复制路径',
-          onSelect: () => copyToClipboard(path, '路径'),
-        },
-        {
-          label: '复制 cwd',
-          onSelect: () => copyToClipboard(session.currentCwd, 'cwd'),
-        },
-        {
-          label: `复制 PID${session.pid > 0 ? ` (${session.pid})` : ''}`,
-          disabled: session.pid <= 0,
-          onSelect: () => copyToClipboard(String(session.pid), 'PID'),
-        },
-        {
-          label: '在 Explorer 中显示',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-        { divider: true, label: '' },
-        {
-          label: '关闭',
-          danger: true,
-          disabled: variant === 'other',
-          onSelect: () => {
-            window.api
-              .invoke(COMMAND_CHANNELS.SESSION_CLOSE, { sessionId: session.id })
-              .catch((err: unknown) =>
-                toast.push({
-                  kind: 'error',
-                  message: `关闭失败:${err instanceof Error ? err.message : String(err)}`,
-                }),
-              );
-          },
-        },
-      ],
+      }),
     });
   };
 

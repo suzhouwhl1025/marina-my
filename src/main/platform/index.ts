@@ -63,6 +63,46 @@ export interface PlatformAdapter {
   /** 设置 / 查询开机启动 */
   setAutoStart(enabled: boolean): Promise<void>;
   isAutoStartEnabled(): Promise<boolean>;
+
+  /**
+   * 拉取一份最新的 PATH 环境变量(BETA-001)。
+   *
+   * Windows 上 Marina 启动时 Node 把 process.env.PATH 快照固定,之后用户安装
+   * 新软件改写注册表里的 PATH,已运行进程不会收到广播。每次 spawn 前从注册表
+   * 重新读 HKLM + HKCU 合并后的 PATH,确保新装的 python.exe / node.exe 立刻
+   * 可见。失败时回退 process.env.PATH 并写 log.warn。
+   *
+   * macOS / Linux 平台一般不需要(标准 fork/exec 已继承 shell 完整 env),
+   * 直接返回 process.env.PATH 即可。
+   */
+  getRefreshedPath(): string;
+
+  /**
+   * 返回干净安装时种入收藏栏的"默认收藏"条目。
+   *
+   * 历史:BETA-011 曾把这些路径放在 Sidebar 第 4 栏"系统",2026-05-16
+   * 决定取消独立分组 — 桌面/主目录直接作为安装默认收藏,用户可重命名 /
+   * 移除,行为与普通收藏完全一致。
+   *
+   * Windows:%USERPROFILE%\Desktop("桌面") / %USERPROFILE%("主目录")
+   * Linux / macOS:接口保留,实现见各平台 adapter(目前 throw)
+   *
+   * 返回数组顺序 = 种子顺序。每次启动都会被调用,但只有 bookmarks.json
+   * 不存在(JsonStore source==='default')时才生效一次,后续启动不会重播。
+   */
+  getDefaultBookmarkSeeds(): DefaultBookmarkSeed[];
+}
+
+/**
+ * 干净安装时种入收藏栏的默认条目。
+ * 落到 PathManager 后会被分配 UUID,加入 bookmarks.json 持久化,
+ * 与用户手动添加的收藏一视同仁。
+ */
+export interface DefaultBookmarkSeed {
+  /** 显示名,如 "桌面" / "主目录" */
+  label: string;
+  /** 文件系统绝对路径(平台决定具体值) */
+  path: string;
 }
 
 /**
