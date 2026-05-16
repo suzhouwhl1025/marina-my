@@ -123,28 +123,16 @@ export function Sidebar(): JSX.Element {
   };
 
   /**
-   * F10(beta 勘误2 续 v3):dropzone 拖拽全面重做。
+   * F12(DROP-1 架构重构):拖拽决策全部收拢到 App.tsx 的 window 监听器。
+   * Sidebar 不再 preventDefault / 不再设 dropEffect — 那些事 window 统
+   * 一管,通过 `data-drop-zone="files"` 标记声明"我接受"。
    *
-   * 历史问题:
-   * - F8 心跳超时解决了"虚线框驻留"
-   * - F9 加了文件类型过滤 + 浮卡 + inset 阴影,但用户反馈:
-   *     (a) 左边框看不到 — overflow:hidden + 滚动容器下 inset box-shadow
-   *         在左侧渲染不稳定
-   *     (b) 鼠标在禁止/可放置之间闪烁 — dropEffect 只在 .sidebar-bookmarks-dropzone
-   *         区设了 'copy';一旦光标飘出该子元素(footer 上方、滚动条 gutter、
-   *         category header 间缝隙、或快速移动让 dragover 没赶上),回落到
-   *         App.tsx 的 window-level dragover 兜底 preventDefault 但没设
-   *         dropEffect,Chromium 落回 'none' 显示禁止图标。
+   * 本组件这里只剩两件事:
+   *   1. onDragOver 维护视觉态(.drag-over 高亮 + 居中浮卡)
+   *   2. onDrop 消费 files → IPC bookmark:add
    *
-   * 新方案:
-   * 1. drag handlers 提到整个 .sidebar (aside) — hit area 一口气覆盖,不再
-   *    有"在 sidebar 内但又不在 dropzone"的真空区。
-   * 2. dropEffect = 'copy' 无条件设(只要 preventDefault 了),不再做内部
-   *    isFileDrag 过滤就停手 — 即便后续不接受,先把光标稳住。
-   * 3. 边框靠独立的 `.sidebar-drag-overlay` 绝对定位 div,position:fixed-like
-   *    inset:0 覆盖整个 sidebar,普通 border 而非 inset shadow,绕开 overflow
-   *    渲染坑。pointer-events:none 不挡 drop。
-   * 4. 心跳超时机制保留(F8)— 处理拖出窗口 / ESC 场景。
+   * 心跳超时(F8 引入)仍然保留:拖出窗口 / ESC 时没有可靠的 dragleave,
+   * 靠"150ms 没收到下一个 dragover 就清视觉态"兜底。
    */
   const dragHeartbeatRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -166,7 +154,7 @@ export function Sidebar(): JSX.Element {
    * 检查当前拖拽内容是否含文件。
    * 注:Chromium 的 DataTransfer.types 在 dragover 阶段对 OS 文件拖拽稳定
    * 返回包含 "Files" 的数组。非文件来源(终端选区 / 网页文本拖拽)不含。
-   * 仅用于 setDragOver 视觉态判定,不再用来决定是否 preventDefault。
+   * 仅用于视觉态门控 — 避免拖文本时也跳出"放下添加为收藏"的浮卡。
    */
   const isFileDrag = (e: DragEvent<HTMLElement>): boolean => {
     const types = e.dataTransfer?.types;
@@ -178,17 +166,12 @@ export function Sidebar(): JSX.Element {
   };
 
   const handleDragOver = (e: DragEvent<HTMLElement>): void => {
-    // 关键:无条件 preventDefault + dropEffect — 让 Chromium 在整个 sidebar
-    // 区域稳定显示"复制"光标,杜绝光标闪烁。stopPropagation 阻止 App.tsx
-    // 的 window-level dragover 在同一事件上重复处理。
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-    // 视觉态只在真文件拖拽时激活,避免文本/内部拖拽误显高亮 + 浮卡。
-    if (isFileDrag(e)) {
-      setDragOver(true);
-      clearDragOverSoon();
-    }
+    // 注意:这里不调 preventDefault / 不设 dropEffect — App.tsx 的 window
+    // 监听器是唯一决策点(它会通过 data-drop-zone 属性识别本元素是 drop
+    // zone 并设 'copy')。本 handler 只为视觉反馈服务。
+    if (!isFileDrag(e)) return;
+    setDragOver(true);
+    clearDragOverSoon();
   };
 
   const handleDrop = async (e: DragEvent<HTMLElement>): Promise<void> => {
@@ -220,6 +203,7 @@ export function Sidebar(): JSX.Element {
   return (
     <aside
       className={`sidebar${dragOver ? ' drag-over' : ''}`}
+      data-drop-zone="files"
       onClick={(e) => {
         if (e.target === e.currentTarget) {
           dispatch({ type: 'view/select-path', pathId: null });

@@ -31,31 +31,52 @@ type HandshakeState =
 export function App(): JSX.Element {
   const [handshake, setHandshake] = useState<HandshakeState>({ status: 'pending' });
 
-  // 全窗口兜底:吃掉所有未消费的 dragover/drop。
-  // Why: 未被 preventDefault 的拖放事件会触发两个不想要的默认行为 ——
+  // F12(DROP-1 重构):window 层成为拖拽决策的"唯一权威"。
+  //
+  // 历史:F9-F11 让 Sidebar 自己 preventDefault + 设 dropEffect='copy',
+  // 然后 window 兜底靠 e.defaultPrevented 判断是否被消费 — 两个 handler
+  // 独立判断"光标在不在 sidebar 内",在 Chromium dragover 节流空帧 +
+  // React 合成事件派发时序的双重干扰下,偶尔不同步,光标在 copy/⊘ 间闪。
+  //
+  // 现在:子组件不再碰 preventDefault / dropEffect。所有决策集中到这
+  // 一个 native 监听器,通过 e.target.closest('[data-drop-zone]') 同步
+  // 判断 — 一次事件,一个决策,不可能"两个 handler 抢答"。
+  //
+  // 关键:dragenter 和 dragover 都要 preventDefault!HTML5 DnD 规范明文
+  // 规定 "both ... must be cancelled to allow dropping"。光标跨越子元
+  // 素边界时,事件序列是 dragleave(旧)→ dragenter(新)→ dragover(新)。
+  // 如果只挂 dragover,dragenter 期间新元素被 Chromium 默认判定为"非
+  // drop target",光标会闪一帧 ⊘ 再被下一个 dragover 改回 copy —
+  // F12.1 修复的就是这个症状。
+  //
+  // 子组件只剩两件事:
+  //   (1) 在自己的根 element 加 data-drop-zone="..."(声明"我接受")
+  //   (2) onDrop 处理消费逻辑(读 files、IPC 等);可选 onDragOver
+  //       仅维护视觉态(高亮/浮卡),与决策完全解耦。
+  //
+  // 浏览器默认行为(必须吃掉):
   //   (a) Chromium 把窗口导航到 file:///... ;
-  //   (b) Win11 在屏幕顶端弹出"拖放到此处以共享"系统浮层。
-  // 真正要消费 drop 的区域(Sidebar 收藏夹、TerminalView 终端区)在自己
-  // 的 onDrop 里读 dataTransfer.files;它们的 React 合成事件在 bubble 阶
-  // 段早于此窗口监听触发,因此不冲突。
+  //   (b) Win11 屏幕顶端弹"拖放到此处以共享"系统浮层。
   useEffect(() => {
-    const blockDragOver = (e: globalThis.DragEvent): void => {
-      // F10(beta 勘误2 续 v3):React 合成事件 stopPropagation 不阻止 native
-      // event 继续冒泡到 window,所以这里仍会触发。靠 defaultPrevented 判定
-      // 子组件(Sidebar)是否已"消费"事件 — 已消费就让其保留它设的 dropEffect
-      // ('copy'),否则我们 preventDefault 同时显式设 'none' 让禁止图标稳定。
-      if (e.defaultPrevented) return;
+    const handleDragEnterOver = (e: globalThis.DragEvent): void => {
       e.preventDefault();
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      const target = e.target instanceof Element ? e.target : null;
+      const inDropZone = target?.closest('[data-drop-zone]') ?? null;
+      if (e.dataTransfer) e.dataTransfer.dropEffect = inDropZone ? 'copy' : 'none';
     };
-    const blockDrop = (e: globalThis.DragEvent): void => {
+    const handleDrop = (e: globalThis.DragEvent): void => {
+      // drop zone 自己的 React onDrop 在 bubble 阶段先跑过(读完 files、
+      // preventDefault);此处兜底吃掉所有"未消费"drop,防止 Chromium
+      // navigate 到 file://。preventDefault 幂等,无条件调用即可。
       e.preventDefault();
     };
-    window.addEventListener('dragover', blockDragOver);
-    window.addEventListener('drop', blockDrop);
+    window.addEventListener('dragenter', handleDragEnterOver);
+    window.addEventListener('dragover', handleDragEnterOver);
+    window.addEventListener('drop', handleDrop);
     return () => {
-      window.removeEventListener('dragover', blockDragOver);
-      window.removeEventListener('drop', blockDrop);
+      window.removeEventListener('dragenter', handleDragEnterOver);
+      window.removeEventListener('dragover', handleDragEnterOver);
+      window.removeEventListener('drop', handleDrop);
     };
   }, []);
 

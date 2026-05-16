@@ -845,6 +845,45 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
     term.open(container);
 
+    // [IME-1 PROBE B] 临时探针:追踪 helper-textarea 的 composition 时序与
+    // keydown 229 事件,用来定位"中文 IME 按标点冲刷历史"的触发路径。
+    // 拿到 1-2 次真实复现日志后整体移除(连同 onData 内的 PROBE A)。
+    // 不挂 cleanup:listener 随 term.dispose() 移除 textarea 一起被 GC。
+    try {
+      const helperTa = container.querySelector(
+        '.xterm-helper-textarea',
+      ) as HTMLTextAreaElement | null;
+      if (helperTa) {
+        const trace = (tag: string) => (e: Event) => {
+          console.warn('[IME-EV]', {
+            t: performance.now().toFixed(1),
+            ev: tag,
+            data: (e as CompositionEvent).data ?? '',
+            taLen: helperTa.value.length,
+            taTail: helperTa.value.slice(-40),
+          });
+        };
+        helperTa.addEventListener('compositionstart', trace('start'));
+        helperTa.addEventListener('compositionupdate', trace('update'));
+        helperTa.addEventListener('compositionend', trace('end'));
+        helperTa.addEventListener('keydown', (e) => {
+          // 微软拼音标点 auto-convert 走 keyCode 229 + !isComposing 路径,
+          // 不经过 compositionstart — 只能从 keydown 抓
+          if (e.keyCode === 229) {
+            console.warn('[IME-EV]', {
+              t: performance.now().toFixed(1),
+              ev: 'kd229',
+              key: e.key,
+              taLen: helperTa.value.length,
+              taTail: helperTa.value.slice(-40),
+            });
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('[IME-1 PROBE B] attach failed', err);
+    }
+
     // PER-1:term.open 之后才能 load WebGL addon(需 canvas DOM 节点)。
     // try/catch 兜底:某些虚拟机 / 无 GPU 加速环境下 WebGL context 创建
     // 失败,catch 后 xterm 自动用 DOM renderer。
@@ -1063,6 +1102,23 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
     // XTM-7:打字时若有待定 resize,先 flush 再发输入 — 拖窗 + 立刻打字
     // 场景下避免 PTY 用旧 cols/rows 处理 prompt 折行错位。
     const dataHandler = term.onData((data) => {
+      // [IME-1 PROBE A] 临时探针:正常一次 IME 提交基本 ≤ 6 字,> 20 字
+      // 强烈怀疑被 CompositionHelper 的 substring(start) 把 textarea 历史
+      // 一起冲刷出来。head/tail + textarea 末尾足以判断是否子串包含关系。
+      // 拿到证据后整体移除(连同 term.open 后的 PROBE B)。
+      if (data.length > 20) {
+        const ta = container.querySelector(
+          '.xterm-helper-textarea',
+        ) as HTMLTextAreaElement | null;
+        console.warn('[IME-LEAK]', {
+          t: performance.now().toFixed(1),
+          len: data.length,
+          head: data.slice(0, 60),
+          tail: data.slice(-30),
+          taLen: ta?.value.length ?? -1,
+          taTail: ta?.value.slice(-60) ?? '',
+        });
+      }
       if (resizeTimer !== null) {
         clearTimeout(resizeTimer);
         resizeTimer = null;
@@ -1260,19 +1316,10 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
   // Windows Terminal 风格:拖文件进终端 → 把(必要时引号包裹的)路径作为
   // 输入发回 PTY。多文件用空格分隔。
-  // 修复:此前 .terminal-host 不处理 drop,事件透传到 Chromium/Win11 默认行
-  // 为 — Win11 屏幕顶端会弹"拖放到此处以共享"系统浮层。
-  const handleTerminalDragOver = useCallback(
-    (e: ReactDragEvent<HTMLDivElement>) => {
-      // dragover 必须 preventDefault 才能让 drop 事件真正触发;同时设
-      // dropEffect 让光标显示 "copy" 而非 "禁止"。
-      e.preventDefault();
-      e.stopPropagation();
-      e.dataTransfer.dropEffect = 'copy';
-    },
-    [],
-  );
-
+  //
+  // F12(DROP-1 重构):dragover preventDefault + dropEffect 现由 App.tsx
+  // 的 window 监听器统一处理(看 data-drop-zone 属性识别本元素)。这里
+  // 只剩 drop 消费逻辑。
   const handleTerminalDrop = useCallback(
     async (e: ReactDragEvent<HTMLDivElement>) => {
       e.preventDefault();
@@ -1418,9 +1465,9 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       <div
         className="terminal-host"
         ref={containerRef}
+        data-drop-zone="files"
         onContextMenu={handleContextMenu}
         onWheel={handleWheel}
-        onDragOver={handleTerminalDragOver}
         onDrop={handleTerminalDrop}
       />
       {searchVisible && (
