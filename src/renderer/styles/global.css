@@ -428,11 +428,8 @@ button:disabled {
  * BETA-024 二次修复:macOS 风格沿用 Windows 的彩色染色方案 ——
  *   - .titlebar-app-name(Marina)走全局 --iris
  *   - .titlebar-window-badge(Window N)走全局 --gold
- * 这里只染中间的 em dash 分隔符,用 --muted 让它退到次要视觉层。
+ * 两者直接靠 .titlebar-title 的 gap: 8px 分开,无分隔符。
  */
-.titlebar-title-dash {
-  color: var(--muted, #f0f);
-}
 
 .titlebar-traffic {
   display: flex;
@@ -517,60 +514,56 @@ button:disabled {
   transition: background-color 100ms ease;
 }
 
-/* F10(beta 勘误2 续 v3):dropzone 视觉重做 — 独立 overlay 节点。
+/* F11(beta 勘误2 续 v4):dropzone 视觉 — 纯背景洗涤 + 居中浮卡。
  *
- * 之前用 .sidebar-bookmarks-dropzone.drag-over + inset box-shadow 出过两个
- * 问题:左边框在 overflow + 滚动容器下渲染缺失;dropEffect 只在 dropzone
- * 子节点设置,光标飘出会闪回禁止。现在 drag handlers 提到 .sidebar 整体,
- * 视觉用绝对定位的 .sidebar-drag-overlay 单独画,普通 border 渲染稳定。 */
+ * 历史尝试与撤回原因:
+ * - F9 inset box-shadow:在 overflow:hidden + 滚动容器下左侧渲染不稳
+ * - F10 绝对定位 overlay 加 border:sidebar 紧贴窗口左/下边,Win11 窗口
+ *   圆角会吃掉 inset:0 元素的左/下 2px 边框
+ *
+ * 现方案:0 边框。.sidebar.drag-over 直接改背景到 iris 色洗涤,浮卡居中
+ * 浮起作为唯一的"放这里"视觉信号。不依赖任何边沿渲染。 */
 
-.sidebar-drag-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* iris 色背景洗涤,opacity 由 .sidebar.drag-over 切换 */
-  background-color: color-mix(in srgb, var(--iris, #c4a7e7) 14%, transparent);
-  /* 普通 border,4 条边都稳定显示;inset offset 2px 避免和 .sidebar 右
-     border 视觉重叠 */
-  border: 2px solid var(--iris, #c4a7e7);
-  border-radius: 4px;
-  opacity: 0;
-  transition: opacity 130ms ease-out;
-  z-index: 6;
-}
-
-.sidebar.drag-over .sidebar-drag-overlay {
-  opacity: 1;
+.sidebar.drag-over {
+  background-color: color-mix(in srgb, var(--iris, #c4a7e7) 16%, var(--surface, #f0f));
 }
 
 .sidebar-drop-hint {
+  position: absolute;
+  /* 居中浮卡。top 45% 略偏上,给底部"设置"按钮留视觉权重。
+     .sidebar position:relative(F10 加的)给它当定位锚点。 */
+  top: 45%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.94);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 14px 22px;
+  padding: 16px 24px;
   background-color: var(--surface, #f0f);
   color: var(--text, #f0f);
-  border: 1px solid color-mix(in srgb, var(--iris, #c4a7e7) 55%, var(--overlay, #f0f));
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--iris, #c4a7e7) 60%, var(--overlay, #f0f));
+  border-radius: 10px;
   box-shadow:
-    0 8px 24px rgb(0 0 0 / 32%),
-    0 0 0 4px color-mix(in srgb, var(--iris, #c4a7e7) 16%, transparent);
+    0 10px 28px rgb(0 0 0 / 36%),
+    0 0 0 6px color-mix(in srgb, var(--iris, #c4a7e7) 18%, transparent);
   font-size: 13px;
   font-weight: 500;
-  transform: scale(0.96);
-  transition: transform 140ms ease-out;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease-out,
+    transform 150ms ease-out;
+  z-index: 6;
 }
 
 .sidebar.drag-over .sidebar-drop-hint {
-  transform: scale(1);
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
 }
 
 .sidebar-drop-hint-icon {
-  font-size: 22px;
+  font-size: 24px;
   line-height: 1;
 }
 

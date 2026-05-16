@@ -228,15 +228,13 @@ export function Sidebar(): JSX.Element {
       onDragOver={handleDragOver}
       onDrop={(e) => void handleDrop(e)}
     >
-      {/* F10:独立 overlay 节点 — 覆盖整个 sidebar 区域。普通 border + 平滑过渡,
-          避开 inset box-shadow 在 overflow:hidden + 滚动容器下渲染不稳的坑。
-          pointer-events: none 不阻挡 drop。aria-hidden 视觉装饰不进无障碍树。
-          dragOver=false 时整体 opacity:0(transition fade-out),不影响布局。 */}
-      <div className="sidebar-drag-overlay" aria-hidden="true">
-        <div className="sidebar-drop-hint">
-          <span className="sidebar-drop-hint-icon">📁</span>
-          <span className="sidebar-drop-hint-label">{t('sidebar.dropHint')}</span>
-        </div>
+      {/* F11(beta 勘误2 续 v4):撤回 F9 inset box-shadow / F10 overlay border —
+          sidebar 紧贴窗口左/下边,Win11 窗口圆角会吃掉绝对定位元素 inset:0 的
+          左/下 2px 边框。改用纯背景洗涤区分 drag-over 态,浮卡居中作为主要
+          视觉锚,完全不依赖边框渲染。pointer-events:none + aria-hidden 不挡 drop。 */}
+      <div className="sidebar-drop-hint" aria-hidden="true">
+        <span className="sidebar-drop-hint-icon">📁</span>
+        <span className="sidebar-drop-hint-label">{t('sidebar.dropHint')}</span>
       </div>
       <div className="sidebar-bookmarks-dropzone">
         <Category
