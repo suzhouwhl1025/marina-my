@@ -164,7 +164,11 @@ export function Sidebar(): JSX.Element {
         }
       }}
     >
-      <div className="sidebar-top-spacer" />
+      {/* F7(beta 勘误2 续):BETA-016 一度在 sidebar 顶部塞 32px spacer 给"呼吸空间",
+          但右侧 .tab-bar 紧贴 .app-titlebar 底,导致左栏第一行 ("收藏" header)
+          整体比右栏 TabBar 低一整个 spacer 高度。用户要求两侧顶端直接对齐。
+          删 spacer + 把 .sidebar-category-header 高度对齐 .tab-bar (min-height: 32px),
+          这样第一个 category 的 row 自身充当"列头",顶端与 TabBar 顶端齐平。 */}
       <div
         className={`sidebar-bookmarks-dropzone${dragOver ? ' drag-over' : ''}`}
         onDragOver={handleDragOver}

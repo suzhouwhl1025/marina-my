@@ -525,15 +525,23 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  /* F7(beta 勘误2 续):min-height 32px 与 .tab-bar min-height 对齐 —
+     第一个 category-header 顶部与 TabBar 顶部齐平,文字在 32px 行内垂直
+     居中(align-items: center 已设)。padding 改纯水平,不再用 4px 上下挤
+     压高度。 */
+  min-height: 32px;
+  padding: 0 12px;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--text, #f0f);
 }
 
+/* F7(beta 勘误2 续):.sidebar-top-spacer 已从 Sidebar.tsx 移除,这里保留
+   一条 height: 0 的兜底规则 — 老缓存的 renderer / 其它历史调用如果还在用
+   这个类名,不至于忽然顶出一个 fallback 高度。 */
 .sidebar-top-spacer {
-  height: 32px;
+  height: 0;
   flex: 0 0 auto;
 }
 
