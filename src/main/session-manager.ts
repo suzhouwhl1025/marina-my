@@ -119,6 +119,58 @@ const EMIT_BATCH_MS = 8;
 const STARTUP_GRACE_MS = 1500;
 
 /**
+ * BETA-006 v2.2:按键事件 ring buffer 上限 + 保留窗口。
+ *
+ * 用于 recheckIdle 元数据(scrollback 末"prompt> some text"两种情况完全
+ * 同形,光看 tail 区分不开"用户在敲字"vs"命令在跑")。20 条 × 30s 窗口够
+ * LLM 看到最近的输入节奏(节奏一致 = 正在打字,完全静止 = 等输出)。
+ *
+ * **隐私**:这里只记**时间戳 + 按键类别**(char / enter / backspace / other),
+ * 永远不记按键内容(密码 / token / 命令体)。详见 classifyInput。
+ */
+const RECENT_KEYS_CAP = 20;
+const RECENT_KEYS_TTL_MS = 30_000;
+
+/**
+ * BETA-006 v2.2:按键类别。**绝不记内容,只记类别**(隐私保护)。
+ *
+ * - char: 可打印字符(单个 ASCII 字母 / 数字 / 标点 / 单个 CJK 字符 UTF-8)
+ * - enter: \r 或 \n(提交)
+ * - backspace: \b 或 \x7f(删除)
+ * - other: 控制字符 / 方向键 / 粘贴块 / 其它(对 active/idle 判断信号弱)
+ */
+type KeyKind = 'char' | 'enter' | 'backspace' | 'other';
+
+interface KeyEvent {
+  /** Date.now() */
+  ts: number;
+  kind: KeyKind;
+}
+
+/**
+ * BETA-006 v2.2:按键类别识别。**不解析内容,只看头几个字节模式**。
+ *
+ * 输入 `text` 是 sendInput 一次写入 PTY 的字节流(xterm onData 通常一次一个
+ * 逻辑按键;粘贴可能一次几百字符)。识别规则保守 — 拿不准就归 `other`。
+ */
+function classifyInput(text: string): KeyKind {
+  if (text === '\r' || text === '\n' || text === '\r\n') return 'enter';
+  if (text === '\x7f' || text === '\b') return 'backspace';
+  // ESC 起头 = CSI / SS3 / OSC 等控制序列(方向键、F 键、bracketed paste 标记等)
+  if (text.startsWith('\x1b')) return 'other';
+  if (text.length === 1) {
+    const code = text.charCodeAt(0);
+    // 单字节控制字符 (Ctrl+letter 等) 归 other
+    if (code < 0x20 || code === 0x7f) return 'other';
+    return 'char';
+  }
+  // 多字节但短(≤4 字节)— 很可能是单个 CJK 字符的 UTF-8 编码
+  if (text.length <= 4) return 'char';
+  // 再长就当粘贴块/其它 — 不暴露具体长度也是隐私考虑
+  return 'other';
+}
+
+/**
  * Input echo quiet 窗口(抖动源 C/E)。
  *
  * 解决:用户在终端里敲键 → cooked mode shell echo 字节回来(或 raw mode TUI
@@ -260,6 +312,26 @@ interface ManagedSession {
    * 0 = 无窗口 (从未 sendInput)。
    */
   inputQuietUntil: number;
+  /**
+   * BETA-006 v2.1:用户上次按 Enter (\r 或 \n) 的时刻 (ms epoch)。
+   * 0 = 从未按过。recheckIdle 把"距上次 Enter 多久"作为元数据喂给 LLM,
+   * 帮它区分"长命令在跑(Enter 刚按过)"与"用户在打字但没提交(Enter 老
+   * 没按过)"— scrollback 末尾两种情况文本相同,LLM 单看 tail 无法区分。
+   */
+  lastEnterAt: number;
+  /**
+   * BETA-006 v2.1:用户上次任何按键 sendInput 的时刻 (ms epoch)。
+   * 0 = 从未输入。配合 lastEnterAt 让 LLM 判断"敲了字但没回车"的边界:
+   * lastInputAt 近 + lastEnterAt 远 → 用户在打字 → idle。
+   */
+  lastInputAt: number;
+  /**
+   * BETA-006 v2.2:最近按键事件 ring buffer(时间戳 + 类别,**不存内容**)。
+   * 上限 RECENT_KEYS_CAP 条 + RECENT_KEYS_TTL_MS 窗口,sendInput 时维护。
+   * 让 LLM 看到"用户最近敲键的节奏":连续 char 流 = 在打字,只有一个 enter
+   * 后归零 = 命令在跑,no events = 完全闲置。详见 classifyInput 注释。
+   */
+  recentKeys: KeyEvent[];
   /**
    * 用户是否已手动改过 displayName。一旦为 true,后续 OSC 0/1/2 标题事件
    * 不再覆盖 displayName — 手动改名优先级永久高于 shell 标题(Claude Code、
@@ -533,6 +605,9 @@ export class SessionManager extends EventEmitter {
       resizeQuietUntil: 0,
       startupGraceUntil: Date.now() + this.startupGraceMs,
       inputQuietUntil: 0,
+      lastEnterAt: 0,
+      lastInputAt: 0,
+      recentKeys: [],
       manuallyRenamed: false,
       pendingEmit: null,
       pendingEmitTimer: null,
@@ -763,6 +838,11 @@ export class SessionManager extends EventEmitter {
     if (!managed) return { accepted: false, reason: 'session-not-found' };
     if (!managed.pty) return { accepted: false, reason: 'pty-exited' };
     const text = Buffer.from(base64Data, 'base64').toString('utf8');
+    // BETA-006 v2.1:把"上次任意输入""上次按 Enter"两个时刻打戳,recheckIdle
+    // 把它们作为元数据喂给 LLM 区分"长命令在跑"vs"用户打字未提交"。
+    // 注意 lastInputAt 在每次 sendInput 都更新,即使内容只是箭头键 / Ctrl-X。
+    const now = Date.now();
+    managed.lastInputAt = now;
     // CUR-1:用户按 Enter (\r 或 \n) → 关闭 input quiet 窗口,让紧随的
     // 真实命令输出立即触发 markActive。否则 200ms 内的真输出被压成
     // "状态点保持 idle 黄色",直到 200ms 后才变绿 — 用户视角"按 Enter
@@ -770,8 +850,24 @@ export class SessionManager extends EventEmitter {
     // 普通按键(非 Enter)仍走原逻辑顺延 quiet 窗口。
     if (text.includes('\r') || text.includes('\n')) {
       managed.inputQuietUntil = 0;
+      managed.lastEnterAt = now;
     } else {
-      managed.inputQuietUntil = Date.now() + this.inputQuietMs;
+      managed.inputQuietUntil = now + this.inputQuietMs;
+    }
+    // BETA-006 v2.2:按键事件 ring buffer。**绝不存内容,只存时间戳+类别**。
+    // 进:classifyInput 返回 char/enter/backspace/other,push 一条。
+    // 出:超 TTL 或超 cap 的从头部移除(典型 ring buffer)。
+    const kind = classifyInput(text);
+    managed.recentKeys.push({ ts: now, kind });
+    const cutoff = now - RECENT_KEYS_TTL_MS;
+    while (
+      managed.recentKeys.length > 0 &&
+      (managed.recentKeys[0]?.ts ?? Infinity) < cutoff
+    ) {
+      managed.recentKeys.shift();
+    }
+    while (managed.recentKeys.length > RECENT_KEYS_CAP) {
+      managed.recentKeys.shift();
     }
     // TYP-2:pty.write 在 ConPTY pipe half-closed / 子进程已死但 onExit 还
     // 没到达等 race 情况下会同步抛错。原来无 try/catch → IPC handle 把
@@ -1201,8 +1297,21 @@ export class SessionManager extends EventEmitter {
             : managed.scrollback
                 .subarray(Math.max(0, managed.scrollback.length - 2048))
                 .toString('utf8');
+        // BETA-006 v2.1:把"上次 Enter / 上次任意输入距今多久"喂给 LLM,
+        // 帮它区分"长命令在跑"vs"用户打字未按回车"。
+        // BETA-006 v2.2:再附最近按键事件 ring buffer(类别+时间,无内容),
+        // 让 LLM 看到节奏 — 连续 char 流 = 在打字,只一个 enter 后归零 = 命令在跑。
+        const now = Date.now();
+        const meta = {
+          enterAgeMs: managed.lastEnterAt ? now - managed.lastEnterAt : null,
+          inputAgeMs: managed.lastInputAt ? now - managed.lastInputAt : null,
+          recentKeys: managed.recentKeys.map((k) => ({
+            ageMs: now - k.ts,
+            kind: k.kind,
+          })),
+        };
         this.aiClient
-          .recheckIdle(tail)
+          .recheckIdle(tail, meta)
           .then((verdict) => {
             if (verdict === 'keep-active') {
               // LLM 判定还在跑 → 重新调度,不转 idle

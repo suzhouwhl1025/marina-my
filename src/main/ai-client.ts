@@ -117,84 +117,163 @@ export class AIClient {
    * 出错 / 在等人输入,该让状态点亮起来。
    *
    * 出错时 throw — 调用方应当 try/catch 并回退到原阈值判定。
+   *
+   * @param scrollbackTail 终端末尾几十行,headless buffer 翻译后的纯文本
+   * @param meta 输入元数据(BETA-006 v2.1 / v2.2):
+   *   - enterAgeMs:用户上次按 Enter 距今 ms,null = 从未按过
+   *   - inputAgeMs:用户上次任何输入距今 ms,null = 从未输入
+   *   - recentKeys:最近 N 个按键事件(类别 + 距今 ms),**无内容,仅类别**
+   *
+   *   LLM 用前两个区分"长命令在跑"vs"用户打字未提交";recentKeys 让它再看
+   *   一眼最近的输入节奏 — scrollback 末尾两种情况文本相同,LLM 单看 tail
+   *   无法区分,需要本侧补元数据。
+   *
+   *   **隐私保证**:recentKeys 永远只有时间戳和类别(char/enter/backspace/other),
+   *   绝不包含按键内容。session-manager.classifyInput 在源头保证。
    */
-  async recheckIdle(scrollbackTail: string): Promise<'keep-active' | 'go-idle'> {
+  async recheckIdle(
+    scrollbackTail: string,
+    meta?: {
+      enterAgeMs: number | null;
+      inputAgeMs: number | null;
+      recentKeys?: Array<{
+        ageMs: number;
+        kind: 'char' | 'enter' | 'backspace' | 'other';
+      }>;
+    },
+  ): Promise<'keep-active' | 'go-idle'> {
     const { provider, apiKey, baseURL, model } = safeAi(this.getSettings());
     if (!provider) throw new Error('AI provider 未配置');
     if (!apiKey.trim()) throw new Error('AI apiKey 未填');
 
-    // Prompt 语义:不是"还在跑 vs 返回 shell",而是"需要人为检查 vs 让它继续
-    // 跑"。覆盖 sleep / 阻塞 IO / TUI 等无输出但在跑的情况(否则会被误判
-    // idle),也覆盖错误 + 新 prompt、y/n 询问、密码 prompt、TUI 菜单等需要
-    // 人为介入的情况。要求**严格回一个词**(active / idle),避免推理模型
-    // 写一整段解释 — 配合下面 `normalized === 'active'` 的严格相等判定。
+    // Prompt 极简化(2026-05-16):一句话提问,例子全删。
+    //
+    // 旧 prompt 列了 8 个 "active 信号" + "idle 信号" 的具体例子,反而把
+    // LLM 推进自相矛盾:Claude Code 首屏既匹配 "TUI in normal operation"
+    // (active)又匹配 "shell prompt as last line"(idle),模型卡在两条规则
+    // 之间反复推理 → 36s 延迟 + 同输入两次相反判定(详见 2026-05-16 日志)。
+    //
+    // 新策略:只问一句"在工作 vs 等人输入",让模型自己判断。配合下面
+    // chat.completions.create 里 reasoning_effort / thinking / enable_thinking
+    // 三套跨厂商关推理字段,目标延迟 < 1s。
+    //
+    // prompt 明确禁止 chain-of-thought,双保险 — 某些 provider 关推理字段
+    // 不生效时(字段名对不上厂商约定),靠 prompt 也能压制大段输出。
+    // BETA-006 v2.1:把上次 Enter / 上次任意输入距今多久拼成一行元数据。
+    // 关键解谜信号 — scrollback 末尾"prompt> some text"两种情况完全同形:
+    //   (a) 命令在跑(用户已按 Enter)→ active
+    //   (b) 用户在打字未提交 → idle
+    // LLM 单看 tail 区分不开,有了 enterAge / inputAge 就能判。
+    //
+    // BETA-006 v2.2:再附最近按键事件时间线(类别+距今,无内容)。让 LLM
+    // 看节奏 — 连续 char 流 = 在打字;只 1 个 enter 后归零 = 命令在跑。
+    const fmtAge = (ms: number | null): string =>
+      ms === null ? 'NEVER' : `${(ms / 1000).toFixed(1)}s ago`;
+    const enterAgeStr = fmtAge(meta?.enterAgeMs ?? null);
+    const inputAgeStr = fmtAge(meta?.inputAgeMs ?? null);
+
+    // 按键时间线:最新在前。空 buffer → 一句简短占位。
+    const recentKeys = meta?.recentKeys ?? [];
+    const keyTimelineStr =
+      recentKeys.length === 0
+        ? '(no keystrokes in last 30 seconds)'
+        : [...recentKeys]
+            .reverse()
+            .map((k) => `  ${(k.ageMs / 1000).toFixed(1)}s ago: ${k.kind}`)
+            .join('\n');
+
     const prompt =
-      'You are watching the tail of a terminal session. Decide whether the ' +
-      'user should look at it NOW (because the task paused, finished, errored, ' +
-      'or is waiting for them), or whether they can keep working elsewhere ' +
-      'because the foreground program is still running on its own.\n\n' +
-      'Reply with EXACTLY ONE word and nothing else: `active` or `idle`.\n\n' +
-      '`idle` = needs human attention now. Concrete signals:\n' +
-      '  * A new shell prompt appears as the last line after previous output ' +
-      '(the previous command returned)\n' +
-      '  * Multiple lines of error/warning output followed by a new prompt\n' +
-      '  * A "y/n", "Press any key", or password prompt is visible\n' +
-      '  * A TUI shows a menu, dialog, or confirmation awaiting selection\n\n' +
-      '`active` = leave it alone, work continues. Concrete signals:\n' +
-      '  * The last line is `prompt> command` with NO new prompt below it ' +
-      '(the command is currently executing — covers sleep, wait, network ' +
-      'calls, blocked IO, long compiles, even a debugger paused at a breakpoint)\n' +
-      '  * A dev server / watcher / Vite / webpack is printing logs\n' +
-      '  * A TUI (vim / htop / claude code / lazygit) is in normal operation ' +
-      '(not blocked on a dialog)\n' +
-      '  * A spinner or progress bar is still animating\n\n' +
+      'You are a low-latency classifier. Look at the terminal tail and ' +
+      'input metadata below and decide: is the foreground program still ' +
+      'WORKING on its own, or is it WAITING for the user to do/type ' +
+      'something?\n\n' +
+      'Reply with EXACTLY ONE word — `active` (working) or `idle` (waiting). ' +
+      'No reasoning, no chain-of-thought, no explanation, no preamble.\n\n' +
+      'Key disambiguation: the terminal tail alone CANNOT tell you whether ' +
+      'the last visible line is "a command running" or "text the user is ' +
+      'typing but has not submitted yet" — both look identical. Use the ' +
+      'input metadata:\n' +
+      '  * Recent steady stream of `char` keystrokes, no recent `enter` ' +
+      '→ user is composing → `idle`\n' +
+      '  * Last `enter` recent + no newer keystrokes ' +
+      '→ command really running → `active`\n' +
+      '  * No keystrokes recently + tail shows a fresh prompt ' +
+      '→ session is idle waiting → `idle`\n\n' +
       '--- terminal tail ---\n' +
       scrollbackTail +
-      '\n--- end ---\n';
+      '\n--- end ---\n\n' +
+      '--- input metadata ---\n' +
+      `Last Enter pressed by user: ${enterAgeStr}\n` +
+      `Last keystroke by user: ${inputAgeStr}\n` +
+      'Recent keystroke timeline (most recent first; CATEGORIES ONLY, ' +
+      'no characters logged):\n' +
+      keyTimelineStr +
+      '\nLegend: `char`=printable key, `enter`=Enter/Return, ' +
+      '`backspace`=delete, `other`=arrows / ctrl shortcuts / paste\n' +
+      '--- end metadata ---\n\n' +
+      'One word:';
 
     // BETA-006 排障日志:把喂给 LLM 的 tail 完整落盘 — 排"为什么 sleep
      // 被判 idle"这类问题必须看到 LLM 收到的原始字节(含 ANSI/控制符,
-     // JSON 序列化里会 \uXXXX 转义)。tail 上限 2KB,一次约 2-3KB,
-     // 5MB 日志文件能撑 1k+ 次复核,够用。
+     // JSON 序列化里会 \uXXXX 转义)。tail 上限 2KB,一次约 2-3KB。
+     // 走 logger.llm → 独立 llm-YYYY-MM-DD.log,不与 main 抢配额。
     const modelUsed =
       model || (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
-    logger.info(
+    logger.llm(
       'AIClient',
-      `recheckIdle → ${provider} ${modelUsed} tail.len=${scrollbackTail.length}`,
-      { tail: scrollbackTail },
+      `recheckIdle → ${provider} ${modelUsed} tail.len=${scrollbackTail.length}` +
+        ` enter=${enterAgeStr} input=${inputAgeStr} keys=${recentKeys.length}`,
+      { tail: scrollbackTail, recentKeys },
     );
 
     let text: string;
     try {
-      // max_tokens 给 8192:推理模型(kimi-k2.5 / deepseek-r1 等)把
-      // reasoning token 与 visible content 一起计入 completion_tokens,
-      // 原来的 8 在推理模型下 100% 被思考过程吃光、content 永远是空串,
-      // 后果是 verdict 一律 go-idle、复核形同虚设。8192 给推理模型留足
-      // 思考空间,防止重深推理被截断;纯 chat 模型遇到 stop word 后会
-      // 提前终止,不会真的产出 8K token,实际开销与短上限等价。
-      const maxTokens = 8192;
+      // max_tokens 64(2026-05-16 从 8192 降):推理已通过下面 reasoningOff
+      // 字段关掉,answer 只需 1-3 token("active"/"idle"),64 给点 slop
+      // buffer。若某 provider 没认领关推理字段、模型仍在思考,64 会截断
+      // CoT → content 空 → 下面 normalized 判定走 go-idle 兜底(保守:误报
+      // idle 提醒用户看,代价低于漏报 keep-active)。
+      const maxTokens = 64;
       if (provider === 'anthropic') {
         const client = new Anthropic(clientOptions(apiKey, baseURL));
+        // Claude(Haiku 4.5 等)默认不开 extended thinking — thinking 是 opt-in
+        // 字段,不传就关。这里无需额外参数。
         const res = await client.messages.create({
           model: modelUsed,
           max_tokens: maxTokens,
           messages: [{ role: 'user', content: prompt }],
         });
         // 完整 res 落盘 — 排"为什么 content 为空"要看 stop_reason / usage
-        logger.info('AIClient', 'recheckIdle ← anthropic raw res', { res });
+        logger.llm('AIClient', 'recheckIdle ← anthropic raw res', { res });
         // Anthropic content 是 array of blocks;取首个 text block
         const block = res.content[0];
         text = block && block.type === 'text' ? block.text : '';
       } else {
         const client = new OpenAI(clientOptions(apiKey, baseURL));
-        const res = await client.chat.completions.create({
+        // 跨厂商关推理:OpenAI 兼容协议下未识别字段大多被忽略,所以一次
+        // 把三家约定都发出去,谁认领谁生效。
+        //   - reasoning_effort: 'minimal'  → OpenAI o-series / GPT-5
+        //   - thinking: { type: 'disabled' } → Kimi K2.5/K2.6, DeepSeek V4/R1
+        //   - enable_thinking: false        → Qwen (DashScope), Hunyuan
+        // 严格模式 provider 如果对未识别字段 400,这里会进 catch,
+        // recheckIdle throw → session-manager 回退到原阈值判定(不阻塞)。
+        // any 强转:OpenAI SDK 类型不收录这三个 vendor extension 字段
+        // (reasoning_effort 较新版本可能已收录,但其它两个永远不会),逐字段
+        // 用 ts-expect-error 要写三处难读 — 这里用一次 as any 局部突破,
+        // 保留上下其余调用的强类型。
+        const params = {
           model: modelUsed,
           max_tokens: maxTokens,
           messages: [{ role: 'user', content: prompt }],
-        });
+          reasoning_effort: 'minimal',
+          thinking: { type: 'disabled' },
+          enable_thinking: false,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+        const res = await client.chat.completions.create(params);
         // 完整 res 落盘 — 排"为什么 content 为空"要看 finish_reason /
         // usage / message(可能有 reasoning_content 等非标字段)
-        logger.info('AIClient', 'recheckIdle ← openai raw res', { res });
+        logger.llm('AIClient', 'recheckIdle ← openai raw res', { res });
         text = res.choices[0]?.message?.content ?? '';
       }
     } catch (err) {
@@ -209,7 +288,7 @@ export class AIClient {
     const normalized = text.trim().toLowerCase();
     const verdict: 'keep-active' | 'go-idle' =
       normalized === 'active' ? 'keep-active' : 'go-idle';
-    logger.info(
+    logger.llm(
       'AIClient',
       `recheckIdle ← raw=${JSON.stringify(text)} verdict=${verdict}`,
     );

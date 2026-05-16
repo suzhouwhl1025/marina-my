@@ -147,7 +147,93 @@ if (helperTa) {
 
 ## 待办
 
-- [ ] 第一步埋日志、本地 / 用户机复现拿证据
+- [x] 第一步埋日志(2026-05-16 已加 PROBE A / PROBE B,见下"测试步骤")
+- [ ] 本地 / 用户机复现拿证据
 - [ ] 第二步实施 workaround,加 changelog 一条
 - [ ] 跑回归:确认 Enter / Ctrl+C 清 textarea 路径仍工作,中文长段输入不丢字
+- [ ] 拿到证据后**移除两个探针**(grep `IME-1 PROBE` / `IME-LEAK` / `IME-EV` 一次性清掉)
 - [ ] 跟一下 xterm.js 上游 issue,如果将来上游修了,把本 workaround 删掉
+
+---
+
+## 测试步骤(2026-05-16 探针就位后)
+
+### 已埋的两个探针
+
+`src/renderer/components/TerminalView.tsx`:
+
+- **PROBE A** — `term.onData` 内,`data.length > 20` 时打 `[IME-LEAK]`,带 data 头尾 + textarea 末尾,用来抓"一次输入冲刷一大段"的实证。
+- **PROBE B** — `term.open(container)` 之后给 `.xterm-helper-textarea` 挂 `compositionstart` / `compositionupdate` / `compositionend` / `keydown(229)` 监听,打 `[IME-EV]`,用来判断 race 走了哪条路径。
+
+两个探针都用 `console.warn`,在 DevTools console 直接 filter `IME-` 即可。
+
+### 环境准备
+
+1. `npm run dev` 启动开发版 Marina(electron-vite dev,自带 hot reload + DevTools)
+2. 任意打开一个 session(默认 PowerShell 即可,或推荐进一个 TUI 比如 `claude` / `aider` / `nano`,因为复现要"长时间不按 Enter")
+3. **打开 DevTools**(Marina 的渲染进程窗口里 `Ctrl+Shift+I`)→ Console tab → 过滤栏输入 `[IME-`
+4. **确认 Windows 输入法已切到"微软拼音"**(任务栏右下角语言指示器),不要用搜狗/QQ 等第三方 IME — 本 bug 只在微软拼音上复现过
+
+### 用例 1:冒烟(英文输入法 / 基线)
+
+切英文输入法 → 在终端里随便敲一长串字符,按几次 Enter。
+
+**预期**:Console **完全没有** `[IME-` 开头的日志。如果有任何 LEAK 或 EV 触发,说明探针逻辑写错或阈值订低了,先回来修探针,**别继续测**。
+
+### 用例 2:中文 IME 正常路径
+
+切微软拼音 → 在终端里打一句"今天天气真好啊" → 按 Enter。
+
+**预期**(按顺序看 `[IME-EV]`):
+1. `start` taLen=0(或某个上次残留值)
+2. 若干次 `update` data 不为空,taLen 逐次增长
+3. `end` data="今天天气真好啊",taLen 约等于这一串的长度
+4. 没有 `[IME-LEAK]`
+5. 按 Enter 之后,**下一次** `start` 看到的 taLen 应该被清回 0(对应漏洞 1 文档说的"Enter 才清空")
+
+这一步只是确认探针工作正常 + 正常路径下 textarea 会被 Enter 清掉。
+
+### 用例 3:复现 bug(关键)
+
+按文档原始复现样本走:
+
+1. 切微软拼音
+2. 在终端里**连续打多段中文,中间不按 Enter**(比如打个三五十字的段落,模拟在 Claude Code 对话框里写一大段需求)
+3. 此时观察 `[IME-EV]` 的 taLen 字段 — 应该一路涨到几十~几百
+4. 现在**连按标点 `,` 或 `。` 或 `、`**,每按一次留 1-2 秒间隔
+5. 重复 4-5 次,运气好就能触发
+
+**bug 发生时预期看到**:
+- `[IME-LEAK]` 日志,`len` 远大于你这一次按下的标点字数(可能几十几百)
+- 日志里 `taLen` 已经累积到几百
+- **`tail` 字段(LEAK 数据末尾)出现在 `taTail` 里**(也就是 data 末尾是 textarea 末尾的子串)— 这是"textarea 历史被原样取出"的直接证据
+- 同时观察终端可视区:对应这次按键冲刷出来一段重复的历史文字
+
+**对照 3 条 race 路径**(看 LEAK 前面紧挨着的 EV 是什么):
+
+| LEAK 之前看到的 EV 序列 | 命中假说 |
+|---|---|
+| 单独 `kd229`,**没有** `start`/`end` | race 路径 2:微软拼音标点 auto-convert 走 `_handleAnyTextareaChanges` 的 `replace` diff |
+| `start` → `start` → `end` 嵌套 | race 路径 1:两次 `_finalizeComposition` 重叠 |
+| 正常 `start` → `end`,但 `end` data 远短于 LEAK len | race 路径 3:`_dataAlreadySent` 跨 composition 重置时序错乱 |
+
+### 用例 4:负对照(英文 IME 同操作)
+
+切英文输入法 → 重复用例 3 的"连续打字 + 连按标点"动作(英文键盘的 `,` `.` 即可)。
+
+**预期**:**完全没有** `[IME-LEAK]`。如果英文下也能触发说明假说不成立,要回头查根因。
+
+### 证据归档
+
+复现后:
+
+1. DevTools Console 右键 → **Save as...**(导出全量 console log),保存为 `docs/issues/ime-1-evidence-<日期>.log`
+2. 截一张 LEAK 触发瞬间的终端可视区截图(看得到那段被冲刷出来的重复文字)
+3. 在本工单加一行:`确认日期 / 微软拼音版本 / Windows 版本 / 命中哪条 race 路径`
+4. 拿到 1 次确认证据就可以推进到 workaround 实施;**别在拿到证据前提交移除探针的 PR**
+
+### 如果复现不出来
+
+- 本 bug 是**偶发**的,文档明确说"不是每次都触发"。先按用例 3 重复 20-30 次再下结论
+- 换不同的中文输入习惯试:连续按同一个标点 / 中英标点交替 / 输入到一半切换光标位置 / IME 候选框弹出时按标点
+- 实在不行,把探针留在版本里,**给一名重度中文用户**装这个 dev build,让他正常用 1-2 天再收日志
