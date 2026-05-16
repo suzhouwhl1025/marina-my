@@ -28,9 +28,6 @@ import type { WindowStyle } from '@shared/types';
 import { Minus, Square, Copy as RestoreIcon, X } from 'lucide-react';
 import { focusTerminalDom } from '../focus';
 import { useAppState } from '../store';
-// [BETA-019 DEBUG] 临时 cursor 状态 HUD,定位"运行一段时间出现闪烁光标"。删除时
-// 一并删除 components/Beta019CursorHud.tsx 与 debug/beta019-cursor-hud.ts。
-import { Beta019CursorHud } from './Beta019CursorHud';
 
 interface Props {
   windowStyle: WindowStyle;
@@ -98,13 +95,13 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
   // DEV-COEXIST:'Marina (dev) — Window 1' / 'Marina (portable) — ...' / 'Marina — ...'
   const appLabel =
     buildType === 'dev' ? 'Marina (dev)' : buildType === 'portable' ? 'Marina (portable)' : 'Marina';
-  const title = `${appLabel} — Window ${windowNumber || '?'}`;
 
   if (windowStyle === 'macos') {
     return (
       <MacosTitlebar
         buildVersion={buildVersion}
-        title={title}
+        appLabel={appLabel}
+        windowNumber={windowNumber}
         maximized={maximized}
         callMin={callMin}
         callClose={callClose}
@@ -125,8 +122,6 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
         <span className="titlebar-window-badge">Window {windowNumber || '?'}</span>
       </div>
       <div className="titlebar-spacer titlebar-drag" />
-      {/* [BETA-019 DEBUG] */}
-      <Beta019CursorHud />
       <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
       <div className="titlebar-controls" aria-label="窗口控制(Windows 风格)">
         <button
@@ -170,10 +165,15 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
  *
  * 反转记录:CP-4 勘误第二轮砍掉了 hover 符号,BETA-023(beta 用户反馈)
  * 又把它做成开关,默认仍关。两派(极简派 vs 原生派)都能用。
+ *
+ * 标题染色(BETA-024 二次修复):与 Windows 风格完全一致 ——
+ * "Marina" 用 .titlebar-app-name(iris 紫),"Window N" 用 .titlebar-window-badge(gold 金),
+ * 两者直接靠 .titlebar-title 的 gap 8px 分开,不加分隔符。
  */
 function MacosTitlebar({
   buildVersion,
-  title,
+  appLabel,
+  windowNumber,
   maximized,
   callMin,
   callClose,
@@ -181,7 +181,8 @@ function MacosTitlebar({
   handleDragRegionDblClick,
 }: {
   buildVersion: string;
-  title: string;
+  appLabel: string;
+  windowNumber: number;
   maximized: boolean;
   callMin: () => void;
   callClose: () => void;
@@ -238,10 +239,11 @@ function MacosTitlebar({
         </button>
       </div>
       <div className="titlebar-spacer titlebar-drag" />
-      <div className="titlebar-title titlebar-drag">{title}</div>
+      <div className="titlebar-title titlebar-drag">
+        <span className="titlebar-app-name">{appLabel}</span>
+        <span className="titlebar-window-badge">Window {windowNumber || '?'}</span>
+      </div>
       <div className="titlebar-spacer titlebar-drag" />
-      {/* [BETA-019 DEBUG] */}
-      <Beta019CursorHud />
       <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
     </div>
   );

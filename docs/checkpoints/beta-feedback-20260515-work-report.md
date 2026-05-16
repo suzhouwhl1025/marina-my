@@ -24,7 +24,7 @@
 ### 跳过(用户拍板)
 
 - **BETA-003 Ubuntu 支持** — Linux 集成方案仍在迭代,本轮不动
-- **BETA-019 Claude Code 光标闪烁** — 唯一未知根因 bug。2026-05-16 深入静态分析锁定候选根因(xterm `coreService.isCursorHidden` 被 DECSTR/RIS 翻回),已部署标题栏 HUD 等用户复现确认。详见工单库 BETA-019 章节
+- **BETA-019 Claude Code 光标闪烁** — 唯一未知根因 bug。2026-05-16 深入静态分析 + 运行时 HUD 注入抓数据,排除了 5 条候选根因;实施业界通行 workaround(alt-screen buffer 内禁用 cursorBlink);剩余怀疑(scrollback replay 后 cursor 状态遗留)未验证。详见工单库 BETA-019 章节
 
 ### 已挂起 / 已取消 / 外部限制(7 条 + BETA-031 主功能,保持原状,无 commit)
 
@@ -172,7 +172,7 @@ createSession 初始 `state: 'idle'`(不再 active),CP-4 勘误 #5 的"创建期
 | **BETA-004 i18n** | 框架就绪,大量 SettingsView 二级文案、主进程 tray menu、ContextMenu 命令名、模板编辑子页、WelcomeState 等仍硬编码中文。下一轮按文件逐个 t() 化 |
 | **BETA-002 后端兜底 audit** | 走轻量版(既有 uncaughtException / unhandledRejection 全局兜底已足够,新增 KI-004 留档)。如需完整审计 ipc/persistence/tray/window 各 handler try-catch 缺口,可单开任务 |
 | **BETA-006 测试** | 仅手工验证,未补 mock aiClient 的 vitest case(scheduleIdleCheck 走 aiClient.recheckIdle 时序难造,FakeTimers + async race) |
-| **BETA-019** | 2026-05-16 已部署 cursor 状态 HUD(标题栏),用户复现时直接看 `hide:` / `flips` 字段定位 root cause 后处理 |
+| **BETA-019** | 2026-05-16 Workaround(alt-screen buffer 关 cursorBlink)已落地。根因未定位,工单内列了完整调试痕迹与下次接手验证方法。需用户验证 workaround 效果后决定是否继续追根因 |
 | **BETA-034 Cutie 配色** | 第一版(iBook G3 / 马卡龙)autonomous 落地,工单原意是"作者看 2-3 套草稿再定稿",如需替换调 `global.css [data-theme='cutie']` + `XTERM_THEMES.cutie` 即可 |
 | **BETA-003 Ubuntu** | Linux 集成方案稳定后单开一轮 |
 | **Explorer 简易模式菜单项** | BETA-027 的 Explorer 右键注册第二菜单项(`--mode=simple`)未做(MSIX manifest 改动较大)。当前仅支持命令行 / 快捷方式触发简易模式 |

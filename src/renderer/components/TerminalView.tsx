@@ -63,8 +63,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
-// [BETA-019 DEBUG] 注册当前 Terminal 实例供 HUD 采样,定位光标污染后整体删除
-import { registerTerminal, unregisterTerminal } from '../debug/beta019-cursor-hud';
 import { Check, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
@@ -704,8 +702,6 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       windowsMode: true,
     });
     termRef.current = term;
-    // [BETA-019 DEBUG] 注册到全局 registry 供标题栏 HUD 采样
-    registerTerminal(session.id, term);
 
     const fitAddon = new FitAddon();
     const webLinksAddon = new WebLinksAddon();
@@ -829,6 +825,23 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
         });
       },
     );
+
+    // BETA-019 workaround:alt-screen buffer (TUI 应用如 Claude Code / vim /
+    // htop / aider) 内关闭 cursorBlink,主 buffer (shell prompt) 内开启。
+    //
+    // 用户报告 Claude Code 跑一段时间后,自绘 spinner 重绘字符的末尾出现闪烁
+    // 输入光标。深入排查(详见 BETA-019 工单)未能定位根因 — patch
+    // `coreService.isCursorHidden` setter 抓 stack trace 显示 bug 时段并无异常
+    // 翻转,排除了 DECSTR / RIS / setMode/resetMode 路径污染的所有候选。
+    // 暂以业界通行启发式 workaround 兜底:alt buffer 期 = TUI 应用自管光标,
+    // 终端层闪烁仅徒增干扰。Windows Terminal / iTerm2 / kitty 同此策略。
+    //
+    // exited 态由 FLK-10 effect 设 cursorStyle='underline' 标识,此时 PTY 已死,
+    // 不再有 buffer 切换,只读 cursorStyle 即可跳过(避免与 FLK-10 互相覆盖)。
+    const bufferChangeDisposable = term.buffer.onBufferChange(() => {
+      if (term.options.cursorStyle === 'underline') return;
+      term.options.cursorBlink = term.buffer.active.type === 'normal';
+    });
 
     term.open(container);
 
@@ -1089,6 +1102,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       cleanupOutput();
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
+      bufferChangeDisposable.dispose();
       searchAddon.dispose();
       // PER-1:WebGL addon 必须在 term.dispose 之前释放,否则 GL context
       // 句柄泄漏(显存累积,大量切 session 后会触发显卡警告)
@@ -1101,8 +1115,6 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
-      // [BETA-019 DEBUG] 从全局 registry 移除
-      unregisterTerminal(session.id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id]);
@@ -1117,6 +1129,11 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
   // FLK-10:session.state='exited' 时 stop 光标闪烁,避免"会话已死但光标
   // 在闪"误导用户以为还能交互(配合 TYP-1 的 toast,死后输入有可见反馈)。
   // 状态回到 active/idle 时(实际不会发生,exited 是终态)恢复闪。
+  //
+  // BETA-019 workaround:not-exited 分支同时读 buffer.type — 在 alt buffer
+  // (Claude Code 等 TUI) 内保持 blink=false。否则 session.state idle↔active
+  // 切换会反复把 blink 强制设回 true,覆盖 onBufferChange listener 的关闭设置。
+  // cursorStyle 仍用作"exited 标识位",mount effect 内 onBufferChange 读它判 exited。
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -1124,8 +1141,8 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       term.options.cursorBlink = false;
       term.options.cursorStyle = 'underline';
     } else {
-      term.options.cursorBlink = true;
       term.options.cursorStyle = 'bar';
+      term.options.cursorBlink = term.buffer.active.type === 'normal';
     }
   }, [session.state]);
 
