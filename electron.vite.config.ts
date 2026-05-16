@@ -19,9 +19,80 @@
  * - out/renderer/ — 静态资源 + 入口 index.html
  */
 import { resolve } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+
+/**
+ * 同步探测某端口在 127.0.0.1 上是否可 bind。
+ *
+ * Windows 上 Hyper-V/WinNAT 会动态保留大段端口(常见命中:
+ * `netsh interface ipv4 show excludedportrange protocol=tcp`)。
+ * Vite 自身只对 EADDRINUSE 自动 fallback,不处理 EACCES,所以保留段命中会
+ * 直接挂在启动期。这里在 config 加载时帮 Vite 先挑一个能 listen 的。
+ *
+ * 实现:每个候选端口起一个短命子 node 进程跑 net.listen。子进程退出码:
+ *   0 = 可 bind(server 已 close);非 0 = EACCES / EADDRINUSE / 超时。
+ * 单次探测 ~30-80ms,候选 6 个 → 最坏 500ms 多一点,在 dev 启动期可接受。
+ */
+function tryListen(port: number): boolean {
+  const script = `
+    const net = require('net');
+    const srv = net.createServer();
+    let done = false;
+    srv.once('error', () => { if (!done) { done = true; process.exit(1); } });
+    srv.once('listening', () => {
+      if (done) return;
+      done = true;
+      srv.close(() => process.exit(0));
+    });
+    srv.listen(${port}, '127.0.0.1');
+    setTimeout(() => { if (!done) { done = true; process.exit(2); } }, 400);
+  `;
+  try {
+    execFileSync(process.execPath, ['-e', script], {
+      stdio: 'ignore',
+      timeout: 1500,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 从候选端口列表里挑第一个能在 127.0.0.1 上 bind 的端口。
+ * 全失败时落回列表首位 — Vite 自己再报 EACCES,至少给开发者看到原始错误。
+ *
+ * 候选列表特意挑了多个不相邻区间,避免 Windows 把某一段全划进 Hyper-V
+ * 保留范围。开发者可用 EASYTERM_DEV_PORT 覆盖。
+ */
+function pickDevPort(): number {
+  const override = Number(process.env.EASYTERM_DEV_PORT);
+  if (override) {
+    if (tryListen(override)) return override;
+    console.warn(
+      `[electron-vite] EASYTERM_DEV_PORT=${override} 不可用(端口被保留或占用),` +
+        `自动 fallback 到候选列表`,
+    );
+  }
+  // 候选区间(对应 Win11 常见的 excluded port ranges 之外):
+  //   17173 / 9173 / 7173 — 较高、罕被工具占用
+  //   3173 / 8173 — 中段补漏
+  //   5173 — Vite 官方默认,Windows 上常落保留段所以放最后
+  const candidates = [17173, 9173, 7173, 3173, 8173, 5173];
+  for (const p of candidates) {
+    if (tryListen(p)) return p;
+  }
+  console.warn(
+    `[electron-vite] 所有候选端口均无法 bind!可能 OS 占用过多端口。` +
+      `请跑 \`netsh interface ipv4 show excludedportrange protocol=tcp\` 自查,` +
+      `然后设 EASYTERM_DEV_PORT=<空闲端口> 重试`,
+  );
+  return candidates[0]!;
+}
+
+const DEV_SERVER_PORT = pickDevPort();
 
 /**
  * 构建期获取 git commit hash + 构建时间。
@@ -106,15 +177,15 @@ export default defineConfig({
       // 锁 IPv4,避免 Vite 默认 localhost 先解析到 IPv6 ::1 时
       // 撞 Windows IPv6 保留端口的 EACCES。
       host: '127.0.0.1',
-      // 端口选择: Windows + Hyper-V/WinNAT 会保留大段动态端口范围
-      // (开发者自查命令: `netsh interface ipv4 show excludedportrange protocol=tcp`)。
-      // Vite 默认的 5173 在很多 Windows 11 机器上落在 5141-5340 保留段内,会抛 EACCES。
-      // 5800 在常见保留段之外 (5341-5984 是非保留区间),也不和 VNC/WinRM 等常见服务冲突。
-      // 若开发者机器仍命中保留段,可通过环境变量 EASYTERM_DEV_PORT 覆盖。
-      port: Number(process.env.EASYTERM_DEV_PORT) || 5800,
-      // EACCES 时 Vite 不会自动回退到下一个端口 (它只对 EADDRINUSE 这么做),
-      // 所以 strictPort 没意义,关掉避免误导。真要换端口直接改上一行或 export EASYTERM_DEV_PORT。
-      strictPort: false,
+      // 端口由 pickDevPort() 在 config 加载时**实际探测**选出(2026-05-16
+      // DEV-COEXIST 改进 — 历史固定端口 5800 在 5711-5810 保留段命中)。
+      // 候选区间 6 个,任何一个能 bind 就用。覆盖:export EASYTERM_DEV_PORT=<port>。
+      // 启动时 console 看 "[vite] Local: http://127.0.0.1:<port>/" 确认实际端口。
+      port: DEV_SERVER_PORT,
+      // EACCES 时 Vite 不会自动回退(它只对 EADDRINUSE 自动 fallback)。
+      // 我们已在 pickDevPort 里探测过,strictPort: true 让命中冲突直接报错,
+      // 而不是悄悄移动到 +1 端口让人迷惑。
+      strictPort: true,
     },
   },
 });
