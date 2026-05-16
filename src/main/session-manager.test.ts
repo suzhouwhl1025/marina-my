@@ -177,7 +177,14 @@ function makeStubSettingsManager(
       uiZoom: 1,
       macOSTrafficLightHoverSymbols: false,
     },
-    ai: { provider: null, apiKey: '', baseURL: '', model: '', statusRecheckEnabled: false },
+    ai: {
+      provider: null,
+      apiKey: '',
+      baseURL: '',
+      model: '',
+      statusRecheckEnabled: false,
+      statusRecheckSource: 'headless',
+    },
     shell: { defaultShellId: '', newTerminalShellPolicy: 'default' },
     behavior: {
       startupBehavior: 'open-window',

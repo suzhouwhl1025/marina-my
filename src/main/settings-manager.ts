@@ -75,6 +75,9 @@ export const DEFAULT_SETTINGS: Settings = {
     baseURL: '',
     model: '',
     statusRecheckEnabled: false,
+    // BETA-006 v2:默认走 headless(已渲染文本),消除 ANSI 噪音与 PSReadLine
+    // 重绘残影。老用户升级后字段缺失也会因为 SettingsManager.merge 走 default。
+    statusRecheckSource: 'headless',
   },
 };
 

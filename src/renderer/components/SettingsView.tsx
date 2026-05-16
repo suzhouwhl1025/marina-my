@@ -1455,6 +1455,7 @@ function AiPanel({
   const baseURL = ai?.baseURL ?? '';
   const model = ai?.model ?? '';
   const statusRecheckEnabled = ai?.statusRecheckEnabled ?? false;
+  const statusRecheckSource = ai?.statusRecheckSource ?? 'headless';
   const [testing, setTesting] = useState(false);
   const [showKey, setShowKey] = useState(false);
 
@@ -1600,6 +1601,30 @@ function AiPanel({
               />
               <span>启用</span>
             </label>
+          </SettingRow>
+
+          <SettingRow
+            label="复核输入源"
+            hint="raw=原始字节(含 ANSI 转义);headless=已渲染的字符矩阵(推荐,无重绘残影)"
+          >
+            <select
+              className="settings-input"
+              value={statusRecheckSource}
+              onChange={(e) =>
+                void updateSettings(
+                  {
+                    ai: {
+                      statusRecheckSource: e.target.value as 'raw' | 'headless',
+                    },
+                  },
+                  setError,
+                )
+              }
+              disabled={!statusRecheckEnabled}
+            >
+              <option value="headless">headless (已渲染文本)</option>
+              <option value="raw">raw (原始字节)</option>
+            </select>
           </SettingRow>
         </>
       )}

@@ -306,6 +306,15 @@ export interface Settings {
     model: string;
     /** BETA-006:active→idle 跃迁前调 LLM 复核,默认关。开启需 apiKey 非空。 */
     statusRecheckEnabled: boolean;
+    /**
+     * BETA-006 v2:喂给 LLM 的输入源。
+     * - 'raw'      = scrollback 最末 2KB 原始字节(含 ANSI 转义、PSReadLine 重绘
+     *                残影,LLM 看到的不是用户视觉上看到的)
+     * - 'headless' = main 端 @xterm/headless 维护的"已渲染"字符矩阵尾部 N 行,
+     *                无 ANSI / 无重绘残影,默认走这条
+     * - 'screenshot' = 多模态视觉,枚举值预留,UI 暂不暴露
+     */
+    statusRecheckSource: 'raw' | 'headless' | 'screenshot';
   };
 }
 

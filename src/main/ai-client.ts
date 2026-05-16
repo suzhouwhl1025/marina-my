@@ -109,10 +109,13 @@ export class AIClient {
   }
 
   /**
-   * BETA-006:在 active→idle 跃迁前给 LLM 看一眼 scrollback 尾部,问它
-   * "这个进程是真的在等命令(idle),还是只是没输出而已(应保持 active)"。
+   * BETA-006 v2:active→idle 跃迁前给 LLM 看一眼终端尾部,问它"用户该不
+   * 该回来看一眼了" — 因为 Marina 的主要用途是监控多个后台 Agent,旧 tab
+   * 在后台跑、状态点是用户判断"该不该回去检查"的唯一信号。
    *
-   * 返回 'keep-active' = LLM 判定进程仍在跑;'go-idle' = 应转 idle;
+   * 返回 'keep-active' = 任务还在跑,先别打扰用户;'go-idle' = 任务停了 /
+   * 出错 / 在等人输入,该让状态点亮起来。
+   *
    * 出错时 throw — 调用方应当 try/catch 并回退到原阈值判定。
    */
   async recheckIdle(scrollbackTail: string): Promise<'keep-active' | 'go-idle'> {
@@ -120,39 +123,96 @@ export class AIClient {
     if (!provider) throw new Error('AI provider 未配置');
     if (!apiKey.trim()) throw new Error('AI apiKey 未填');
 
+    // Prompt 语义:不是"还在跑 vs 返回 shell",而是"需要人为检查 vs 让它继续
+    // 跑"。覆盖 sleep / 阻塞 IO / TUI 等无输出但在跑的情况(否则会被误判
+    // idle),也覆盖错误 + 新 prompt、y/n 询问、密码 prompt、TUI 菜单等需要
+    // 人为介入的情况。要求**严格回一个词**(active / idle),避免推理模型
+    // 写一整段解释 — 配合下面 `normalized === 'active'` 的严格相等判定。
     const prompt =
-      'You are reading the last bytes of a running terminal session ' +
-      'to determine whether the foreground process is still actively working or ' +
-      'has finished and returned to the prompt.\n\n' +
-      'Reply with EXACTLY one word: "active" if it is still running (e.g. a dev ' +
-      'server like Vite watching files, a long compile, a TUI), or "idle" if it ' +
-      'has returned to a shell prompt waiting for the next command.\n\n' +
+      'You are watching the tail of a terminal session. Decide whether the ' +
+      'user should look at it NOW (because the task paused, finished, errored, ' +
+      'or is waiting for them), or whether they can keep working elsewhere ' +
+      'because the foreground program is still running on its own.\n\n' +
+      'Reply with EXACTLY ONE word and nothing else: `active` or `idle`.\n\n' +
+      '`idle` = needs human attention now. Concrete signals:\n' +
+      '  * A new shell prompt appears as the last line after previous output ' +
+      '(the previous command returned)\n' +
+      '  * Multiple lines of error/warning output followed by a new prompt\n' +
+      '  * A "y/n", "Press any key", or password prompt is visible\n' +
+      '  * A TUI shows a menu, dialog, or confirmation awaiting selection\n\n' +
+      '`active` = leave it alone, work continues. Concrete signals:\n' +
+      '  * The last line is `prompt> command` with NO new prompt below it ' +
+      '(the command is currently executing — covers sleep, wait, network ' +
+      'calls, blocked IO, long compiles, even a debugger paused at a breakpoint)\n' +
+      '  * A dev server / watcher / Vite / webpack is printing logs\n' +
+      '  * A TUI (vim / htop / claude code / lazygit) is in normal operation ' +
+      '(not blocked on a dialog)\n' +
+      '  * A spinner or progress bar is still animating\n\n' +
       '--- terminal tail ---\n' +
       scrollbackTail +
       '\n--- end ---\n';
 
+    // BETA-006 排障日志:把喂给 LLM 的 tail 完整落盘 — 排"为什么 sleep
+     // 被判 idle"这类问题必须看到 LLM 收到的原始字节(含 ANSI/控制符,
+     // JSON 序列化里会 \uXXXX 转义)。tail 上限 2KB,一次约 2-3KB,
+     // 5MB 日志文件能撑 1k+ 次复核,够用。
+    const modelUsed =
+      model || (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
+    logger.info(
+      'AIClient',
+      `recheckIdle → ${provider} ${modelUsed} tail.len=${scrollbackTail.length}`,
+      { tail: scrollbackTail },
+    );
+
     let text: string;
-    if (provider === 'anthropic') {
-      const client = new Anthropic(clientOptions(apiKey, baseURL));
-      const res = await client.messages.create({
-        model: model || DEFAULT_ANTHROPIC_MODEL,
-        max_tokens: 8,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      // Anthropic content 是 array of blocks;取首个 text block
-      const block = res.content[0];
-      text = block && block.type === 'text' ? block.text : '';
-    } else {
-      const client = new OpenAI(clientOptions(apiKey, baseURL));
-      const res = await client.chat.completions.create({
-        model: model || DEFAULT_OPENAI_MODEL,
-        max_tokens: 8,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      text = res.choices[0]?.message?.content ?? '';
+    try {
+      // max_tokens 给 8192:推理模型(kimi-k2.5 / deepseek-r1 等)把
+      // reasoning token 与 visible content 一起计入 completion_tokens,
+      // 原来的 8 在推理模型下 100% 被思考过程吃光、content 永远是空串,
+      // 后果是 verdict 一律 go-idle、复核形同虚设。8192 给推理模型留足
+      // 思考空间,防止重深推理被截断;纯 chat 模型遇到 stop word 后会
+      // 提前终止,不会真的产出 8K token,实际开销与短上限等价。
+      const maxTokens = 8192;
+      if (provider === 'anthropic') {
+        const client = new Anthropic(clientOptions(apiKey, baseURL));
+        const res = await client.messages.create({
+          model: modelUsed,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        // 完整 res 落盘 — 排"为什么 content 为空"要看 stop_reason / usage
+        logger.info('AIClient', 'recheckIdle ← anthropic raw res', { res });
+        // Anthropic content 是 array of blocks;取首个 text block
+        const block = res.content[0];
+        text = block && block.type === 'text' ? block.text : '';
+      } else {
+        const client = new OpenAI(clientOptions(apiKey, baseURL));
+        const res = await client.chat.completions.create({
+          model: modelUsed,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        // 完整 res 落盘 — 排"为什么 content 为空"要看 finish_reason /
+        // usage / message(可能有 reasoning_content 等非标字段)
+        logger.info('AIClient', 'recheckIdle ← openai raw res', { res });
+        text = res.choices[0]?.message?.content ?? '';
+      }
+    } catch (err) {
+      logger.warn('AIClient', 'recheckIdle LLM call threw', err);
+      throw err;
     }
+
+    // 严格相等判定:旧版用 includes('active'),会把 "idle, not active" 也算
+     // keep-active(子串误判)。新 prompt 要求"EXACTLY ONE word",严格等比
+     // 子串安全。命中不到 active 就 go-idle —— LLM 偶尔啰嗦也偏保守地"让
+     // 状态点亮起来"(idle 一侧是"提醒用户看",误报代价低于漏报)。
     const normalized = text.trim().toLowerCase();
-    if (normalized.includes('active')) return 'keep-active';
-    return 'go-idle';
+    const verdict: 'keep-active' | 'go-idle' =
+      normalized === 'active' ? 'keep-active' : 'go-idle';
+    logger.info(
+      'AIClient',
+      `recheckIdle ← raw=${JSON.stringify(text)} verdict=${verdict}`,
+    );
+    return verdict;
   }
 }

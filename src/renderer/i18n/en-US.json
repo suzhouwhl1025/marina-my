@@ -55,6 +55,8 @@
   "settings.ai.test.testing": "Testing…",
   "settings.ai.statusRecheck.label": "Status recheck (BETA-006)",
   "settings.ai.statusRecheck.hint": "LLM rechecks before active→idle; falls back to the threshold on failure, never blocks",
+  "settings.ai.statusRecheckSource.label": "Recheck input source",
+  "settings.ai.statusRecheckSource.hint": "raw = raw PTY bytes (ANSI escapes included); headless = pre-rendered character matrix (recommended, no redraw residue)",
 
   "common.enable": "Enable",
   "common.disable": "Disable",

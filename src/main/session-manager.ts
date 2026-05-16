@@ -53,6 +53,12 @@ import type { PathManager } from './path-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { SettingsManager } from './settings-manager';
 import type { AIClient } from './ai-client';
+// @xterm/headless 是纯 CommonJS(无 ESM exports 字段),Electron 主进程
+// ESM loader 不接受 named import — 必须 default import 拿整个 module 再
+// 解构。类型用 `InstanceType<typeof HeadlessTerminal>` 推,避免重复声明。
+import xtermHeadless from '@xterm/headless';
+const { Terminal: HeadlessTerminal } = xtermHeadless;
+type HeadlessTerminal = InstanceType<typeof HeadlessTerminal>;
 import { Osc1337Parser } from './osc1337-parser';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, validateDimensions } from './pty-utils';
@@ -270,6 +276,15 @@ interface ManagedSession {
    */
   pendingEmit: { bytes: Buffer; lastSeq: number } | null;
   pendingEmitTimer: NodeJS.Timeout | null;
+  /**
+   * BETA-006 v2:headless terminal 镜像。每个 session 跟着 PTY passthrough
+   * 字节同步 write,buffer 维护"已渲染"字符矩阵 — 复核时读这里拿干净文本,
+   * 跳过 ANSI 转义和 PSReadLine 重绘残影,LLM 看到的与用户视觉一致。
+   *
+   * null = 该 session 没有 headless 镜像(理论上 createSession 总会建,
+   * 留 null 是为了 destroy 后访问安全)。
+   */
+  headlessTerm: HeadlessTerminal | null;
 }
 
 export interface CreateSessionInput {
@@ -521,6 +536,15 @@ export class SessionManager extends EventEmitter {
       manuallyRenamed: false,
       pendingEmit: null,
       pendingEmitTimer: null,
+      // BETA-006 v2:headless 镜像,scrollback 行数 1000 够装最近几屏 + 历史。
+      // allowProposedApi:translateBufferLineToString 是 proposed api,xterm 5.x
+      // 长期稳定,proposed 只是流程慢。
+      headlessTerm: new HeadlessTerminal({
+        cols: info.cols,
+        rows: info.rows,
+        scrollback: 1000,
+        allowProposedApi: true,
+      }),
     };
     this.sessions.set(sessionId, managed);
 
@@ -801,6 +825,13 @@ export class SessionManager extends EventEmitter {
     managed.info.rows = dims.rows;
     try {
       managed.pty.resize(dims.cols, dims.rows);
+      // BETA-006 v2:headless 镜像跟随 resize,buffer 折行才能与用户视觉对齐。
+      // 失败忽略(headless 自己内部数组大小,不该抛 — 真抛了也不阻塞 PTY resize)。
+      try {
+        managed.headlessTerm?.resize(dims.cols, dims.rows);
+      } catch {
+        /* ignore */
+      }
     } catch (err) {
       logger.warn(
         'SessionManager',
@@ -913,6 +944,12 @@ export class SessionManager extends EventEmitter {
       // pendingEmit 中尚未 flush 的字节对 renderer 不可见。
       const seq = managed.outputSeq++;
       this.queueEmit(managed, parsed.passthrough, seq);
+
+      // BETA-006 v2:同步喂给 headless terminal — write 是异步的(内部
+      // 调度到 next tick),但读 buffer 是同步的且会反映已 write 完的部分。
+      // 复核时 buffer 可能比 PTY 实际状态滞后几 ms,可接受 — 复核本来
+      // 就在 thresholdSec 静默后触发,几 ms 误差无关紧要。
+      managed.headlessTerm?.write(parsed.passthrough);
 
       // 状态机:有输出 → active,重置 idle 计时器。
       // 跳过 markActive 的三种 quiet 窗口(scrollback / sessionOutput 仍正常,
@@ -1110,6 +1147,15 @@ export class SessionManager extends EventEmitter {
       }
       managed.pty = null;
     }
+    // BETA-006 v2:释放 headless terminal,免得 buffer 行随 GC 慢慢飘
+    if (managed.headlessTerm) {
+      try {
+        managed.headlessTerm.dispose();
+      } catch {
+        /* ignore */
+      }
+      managed.headlessTerm = null;
+    }
     this.sessions.delete(sid);
     this.pathManager.detachSession(sid);
     this.emit('sessionDestroyed', { sessionId: sid, reason });
@@ -1144,9 +1190,17 @@ export class SessionManager extends EventEmitter {
         this.aiClient &&
         this.aiClient.isConfigured()
       ) {
-        const tail = managed.scrollback
-          .subarray(Math.max(0, managed.scrollback.length - 2048))
-          .toString('utf8');
+        // BETA-006 v2:按 settings.ai.statusRecheckSource 选输入源。
+        // headless = 从 @xterm/headless buffer 拿"已渲染"文本(无 ANSI 噪音 /
+        // 无 PSReadLine 重绘残影),raw = 保留旧路径(scrollback 末 2KB 原始
+        // 字节)。screenshot 暂未实现 → fallback 到 raw。
+        const source = s.ai.statusRecheckSource ?? 'headless';
+        const tail =
+          source === 'headless' && managed.headlessTerm
+            ? this.getHeadlessTail(managed, 40)
+            : managed.scrollback
+                .subarray(Math.max(0, managed.scrollback.length - 2048))
+                .toString('utf8');
         this.aiClient
           .recheckIdle(tail)
           .then((verdict) => {
@@ -1173,6 +1227,36 @@ export class SessionManager extends EventEmitter {
       managed.info.state = 'idle';
       this.emitStateChanged(managed, { state: 'idle' });
     }, ms);
+  }
+
+  /**
+   * BETA-006 v2:从 headless terminal buffer 拿最后 maxRows 行非空文本。
+   *
+   * 实现:buffer.active 是当前 viewport(含 scrollback),从 baseY..baseY+rows
+   * 是可视区,baseY 之前是 scrollback。从 buffer 末尾向上扫,跳过纯空白行,
+   * 收集 maxRows 行,反转后用 \n 拼接。
+   *
+   * 为什么不直接取 viewport(rows 行):viewport 末尾可能有几行空白(光标
+   * 还没到底),会浪费 LLM 看的窗口。从末尾找非空更接近"用户视觉看到的最后
+   * 几行内容"。
+   *
+   * 不剪空格 / 不 strip 尾空白 — buffer 已经是"渲染后"的字符矩阵,没有
+   * ANSI 转义,自然干净。
+   */
+  private getHeadlessTail(managed: ManagedSession, maxRows: number): string {
+    if (!managed.headlessTerm) return '';
+    const buf = managed.headlessTerm.buffer.active;
+    // buf.length 是 scrollback + viewport 总行数
+    const total = buf.length;
+    const lines: string[] = [];
+    for (let y = total - 1; y >= 0 && lines.length < maxRows; y--) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      const text = line.translateToString(true); // trim trailing whitespace
+      if (lines.length === 0 && text === '') continue; // 跳过末尾空行
+      lines.push(text);
+    }
+    return lines.reverse().join('\n');
   }
 
   /**
@@ -1561,7 +1645,7 @@ function createNoopAdapter(): PlatformAdapter {
     getRefreshedPath() {
       return process.env.PATH ?? '';
     },
-    getSystemPaths() {
+    getDefaultBookmarkSeeds() {
       return [];
     },
   };

@@ -55,6 +55,8 @@
   "settings.ai.test.testing": "测试中…",
   "settings.ai.statusRecheck.label": "状态复核(BETA-006)",
   "settings.ai.statusRecheck.hint": "active→idle 跃迁前让 LLM 复核;失败时回退原阈值,不阻塞",
+  "settings.ai.statusRecheckSource.label": "复核输入源",
+  "settings.ai.statusRecheckSource.hint": "raw=原始字节(含 ANSI 转义);headless=已渲染的字符矩阵(推荐,无重绘残影)",
 
   "common.enable": "启用",
   "common.disable": "禁用",
