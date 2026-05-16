@@ -13,7 +13,11 @@
  * 不依赖任何 npm 包(AGENTS.md 1.2 边界 2):内置一个最小 PNG 编码器,
  * 渲染管线纯 JS。
  *
- * 设计与 build/icon.svg 同源 — Rose Pine 深紫底 + Iris ">_" 提示符 + Gold 光标。
+ * 设计与 build/icon.svg 同源 — Rose Pine 深紫底 + Iris ">_" 提示符。
+ *
+ * BETA-026:原先 ">" 与下划线之间有一块 Gold 金色光标方块,beta 用户反馈
+ * 视觉怪(与 ">_" 提示符语义重复),已删。当时只动了 SVG 没改本脚本,
+ * 导致 PNG/ICO 仍含金块直到 2026-05-17 才同步。
  */
 'use strict';
 
@@ -30,7 +34,6 @@ const BG_TOP = rgb('#1f1d2e');
 const BG_BOTTOM = rgb('#191724');
 const INNER_BORDER = rgb('#26233a');
 const IRIS = rgb('#c4a7e7');
-const GOLD = rgb('#f6c177');
 
 // 圆角矩形参数(对应 SVG 256x256, rx=56)
 const CORNER_RADIUS = 56;
@@ -48,9 +51,6 @@ const PROMPT_STROKE = 20;
 
 // "_" 下划线
 const UNDERSCORE = { x1: 140, y1: 172, x2: 196, y2: 172, stroke: 20 };
-
-// gold 光标 (20x44 在 (140, 92),圆角 3)
-const CURSOR = { x: 140, y: 92, w: 20, h: 44, r: 3 };
 
 // ────────────────────────────────────────────────────────────────
 // PNG 编码 (无依赖) — 先声明,后面 main() 用
@@ -229,15 +229,6 @@ function main() {
     UNDERSCORE.stroke,
     IRIS,
   );
-
-  // 5. Gold 光标方块
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
-      if (insideRoundedRect(x, y, CURSOR.x, CURSOR.y, CURSOR.w, CURSOR.h, CURSOR.r)) {
-        setPixel(x, y, GOLD, 0xff);
-      }
-    }
-  }
 
   const pngData = encodePng(buf, SIZE, SIZE);
   fs.mkdirSync(path.dirname(OUT_PNG), { recursive: true });
