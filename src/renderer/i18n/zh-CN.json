@@ -4,16 +4,11 @@
   "sidebar.category.bookmark": "收藏",
   "sidebar.category.temporary": "临时",
   "sidebar.category.recent": "最近",
-  "sidebar.category.system": "系统",
   "sidebar.empty": "空",
   "sidebar.addBookmark.title": "选择文件夹添加到收藏",
   "sidebar.addTemporary.title": "选择文件夹并新建一个临时终端",
   "sidebar.path.invalid": "路径不可访问",
   "sidebar.dropHint": "松开以加入收藏",
-
-  "system.desktop": "桌面",
-  "system.home": "主目录",
-  "system.temp": "临时",
 
   "settings.title": "设置",
   "settings.close": "关闭设置",
@@ -33,10 +28,6 @@
   "settings.appearance.language.system": "跟随系统",
   "settings.appearance.windowStyle.label": "窗口风格",
   "settings.appearance.windowStyle.hint": "影响标题栏布局与窗口控制按钮位置(不影响主题配色)",
-  "settings.appearance.showSystemPaths.label": "显示系统路径分组",
-  "settings.appearance.showSystemPaths.hint": "在侧栏顶部新增第 4 栏'系统',含桌面 / 主目录 / 临时目录",
-  "settings.appearance.systemPaths.label": "系统路径条目",
-  "settings.appearance.systemPaths.hint": "逐项选择要显示的系统路径",
   "settings.appearance.macOSHover.label": "红绿灯悬浮符号",
   "settings.appearance.macOSHover.hint": "macOS 风格下,鼠标移到红绿灯按钮上是否显示 ×/−/+;默认关(更克制)",
 

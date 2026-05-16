@@ -402,52 +402,6 @@ function AppearancePanel({
         </select>
       </SettingRow>
 
-      {/* BETA-011:系统路径分组(Sidebar 第 4 栏) */}
-      <SettingRow
-        label="显示系统路径分组"
-        hint="在侧栏顶部新增第 4 栏'系统',含桌面 / 主目录 / 临时目录"
-      >
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={a?.showSystemPaths ?? true}
-            onChange={(e) =>
-              void updateSettings(
-                { appearance: { showSystemPaths: e.target.checked } },
-                setError,
-              )
-            }
-          />
-          <span>启用</span>
-        </label>
-      </SettingRow>
-
-      {(a?.showSystemPaths ?? true) && (
-        <SettingRow label="系统路径条目" hint="逐项选择要显示的系统路径">
-          <div className="settings-radio-group" style={{ flexDirection: 'column', alignItems: 'flex-start' }}>
-            {(['desktop', 'home', 'temp'] as const).map((key) => {
-              const label =
-                key === 'desktop' ? '桌面' : key === 'home' ? '主目录' : '临时';
-              return (
-                <label key={key} className="settings-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={a?.systemPaths?.[key] ?? true}
-                    onChange={(e) =>
-                      void updateSettings(
-                        { appearance: { systemPaths: { [key]: e.target.checked } } },
-                        setError,
-                      )
-                    }
-                  />
-                  <span>{label}</span>
-                </label>
-              );
-            })}
-          </div>
-        </SettingRow>
-      )}
-
       {/* BETA-023:macOS 风格红绿灯悬浮符号 */}
       {windowStyle === 'macos' && (
         <SettingRow

@@ -35,7 +35,6 @@ import type {
   RecentFile,
 } from '@shared/types';
 import type { JsonStore } from './persistence';
-import type { SystemPathEntry } from './platform';
 import { logger } from './logger';
 
 const RECENT_CAPACITY = 30;
@@ -119,13 +118,6 @@ export class PathManager extends EventEmitter {
   private recent: RecentEntry[] = [];
 
   /**
-   * BETA-011:Sidebar 第 4 栏"系统"路径。每次启动由 PlatformAdapter 派生,
-   * 经 settings.appearance.{showSystemPaths, systemPaths} 过滤后由 bootstrap
-   * 调 setSystemPaths() 注入。不持久化。
-   */
-  private systemPaths: SystemPathEntry[] = [];
-
-  /**
    * BETA-043:启动期扫描发现的"不可访问"路径集合(normalized)。
    * getTree() 用于把对应 PathNode 标 invalid。bootstrap 启动末尾填一次,
    * 不做后台周期扫(资源考虑)。
@@ -141,13 +133,18 @@ export class PathManager extends EventEmitter {
 
   /**
    * 从持久化加载初始数据。在 Main 启动时调用一次。
+   *
+   * 返回 bookmarks.json 的加载来源:'main' / 'bak' / 'default'。
+   * bootstrap 用 'default' 判定干净安装,继而种入 PlatformAdapter 提供的
+   * 默认收藏(桌面 / 主目录)。
    */
-  async initialize(): Promise<void> {
+  async initialize(): Promise<{ bookmarksSource: 'main' | 'bak' | 'default' }> {
     const bk = await this.bookmarksStore.load(DEFAULT_BOOKMARKS_FILE);
     const rc = await this.recentStore.load(DEFAULT_RECENT_FILE);
     this.bookmarks = bk.value.paths.slice();
     this.recent = rc.value.paths.slice();
     this.sortRecent();
+    return { bookmarksSource: bk.source };
   }
 
   /**
@@ -378,11 +375,8 @@ export class PathManager extends EventEmitter {
   // ──────────────────────────────────────────────────────────────────
 
   /**
-   * 获取完整 PathTree,四个分类无重叠
-   * (优先级:收藏 > 临时 > 最近;系统栏自成体系,不去重)。
+   * 获取完整 PathTree,三个分类无重叠(优先级:收藏 > 临时 > 最近)。
    *
-   * BETA-011:systemPaths 来自 PlatformAdapter,bootstrap 已按 settings 过滤;
-   * 这里不持久化、不参与去重(系统栏本来就是入口快捷方式)。
    * BETA-043:invalidPaths 集合里的路径会被标 invalid: true。
    */
   getTree(): PathTree {
@@ -424,25 +418,7 @@ export class PathManager extends EventEmitter {
         ...markInvalid(r.path),
       }));
 
-    const systemPaths: PathNode[] = this.systemPaths.map((sp) => ({
-      id: sp.id,
-      path: sp.path,
-      displayName: sp.label,
-      category: 'system' as const,
-      sessionIds: [],
-      ...markInvalid(sp.path),
-    }));
-
-    return { bookmarks, temporary, recent, systemPaths };
-  }
-
-  /**
-   * BETA-011:设置系统路径条目(已按 settings.appearance.systemPaths.* 过滤),
-   * 由 bootstrap 在启动 + 设置变化时调用。空数组 = 整体关闭显示。
-   */
-  setSystemPaths(entries: SystemPathEntry[]): void {
-    this.systemPaths = entries.slice();
-    this.emit('pathTreeUpdated', this.getTree());
+    return { bookmarks, temporary, recent };
   }
 
   /**
@@ -476,25 +452,6 @@ export class PathManager extends EventEmitter {
    */
   getPathForSession(sessionId: string): string | undefined {
     return this.sessionToPath.get(sessionId);
-  }
-
-  /**
-   * 把渲染端传来的 pathId 解析为可用于 spawn 的真实文件系统绝对路径。
-   *
-   * 系统路径节点(BETA-011)的 PathNode.id 是稳定逻辑名 `system:home` /
-   * `system:desktop` / `system:temp`,而真实路径在 systemPaths 表里。如果
-   * 渲染端把 selectedPathId(== node.id)直接当 cwd 发回来,SessionManager
-   * spawn 时会拿 `system:home` 当目录,直接挂 CwdNotAccessible。这里统一
-   * 在 IPC 边界做一次解析:
-   * - `system:*` → 从 systemPaths 找匹配 entry,返回 entry.path
-   * - 其它输入 → 原样返回(已是真实路径)
-   * - 找不到匹配的 system:* id → 返回 null,调用方应当报错而不是 fallback
-   *   到 homedir(否则用户感受是"点了桌面但实际开在主目录,且没提示")。
-   */
-  resolvePathIdToCwd(pathId: string): string | null {
-    if (!pathId.startsWith('system:')) return pathId;
-    const entry = this.systemPaths.find((sp) => sp.id === pathId);
-    return entry ? entry.path : null;
   }
 
   // ──────────────────────────────────────────────────────────────────

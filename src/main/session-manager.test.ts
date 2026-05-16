@@ -175,8 +175,6 @@ function makeStubSettingsManager(
       terminalLineHeight: 1.2,
       uiFontFamily: '',
       uiZoom: 1,
-      showSystemPaths: true,
-      systemPaths: { desktop: true, home: true, temp: true },
       macOSTrafficLightHoverSymbols: false,
     },
     ai: { provider: null, apiKey: '', baseURL: '', model: '', statusRecheckEnabled: false },
@@ -237,7 +235,7 @@ function makeFakeAdapter(opts: FakeAdapterOpts = {}): PlatformAdapter {
       // 测试默认走 process.env.PATH,不触发 reg query。
       return process.env.PATH ?? '';
     },
-    getSystemPaths() {
+    getDefaultBookmarkSeeds() {
       return [];
     },
   };

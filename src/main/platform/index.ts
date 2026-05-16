@@ -78,34 +78,31 @@ export interface PlatformAdapter {
   getRefreshedPath(): string;
 
   /**
-   * 返回当前平台的系统路径条目(BETA-011),用于 Sidebar 第 4 栏"系统"。
-   * 不持久化,每次启动从此处派生。
+   * 返回干净安装时种入收藏栏的"默认收藏"条目。
    *
-   * Windows:%USERPROFILE%\Desktop / %USERPROFILE% / %TEMP%
-   * Linux:  ~/Desktop / ~ / /tmp
-   * macOS:  ~/Desktop / ~ / /tmp
+   * 历史:BETA-011 曾把这些路径放在 Sidebar 第 4 栏"系统",2026-05-16
+   * 决定取消独立分组 — 桌面/主目录直接作为安装默认收藏,用户可重命名 /
+   * 移除,行为与普通收藏完全一致。
    *
-   * id 是稳定的逻辑名(`system:desktop` / `system:home` / `system:temp`),
-   * 用于和 settings.appearance.systemPaths 的逐项开关对齐;不参与
-   * PathManager 的 UUID id 体系。
+   * Windows:%USERPROFILE%\Desktop("桌面") / %USERPROFILE%("主目录")
+   * Linux / macOS:接口保留,实现见各平台 adapter(目前 throw)
+   *
+   * 返回数组顺序 = 种子顺序。每次启动都会被调用,但只有 bookmarks.json
+   * 不存在(JsonStore source==='default')时才生效一次,后续启动不会重播。
    */
-  getSystemPaths(): SystemPathEntry[];
+  getDefaultBookmarkSeeds(): DefaultBookmarkSeed[];
 }
 
 /**
- * 系统路径条目(BETA-011)。区别于普通 PathNode:
- * - 没有 UUID(系统路径每次启动重派,id 走稳定逻辑名)
- * - 不持有 session(显示时复用 PathNode 渲染逻辑,sessionIds 始终为空)
+ * 干净安装时种入收藏栏的默认条目。
+ * 落到 PathManager 后会被分配 UUID,加入 bookmarks.json 持久化,
+ * 与用户手动添加的收藏一视同仁。
  */
-export interface SystemPathEntry {
-  /** 稳定逻辑名:'system:desktop' / 'system:home' / 'system:temp' */
-  id: string;
-  /** 显示名,如 "桌面" / "主目录" / "临时" */
+export interface DefaultBookmarkSeed {
+  /** 显示名,如 "桌面" / "主目录" */
   label: string;
   /** 文件系统绝对路径(平台决定具体值) */
   path: string;
-  /** 对应 settings.appearance.systemPaths 里的开关字段名 */
-  toggleKey: 'desktop' | 'home' | 'temp';
 }
 
 /**

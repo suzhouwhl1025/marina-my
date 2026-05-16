@@ -20,11 +20,11 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { logger } from '../logger';
-import type { PlatformAdapter, ShellInfo, SystemPathEntry } from './index';
+import type { DefaultBookmarkSeed, PlatformAdapter, ShellInfo } from './index';
 
 const execFileAsync = promisify(execFile);
 
@@ -490,30 +490,19 @@ export class WindowsAdapter implements PlatformAdapter {
   }
 
   /**
-   * BETA-011:Windows 系统路径(每次启动派生,不持久化)。
-   * USERPROFILE 兜底用 homedir(),Windows 上正常存在。
+   * Windows 上干净安装时种入收藏栏的默认条目:
+   * - 桌面(%USERPROFILE%\Desktop)
+   * - 主目录(%USERPROFILE%)
+   *
+   * 历史上还含临时目录,2026-05-16 移除独立"系统"分组的同时去掉 — 临时目录
+   * 日常打开终端的频次不足以占用一个默认收藏槽位。USERPROFILE 兜底用
+   * homedir(),Windows 上正常存在。
    */
-  getSystemPaths(): SystemPathEntry[] {
+  getDefaultBookmarkSeeds(): DefaultBookmarkSeed[] {
     const userProfile = process.env.USERPROFILE || homedir();
     return [
-      {
-        id: 'system:desktop',
-        label: '桌面',
-        path: join(userProfile, 'Desktop'),
-        toggleKey: 'desktop',
-      },
-      {
-        id: 'system:home',
-        label: '主目录',
-        path: userProfile,
-        toggleKey: 'home',
-      },
-      {
-        id: 'system:temp',
-        label: '临时',
-        path: tmpdir(),
-        toggleKey: 'temp',
-      },
+      { label: '桌面', path: join(userProfile, 'Desktop') },
+      { label: '主目录', path: userProfile },
     ];
   }
 }

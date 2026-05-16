@@ -28,7 +28,7 @@ import { SettingsManager, DEFAULT_SETTINGS } from './settings-manager';
 import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
 import { installIpcLayer } from './ipc';
-import { getPlatformAdapter, type SystemPathEntry } from './platform';
+import { getPlatformAdapter } from './platform';
 import { AIClient } from './ai-client';
 import { WindowsAdapter } from './platform/windows';
 import { parseOpenHere, parseSimpleMode } from './argv-utils';
@@ -52,20 +52,6 @@ export function getIsQuitting(): boolean {
 }
 
 /**
- * BETA-011:按 settings 把 PlatformAdapter 返回的系统路径过滤一遍。
- * - showSystemPaths = false → 整体清空(Sidebar 不渲染第 4 栏)
- * - 各 toggle 控制对应条目是否进入数组
- */
-function filterSystemPaths(
-  entries: readonly SystemPathEntry[],
-  settings: Settings,
-): SystemPathEntry[] {
-  if (!settings.appearance.showSystemPaths) return [];
-  const flags = settings.appearance.systemPaths;
-  return entries.filter((e) => flags[e.toggleKey]);
-}
-
-/**
  * BETA-043:并行 statSync 一遍所有路径,把不存在 / 非目录 / 无权限的路径喂给
  * PathManager.setInvalidPaths。仅在 bootstrap 末尾调一次,不做后台周期扫
  * (避免无谓 IO,且用户修了路径后随时可以手动重启刷新)。
@@ -76,9 +62,6 @@ async function scanInvalidPathsAsync(pathManager: PathManager): Promise<void> {
     ...tree.bookmarks,
     ...tree.temporary,
     ...tree.recent,
-    // 系统路径理论上永远存在,但走同一代码路径不报错;%TEMP% 不存在时
-    // 也标 invalid 而不是崩溃。
-    ...tree.systemPaths,
   ];
   const invalid: string[] = [];
   for (const node of allPaths) {
@@ -345,7 +328,8 @@ function bootstrap(): void {
       logger.setLevel(
         settingsManager.get().advanced.logLevel === 'DEBUG' ? 'debug' : 'info',
       );
-      await pathManager.initialize();
+      const { bookmarksSource } = await pathManager.initialize();
+      logger.info('main', `bookmarks loaded from: ${bookmarksSource}`);
       const tmplSrc = await templatesManager.initialize();
       logger.info('main', `templates loaded from: ${tmplSrc}`);
 
@@ -382,29 +366,24 @@ function bootstrap(): void {
         if (e.changedKeys.includes('advanced.logLevel')) {
           logger.setLevel(e.settings.advanced.logLevel === 'DEBUG' ? 'debug' : 'info');
         }
-        // BETA-011:系统路径分组开关变化即刻反映到 PathTree
-        if (
-          platformAdapter &&
-          e.changedKeys.some(
-            (k) =>
-              k === 'appearance.showSystemPaths' ||
-              k.startsWith('appearance.systemPaths'),
-          )
-        ) {
-          pathManager.setSystemPaths(
-            filterSystemPaths(platformAdapter.getSystemPaths(), e.settings),
-          );
-        }
         // Explorer 右键集成不再走 settings — 它的开关由
         // cmd:explorer-integration:set-{classic,modern} 直接调用 platformAdapter,
         // 系统状态 = HKCU key / MSIX 包是否存在(现场查,不持久化在 settings.json)。
       });
 
-      // BETA-011:启动后立刻把系统路径派生进 PathTree
-      if (platformAdapter) {
-        pathManager.setSystemPaths(
-          filterSystemPaths(platformAdapter.getSystemPaths(), settingsManager.get()),
-        );
+      // 2026-05-16:干净安装时种入默认收藏(桌面 / 主目录),取代旧的"系统"
+      // 独立分组。bookmarksSource==='default' 表示 bookmarks.json 不存在,
+      // 是真正的首次启动 — addBookmark 内部会去重 + 持久化,后续启动直接读盘
+      // 拿到这些条目,不会重复种入。
+      if (bookmarksSource === 'default' && platformAdapter) {
+        const seeds = platformAdapter.getDefaultBookmarkSeeds();
+        for (const seed of seeds) {
+          try {
+            pathManager.addBookmark({ path: seed.path, displayName: seed.label });
+          } catch (err) {
+            logger.warn('main', `seed default bookmark failed: ${seed.path}`, err);
+          }
+        }
       }
 
       // BETA-043:启动期异步扫描所有 path,标记不可访问者。不做后台周期扫

@@ -267,25 +267,12 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
-      // F1(beta 勘误2):渲染端把"系统路径"节点的 selectedPathId(== node.id)
-      // 当 pathId 发回,而 node.id 是逻辑名 `system:home` / `system:desktop` /
-      // `system:temp` — 直接当 cwd spawn 必挂 CwdNotAccessible。这里在 IPC
-      // 边界统一解析一次:system:* → 真实文件系统绝对路径,其它原样透传。
-      // 找不到匹配的 system:* 显式抛错,不静默 fallback 到 homedir。
-      const resolvedPathId = pathId
-        ? pathManager.resolvePathIdToCwd(pathId)
-        : pathId;
-      if (pathId && pathId.startsWith('system:') && resolvedPathId === null) {
-        throw new Error(
-          `未知的系统路径标识 "${pathId}";请重启 Marina 让系统路径列表重新派生。`,
-        );
-      }
       // takeOwnership=false 时直接传空 owner — createSession 内部
       // `input.ownerWindowId || null` 会落到 info.ownerWindowId = null。
       // 不要先创建带 owner 再 releaseOwner:那条路径在 owner=='' 时已被
       // 折叠为 null,后续 releaseOwner 会因 null !== envelope.windowId 抛 NotOwner。
       const session = await sessionManager.createSession({
-        pathId: resolvedPathId ?? '',
+        pathId: pathId ?? '',
         templateId: effectiveTemplateId,
         ownerWindowId: takeOwnership ? envelope.windowId : '',
         cols,

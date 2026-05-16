@@ -4,16 +4,11 @@
   "sidebar.category.bookmark": "Bookmarks",
   "sidebar.category.temporary": "Temporary",
   "sidebar.category.recent": "Recent",
-  "sidebar.category.system": "System",
   "sidebar.empty": "Empty",
   "sidebar.addBookmark.title": "Pick a folder to add to bookmarks",
   "sidebar.addTemporary.title": "Pick a folder and open a temporary terminal",
   "sidebar.path.invalid": "Path is not accessible",
   "sidebar.dropHint": "Drop to add to bookmarks",
-
-  "system.desktop": "Desktop",
-  "system.home": "Home",
-  "system.temp": "Temp",
 
   "settings.title": "Settings",
   "settings.close": "Close settings",
@@ -33,10 +28,6 @@
   "settings.appearance.language.system": "Follow system",
   "settings.appearance.windowStyle.label": "Window style",
   "settings.appearance.windowStyle.hint": "Title bar layout and control button position (does not affect theme colors)",
-  "settings.appearance.showSystemPaths.label": "Show system paths group",
-  "settings.appearance.showSystemPaths.hint": "Adds a 4th category 'System' at the top of the sidebar (Desktop / Home / Temp)",
-  "settings.appearance.systemPaths.label": "System path entries",
-  "settings.appearance.systemPaths.hint": "Pick which system paths to show",
   "settings.appearance.macOSHover.label": "Traffic light hover symbols",
   "settings.appearance.macOSHover.hint": "On macOS style, whether to show ×/−/+ on hover. Off by default (more restrained).",
 

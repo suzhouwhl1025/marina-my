@@ -18,7 +18,7 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { PlatformAdapter, ShellInfo, SystemPathEntry } from './index';
+import type { DefaultBookmarkSeed, PlatformAdapter, ShellInfo } from './index';
 
 const NOT_IMPLEMENTED =
   '[MacOSAdapter] macOS support not implemented yet. ' +
@@ -51,12 +51,11 @@ export class MacOSAdapter implements PlatformAdapter {
     // 注册表广播痛点不存在,直接返回 process.env.PATH。
     return process.env.PATH ?? '';
   }
-  getSystemPaths(): SystemPathEntry[] {
+  getDefaultBookmarkSeeds(): DefaultBookmarkSeed[] {
     const home = homedir();
     return [
-      { id: 'system:desktop', label: '桌面', path: join(home, 'Desktop'), toggleKey: 'desktop' },
-      { id: 'system:home', label: '主目录', path: home, toggleKey: 'home' },
-      { id: 'system:temp', label: '临时', path: '/tmp', toggleKey: 'temp' },
+      { label: '桌面', path: join(home, 'Desktop') },
+      { label: '主目录', path: home },
     ];
   }
 }

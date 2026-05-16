@@ -19,10 +19,11 @@
 /**
  * Path 在侧栏中的归属分类 (软件定义书 4 节)。
  *
- * BETA-011 起新增 'system' 系统路径分类(桌面 / 主目录 / 临时目录),
- * 不持久化,每次启动由 PlatformAdapter.getSystemPaths() 派生。
+ * 注:BETA-011 一度引入的 'system' 分类已在 2026-05-16 移除 — 桌面/主目录
+ * 改为干净安装时种入收藏(见 PathManager.initialize + PlatformAdapter
+ * .getDefaultBookmarkSeeds),不再是独立分组。
  */
-export type PathCategory = 'bookmarked' | 'temporary' | 'recent' | 'system';
+export type PathCategory = 'bookmarked' | 'temporary' | 'recent';
 
 /**
  * Session 的运行时状态 (软件定义书 8.3 节状态机)。
@@ -179,15 +180,11 @@ export interface PathNode {
 
 /**
  * 完整路径树 (snapshot / 广播用)。
- *
- * BETA-011 起新增 systemPaths(桌面 / 主目录 / 临时目录),不持久化,
- * 每次启动由 PlatformAdapter.getSystemPaths() 派生。可在设置里整体或逐项关闭。
  */
 export interface PathTree {
   bookmarks: PathNode[];
   temporary: PathNode[];
   recent: PathNode[];
-  systemPaths: PathNode[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -216,17 +213,6 @@ export interface Settings {
     terminalLineHeight: number;
     uiFontFamily: string;
     uiZoom: number;
-    /**
-     * BETA-011:Sidebar 第 4 栏"系统"路径整体开关 + 逐项开关。
-     * 整体关时 4 栏全部隐藏;逐项开关只控制该项是否进系统栏。
-     * 默认全开。
-     */
-    showSystemPaths: boolean;
-    systemPaths: {
-      desktop: boolean;
-      home: boolean;
-      temp: boolean;
-    };
     /**
      * BETA-023:macOS 风格红绿灯按钮在 hover 时是否显示 ×/−/+ 悬浮符号。
      * 默认 false(保持 Marina 极简风,与 CP-4 勘误第二轮的决策一致);

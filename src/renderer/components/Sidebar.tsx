@@ -254,14 +254,6 @@ export function Sidebar(): JSX.Element {
           onAction={() => void handlePickFolderForTemp()}
         />
         <Category title={t('sidebar.category.recent')} iconName="history" paths={state.pathTree.recent} />
-        {/* BETA-011:系统路径分组。空数组(设置整体关闭 / 全部逐项关闭)时不渲染。 */}
-        {state.pathTree.systemPaths.length > 0 && (
-          <Category
-            title={t('sidebar.category.system')}
-            iconName="monitor"
-            paths={state.pathTree.systemPaths}
-          />
-        )}
       </div>
       <div className="sidebar-footer">
         <button

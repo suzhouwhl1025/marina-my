@@ -30,7 +30,6 @@ import {
   History,
   Info,
   Link2,
-  Monitor,
   MonitorCog,
   Brain,
   Palette,
@@ -73,7 +72,6 @@ export const Icons = {
   bookmark: Bookmark,
   clock: Clock,
   history: History,
-  monitor: Monitor, // BETA-011 系统路径分组
 
   // 终端右键 / 搜索栏
   copy: Clipboard,
