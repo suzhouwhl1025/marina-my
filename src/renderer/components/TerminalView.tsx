@@ -63,7 +63,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { Check, X } from 'lucide-react';
+import { Check, Maximize2, Minimize2, X } from 'lucide-react';
 import {
   COMMAND_CHANNELS,
   EVENT_CHANNELS,
@@ -79,7 +79,39 @@ import { Icon } from './icons';
 import { useContextMenuApi, type ContextMenuItem } from './ContextMenu';
 import { useToast } from './Toast';
 import { useModal } from './Modal';
+import { useTranslation } from './LanguageProvider';
 import '@xterm/xterm/css/xterm.css';
+
+/**
+ * 浅色主题的 ANSI 256 色扩展表(索引 16-255,共 240 项)。
+ * 不设置时 xterm 用内置 240 色——按深色背景调的灰阶,232-255 上半段在浅底
+ * 上对比度 < 3:1,Claude Code 等 CLI 发 `\x1b[38;5;245m` dim 字会几乎不可见。
+ *
+ * 这里:
+ *   - 16-231 保留标准 xterm 6×6×6 cube(饱和色在浅底上一般够看,边缘 case
+ *     由 minimumContrastRatio 兜底)
+ *   - 232-255 灰阶斜率 *10 → *4,即 [#080808, #eeeeee] 压成 [#080808, #707070],
+ *     所有灰阶在 #fff8fb / #faf4ed 浅底上保持 ≥ 4.5:1
+ */
+function buildLightExtendedAnsi(): string[] {
+  const hex = (n: number) => n.toString(16).padStart(2, '0');
+  const rgb = (r: number, g: number, b: number) => `#${hex(r)}${hex(g)}${hex(b)}`;
+  const cube = [0, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+  const out: string[] = [];
+  for (let r = 0; r < 6; r++) {
+    for (let g = 0; g < 6; g++) {
+      for (let b = 0; b < 6; b++) {
+        out.push(rgb(cube[r], cube[g], cube[b]));
+      }
+    }
+  }
+  for (let n = 232; n <= 255; n++) {
+    const v = 8 + (n - 232) * 4;
+    out.push(rgb(v, v, v));
+  }
+  return out;
+}
+const LIGHT_EXTENDED_ANSI = buildLightExtendedAnsi();
 
 /**
  * 7 套主题对应的 xterm theme 颜色 (软件定义书 5.1.9)。
@@ -141,6 +173,7 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightMagenta: '#907aa9',
     brightCyan: '#a35a55',
     brightWhite: '#575279',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
   },
   'rose-pine-moon': {
     background: '#232136',
@@ -189,6 +222,7 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightMagenta: '#9c2868',
     brightCyan: '#3a6480',
     brightWhite: '#3d0f28',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
   },
   business: {
     background: '#1d2733',
@@ -361,6 +395,17 @@ function getXtermTheme(themeId: ThemeId | undefined): ITheme {
   return XTERM_THEMES[themeId ?? 'rose-pine'] ?? XTERM_THEMES['rose-pine'];
 }
 
+/**
+ * 是否浅色主题 — 通过 extendedAnsi 引用相等判定(填了 LIGHT_EXTENDED_ANSI
+ * 的主题就是浅色)。配合 minimumContrastRatio,只在浅色主题打开对比度兜底,
+ * 避免无差别加深破坏深色主题里故意调淡的颜色(如 prompt hint、git diff
+ * context 行等)。
+ */
+function isLightTheme(themeId: ThemeId | undefined): boolean {
+  return getXtermTheme(themeId).extendedAnsi === LIGHT_EXTENDED_ANSI;
+}
+const LIGHT_THEME_MIN_CONTRAST = 4.5;
+
 interface TerminalViewProps {
   /**
    * 必须满足 session.ownerWindowId === state.myWindowId — 父组件 MainPane 通过
@@ -404,6 +449,8 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
   const appState = useAppState();
   const dispatch = useAppDispatch();
+  const { t } = useTranslation();
+  const simpleMode = appState.simpleMode;
   const themeId = appState.settings.appearance?.theme;
   const fontSize = appState.settings.appearance?.terminalFontSize ?? 13;
   const fontFamily =
@@ -689,6 +736,11 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       cursorBlink: true,
       cursorStyle: 'bar',
       theme: initialTheme,
+      // 浅色主题打开 WCAG AA 对比度兜底:Claude Code 等 CLI 用 ANSI 256(走
+      // extendedAnsi)与 24-bit truecolor 输出 dim 字时,即使主题填了浅色调色板,
+      // 仍可能出现"浅底浅字"边缘 case;这里在浅色主题渲染层强制 ≥ 4.5:1。深色
+      // 主题保持默认 1(不干预),避免破坏深色场景里精心调淡的视觉层级。
+      minimumContrastRatio: isLightTheme(themeId) ? LIGHT_THEME_MIN_CONTRAST : 1,
       scrollback: 5000,
       // SearchAddon 的 registerDecoration 走 proposed API,关闭就触发
       // "You must set allowProposedApi option to true" → 错误边界。
@@ -1180,6 +1232,9 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
     const term = termRef.current;
     if (!term) return;
     term.options.theme = getXtermTheme(themeId);
+    term.options.minimumContrastRatio = isLightTheme(themeId)
+      ? LIGHT_THEME_MIN_CONTRAST
+      : 1;
   }, [themeId]);
 
   // FLK-10:session.state='exited' 时 stop 光标闪烁,避免"会话已死但光标
@@ -1449,6 +1504,23 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
           {session.state === 'exited' &&
             ` · 已退出 (exitCode=${session.exitCode ?? 0})`}
         </span>
+        <button
+          type="button"
+          className="status-simple-toggle"
+          onClick={() => dispatch({ type: 'view/toggle-simple-mode' })}
+          title={
+            simpleMode
+              ? t('terminal.toolbar.fromSimple')
+              : t('terminal.toolbar.toSimple')
+          }
+          aria-label={
+            simpleMode
+              ? t('terminal.toolbar.fromSimple')
+              : t('terminal.toolbar.toSimple')
+          }
+        >
+          {simpleMode ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
+        </button>
         <span
           className="status-cwd"
           title={

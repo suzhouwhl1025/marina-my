@@ -107,7 +107,7 @@ export type IconName = keyof typeof Icons;
 
 /**
  * 通用 Icon 组件。color 默认走 currentColor,大小默认 14;通过 className 挂
- * 主题样式 (例如 .session-icon-warn { color: var(--gold) })。
+ * 主题样式 (例如 .session-icon-warn { color: var(--color-warning) })。
  */
 export function Icon({
   name,

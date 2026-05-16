@@ -908,9 +908,9 @@ function TemplateEditor({
           onClick={() => void handleSave()}
           disabled={saving || !draft.name.trim()}
           style={{
-            background: 'var(--iris, #f0f)',
-            color: 'var(--base, #f0f)',
-            borderColor: 'var(--iris, #f0f)',
+            background: 'var(--color-accent-special, #f0f)',
+            color: 'var(--color-bg-primary, #f0f)',
+            borderColor: 'var(--color-accent-special, #f0f)',
           }}
         >
           {saving ? '保存中…' : isCreate ? '创建' : '保存'}
@@ -935,7 +935,6 @@ function BehaviorPanel({
   const state = useAppState();
   const b = state.settings.behavior;
   const startupBehavior = b?.startupBehavior ?? 'open-window';
-  const autoStart = b?.autoStart ?? false;
   const confirmOnQuit = b?.confirmOnQuit ?? true;
   const selectOnCopy = b?.selectOnCopy ?? true;
   const terminalRightClick = b?.terminalRightClick ?? 'menu';
@@ -985,25 +984,6 @@ function BehaviorPanel({
             仅启动到托盘
           </label>
         </div>
-      </SettingRow>
-
-      <SettingRow
-        label="开机启动"
-        hint="Windows 启动时自动启动 Marina(写 Run 注册表)"
-      >
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={autoStart}
-            onChange={(e) =>
-              void updateSettings(
-                { behavior: { autoStart: e.target.checked } },
-                setError,
-              )
-            }
-          />
-          <span>开机启动</span>
-        </label>
       </SettingRow>
 
       <SettingRow
@@ -1228,6 +1208,7 @@ function SystemIntegrationPanel({
   const state = useAppState();
   const sys = state.settings?.systemIntegration;
   const openIn = sys?.explorerOpenIn ?? 'new-window';
+  const autoStart = state.settings.behavior?.autoStart ?? false;
   const toast = useToast();
 
   const [status, setStatus] = useState<ExplorerIntegrationStatus | null>(null);
@@ -1286,6 +1267,25 @@ function SystemIntegrationPanel({
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">系统集成</h2>
+
+      <SettingRow
+        label="开机启动"
+        hint="Windows 启动时自动启动 Marina(写 Run 注册表)"
+      >
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={autoStart}
+            onChange={(e) =>
+              void updateSettings(
+                { behavior: { autoStart: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          <span>开机启动</span>
+        </label>
+      </SettingRow>
 
       {/* —— Win11 新菜单卡片 —— */}
       <ExplorerIntegrationCard
@@ -1583,6 +1583,26 @@ function AiPanel({
             </button>
           </SettingRow>
 
+          <div className="settings-privacy-notice" role="note">
+            <strong>隐私提示</strong> · 开启“状态复核”后,Marina 在每次
+            active→idle 跃迁时会把以下数据通过 HTTPS 发送给你配置的 AI 服务商
+            (可能是第三方,如 Kimi / DeepSeek / OpenAI / Anthropic):
+            <ul>
+              <li>
+                <strong>终端尾部内容</strong> — 最近约 40 行已渲染文本
+                (会包含你看到的命令、输出、错误信息、API 输出等)
+              </li>
+              <li>
+                <strong>按键时间元数据</strong> — 最近 ≤20 个按键的
+                <em>时间戳 + 类别</em>(char / enter / backspace / other),
+                <strong>不包含按键内容</strong>,不会泄露密码 / token / 命令体
+              </li>
+            </ul>
+            如果你正在处理敏感信息(密码、私有代码、客户数据),建议先关闭复核;
+            纯 Anthropic / OpenAI 官方 endpoint 走他们的 API 数据策略,
+            自托管 / 代理网关请确认你的数据流向。
+          </div>
+
           <SettingRow
             label="状态复核(BETA-006)"
             hint="active→idle 跃迁前让 LLM 复核;失败时回退原阈值,不阻塞"
@@ -1727,7 +1747,7 @@ function AdvancedPanel({
           </button>
         ) : (
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <span style={{ color: 'var(--love, #f0f)', fontSize: 12 }}>
+            <span style={{ color: 'var(--color-danger, #f0f)', fontSize: 12 }}>
               确认重置?
             </span>
             <button
@@ -1953,7 +1973,7 @@ function NumberInput({
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
         }}
       />
-      {formatPercent && <span style={{ color: 'var(--subtle, #f0f)' }}>%</span>}
+      {formatPercent && <span style={{ color: 'var(--color-text-secondary, #f0f)' }}>%</span>}
     </span>
   );
 }
