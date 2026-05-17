@@ -1,10 +1,14 @@
 # CURSOR-1 · BETA-019 workaround(alt-buffer 关 cursorBlink)失败 + 破坏 Codex
 
-**状态**:**workaround 已落地但失败,亟待回滚或重新设计**
-**优先级**:P1(同时影响 Claude Code 与 Codex 两个主流 AI CLI 体验)
+**状态**:**已根治(2026-05-17)** — 改用 state-replay 架构(@xterm/headless + SerializeAddon),裸字节 scrollback 与启发式 workaround 全部删除
+**优先级**:P1(完成)
 **首次报告**:2026-05-17
-**关联工单**:`docs/beta反馈工单库-20260515.md` BETA-019(根因未定位)
-**当前 workaround 出处**:`src/renderer/components/TerminalView.tsx` mount effect `term.buffer.onBufferChange` listener + FLK-10 effect not-exited 分支读 `buffer.active.type`
+**关联工单**:`docs/beta反馈工单库-20260515.md` BETA-019(随本工单一起结案)
+**根因证实**:复现脚本 `scripts/repro-cursor-1.mjs` + DevTools REPLAY-DIAG 输出 `bufferType:'normal'` + `scrollbackKB:2047`,验证 `?1049h` 被 2MB 裁切丢失假设
+**实施分支**:`fix/cursor-1-state-replay` —— 4 个 commit(repro 脚本 → 切数据源 → 删 workaround → 删裸字节存储)
+**polyfill 追踪**:`docs/issues/xterm-serialize-mode-polyfill.md`(0.14.0 stable 不覆盖 `?25l` 与 DECSTBM,本地补两条,等 0.15.0 stable 删)
+
+> 下面的"现象 / 修法选项 / 推荐决策 / 下次接手 checklist"为历史诊断过程的留档,**实际方案见末尾"2026-05-17 续:架构级根治方案"**。
 
 ---
 
@@ -95,3 +99,35 @@
 2. 在 BETA-019 工单 / 本报告里追加回滚事实
 3. 启动追根因(C 方案):scrollback replay 完成时刻 console.log + 强制 `?25l` 试探
 4. 若 C 方案证实,实施定向修复并关闭本报告 + BETA-019 工单
+
+---
+
+## 2026-05-17 续:架构级根治(已实施,工单关闭)
+
+### 真因
+
+**`managed.scrollback: Buffer` 2MB 裸字节 ring 从头部 `\n` 边界裁切,不识别 DEC 模式 setter**。Claude Code / Codex / vim 启动只发一次 `?1049h`(进 alt-buffer)+ `?25l`(隐光标),之后无限刷帧。scrollback 涨过 2MB,裁切把开头那几个字节丢掉。renderer 重挂时 xterm 收到不含 `?1049h`/`?25l` 的字节流 → 留在 normal buffer + cursorBlink 保持 true。
+
+诊断脚本 `scripts/repro-cursor-1.mjs` + DevTools `[REPLAY-DIAG]` 日志直接证实:`bufferType:'normal'` + `scrollbackKB:2047`(顶住 2MB cap)+ `cursorBlink:true`,与假设字节级吻合。
+
+### 修法
+
+把 `getScrollback` 数据源从"裸字节 ring 回灌"换成"@xterm/headless 状态机 + SerializeAddon 序列化重建":
+
+- main 端 `managed.headlessTerm` 跟在 PTY 字节流后面镜像状态(本来就有,BETA-006 v2)→ 新增 `SerializeAddon` 挂在它上面
+- 新方法 `SessionManager.getScrollbackForReplay`(async):`flushPendingEmit` → `await drainHeadless` → `serializeAddon.serialize({ scrollback: 5000 })` + polyfill 补 `?25l` 与 DECSTBM(参 `xterm-serialize-mode-polyfill.md`)
+- renderer 收到的是"能完整重建当前终端状态"的 ANSI 流,直接 `term.write()` 就到位 — 字节级等价,模式不可能丢
+
+### 工单关闭确认
+
+- BETA-019 原 cursor flash:**消失**(state-replay 把 `?1049h` 始终注入到 ANSI 头部)
+- Codex 静态 / 动态光标:**正常**(应用要藏就发 `?25l`,Marina 转发,不再二次猜)
+- 切 tab "从顶到底刷屏" 副症状:**减轻**(serialize 输出体积比 2MB 裸字节小一两个数量级,FLK-1 分片几乎一次刷完)
+
+### 删除清单(实际落地)
+
+- `TerminalView.tsx`:`term.buffer.onBufferChange` listener + cleanup + FLK-10 effect 读 `buffer.active.type` 全删
+- `session-manager.ts`:`managed.scrollback: Buffer` 字段 / `appendScrollback` / `SCROLLBACK_LIMIT` / `findSafeTruncationBoundary` / 旧 `getScrollback`(返裸字节)/ `recheckIdle` 内 `source==='raw'` 分支全删
+- `shared/types.ts`:`ai.statusRecheckSource` 联合类型去掉 `'raw'`
+- 设置 UI 去掉 raw 选项 + 老 settings.json 静默 coerce
+- 相关测试:删 SCROLLBACK_LIMIT / OSC-2 / 旧 PER-2 v1/v2 case;补 state-replay 不变量 case

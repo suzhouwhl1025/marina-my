@@ -314,7 +314,19 @@ export interface GetScrollbackPayload {
 }
 
 export interface GetScrollbackResponse {
-  /** Base64 编码的整段 scrollback ring buffer 内容 (UTF-8 字节流) */
+  /**
+   * Base64 编码的 ANSI 重建流(UTF-8 字节)。
+   *
+   * CURSOR-1 后(state-replay 架构):main 端从 session 各自的 @xterm/headless
+   * 状态机通过 SerializeAddon 序列化"当前完整终端状态"(buffer + 当前在哪个
+   * buffer + 模式 + cursor + SGR)。Renderer 把 data 直接 term.write(),xterm
+   * 按 ANSI parse 即恢复到字节级等价状态 — 包括 alt-buffer (?1049h)、
+   * cursor 隐藏 (?25l)、滚动区 (DECSTBM) 等。
+   *
+   * 旧字段名 `data` 保留(不破坏 IPC 协议),但语义已从"原始 PTY 字节流"
+   * 升级为"状态机重建 ANSI 流"。详见 SessionManager.getScrollbackForReplay
+   * 与 docs/issues/cursor-1-alt-buffer-blink-policy-broke-codex.md。
+   */
   data: string;
   /** 取此 scrollback 时刻 PTY 已 emit 的最后一条 output 的 seq;
    *  渲染端用 seq > lastSeq 去重 evt:session:output。 */
