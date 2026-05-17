@@ -76,12 +76,6 @@ import { logger } from './logger';
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
 
 /**
- * Scrollback ring buffer 上限 (软件定义书 5.1.4)。2MB 远小于 PTY 输出
- * 速率,实际很少触顶。超过则尾部裁切。
- */
-export const SCROLLBACK_LIMIT = 2 * 1024 * 1024;
-
-/**
  * cwd 兜底参数:
  * - GRACE_MS:启动后多少毫秒未收到 OSC 才启动轮询
  * - POLL_INTERVAL_MS:轮询周期
@@ -302,11 +296,13 @@ interface ManagedSession {
   /** PTY 监听句柄,destroy 时释放 */
   disposables: IDisposable[];
   /**
-   * Ring buffer:存所有透传后字节流 (OSC 1337 已剥离)。
-   * 软件定义书 5.1.4 + 8.4 (跨窗口接管时新 owner 拉历史回放)。
+   * 已经向 renderer emit 过的最后一条 PTY data 的 outputSeq。-1 表示尚未
+   * 有输出。renderer 重挂时拿这个 seq 去重 live 通道的 pending 字节(只
+   * write seq > lastSeq 的 chunk,避免与 state-replay 输出双写)。
+   *
+   * CURSOR-1 前:同时也是 `managed.scrollback` 裸字节 ring 的"已 emit"边界
+   * (PER-2 不变量)。CURSOR-1 后裸字节 ring 已删除,边界只保留 seq 语义。
    */
-  scrollback: Buffer;
-  /** scrollback 中最末一条 PTY data 对应的 outputSeq。-1 表示尚未有输出。 */
   scrollbackLastSeq: number;
   /** OSC 1337 解析器 (每 session 一份,持有未完结 stash) */
   parser: Osc1337Parser;
@@ -628,7 +624,6 @@ export class SessionManager extends EventEmitter {
       pty,
       outputSeq: 0,
       disposables,
-      scrollback: Buffer.alloc(0),
       scrollbackLastSeq: -1,
       parser: new Osc1337Parser(),
       idleTimer: null,
@@ -1002,35 +997,6 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * 取 session 的 scrollback ring buffer 内容(裸字节)。
-   *
-   * **过渡期遗留方法** — CURSOR-1 根治后(state-replay 架构),renderer 重挂
-   * 时通过 IPC `cmd:session:get-scrollback` 走 `getScrollbackForReplay`
-   * 拿"完整状态重建 ANSI 流",不再用本方法。本方法仅供:
-   *   1. 现存测试(scrollback ring buffer / SCROLLBACK_LIMIT / OSC-2 边界等)
-   *   2. BETA-006 v2 idle 复核读 scrollback 尾部
-   *   3. `exportScrollback`("复制全部",BETA-028)
-   *
-   * Step 4 中本方法连同 `managed.scrollback: Buffer` 字段、`appendScrollback`、
-   * `SCROLLBACK_LIMIT`、`findSafeTruncationBoundary` 一起删除,届时测试改用
-   * 新接口或重写。
-   *
-   * 返回 base64 编码 + 当前 scrollbackLastSeq。Renderer 用 lastSeq 对后续
-   * evt:session:output 去重 (seq > lastSeq 才 write)。
-   *
-   * session 不存在返回 { data: '', lastSeq: -1 } — 与 sendInput / resize
-   * 等"竞态时静默"的语义一致。
-   */
-  getScrollback(sessionId: string): { data: string; lastSeq: number } {
-    const managed = this.sessions.get(sessionId);
-    if (!managed) return { data: '', lastSeq: -1 };
-    return {
-      data: managed.scrollback.toString('base64'),
-      lastSeq: managed.scrollbackLastSeq,
-    };
-  }
-
-  /**
    * 取 session 重挂时需要回放的"完整终端状态"为 ANSI 字节流(base64) +
    * 当前 scrollbackLastSeq。
    *
@@ -1119,25 +1085,50 @@ export class SessionManager extends EventEmitter {
 
   /**
    * BETA-028:返回 scrollback 的 UTF-8 字符串(供"复制全部"工具栏按钮)。
-   * 大 scrollback 用 Buffer→string 一次性转换,在 2MB 上限下可接受。
+   *
+   * CURSOR-1 后:从 headless terminal buffer 按行 translate(已渲染的字符
+   * 矩阵,无 ANSI 转义、无 PSReadLine 重绘残影),换行用 '\n'。比旧的"裸
+   * 字节直接 utf8 toString"更干净,直接可粘贴。
+   *
+   * async:headless write 是异步 parse 的,读 buffer 前先 await drain,否则
+   * "刚 emit 的字节"可能还没进 buffer。getScrollbackForReplay 同样的时序。
    */
-  exportScrollback(sessionId: string): { text: string } {
+  async exportScrollback(sessionId: string): Promise<{ text: string }> {
     const managed = this.sessions.get(sessionId);
-    if (!managed) return { text: '' };
-    return { text: managed.scrollback.toString('utf8') };
+    if (!managed || !managed.headlessTerm) return { text: '' };
+    // flush pendingEmit + drain parser,确保 buffer 反映所有已 emit 的字节
+    this.flushPendingEmit(managed);
+    const term = managed.headlessTerm;
+    await new Promise<void>((resolve) => {
+      term.write('', () => resolve());
+    });
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    // buf.length 是 scrollback + viewport 总行数,正向遍历
+    for (let y = 0; y < buf.length; y++) {
+      const line = buf.getLine(y);
+      if (!line) continue;
+      lines.push(line.translateToString(true)); // trim trailing whitespace
+    }
+    // 去掉末尾连续空行
+    while (lines.length > 0 && lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+    return { text: lines.join('\n') };
   }
 
   /**
-   * BETA-028:清空 main 端 scrollback ring buffer。配合 renderer 的
-   * term.clear() 使用 —— 否则下次 TerminalView 重挂载时会把已"看似清空"
-   * 的历史又回灌一遍。
+   * BETA-028:清空 main 端 scrollback。配合 renderer 的 term.clear() 使用 ——
+   * 否则下次 TerminalView 重挂载时会把"看似清空"的历史又回灌一遍。
    *
-   * scrollbackLastSeq 不重置,保持序列号单调,避免 pending replay 出错。
+   * CURSOR-1 后:直接调 headless.clear()(清 normal buffer scrollback + viewport,
+   * 与 xterm 标准行为一致)。scrollbackLastSeq 不重置,保持序列号单调,避免
+   * pending replay 出错。
    */
   clearScrollback(sessionId: string): void {
     const managed = this.sessions.get(sessionId);
-    if (!managed) return;
-    managed.scrollback = Buffer.alloc(0);
+    if (!managed || !managed.headlessTerm) return;
+    managed.headlessTerm.clear();
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1225,9 +1216,9 @@ export class SessionManager extends EventEmitter {
    */
   private queueEmit(managed: ManagedSession, bytes: Buffer, seq: number): void {
     if (this.emitBatchMs <= 0) {
-      // 立即路径 — append + 推 lastSeq + emit 在同一同步块内完成,
-      // 与延迟路径在 flush 时的原子性等价。
-      this.appendScrollback(managed, bytes);
+      // 立即路径 — 推 lastSeq + emit 在同一同步块内完成。CURSOR-1 后:
+      // headless terminal 是状态源(handlePtyData 内同步 write),无需在此
+      // append 任何裸字节存储。
       managed.scrollbackLastSeq = seq;
       const payload: SessionOutputPayload = {
         sessionId: managed.info.id,
@@ -1258,10 +1249,10 @@ export class SessionManager extends EventEmitter {
     if (!managed.pendingEmit) return;
     const { bytes, lastSeq } = managed.pendingEmit;
     managed.pendingEmit = null;
-    // 原子前进顺序:先 scrollback append,再 scrollbackLastSeq,再 emit。
-    // 这三步在 Node 单线程下同步完成,中间不会被 IPC 调用 getScrollback
-    // 打断 — 任何观察者看到的都是一致状态。
-    this.appendScrollback(managed, bytes);
+    // 原子前进:推 lastSeq + emit 同步完成。CURSOR-1 后:headless 状态机
+    // 是 state-replay 的唯一源,write 已在 handlePtyData 内同步进入(line
+    // headlessTerm?.write 调用),此处不再追加裸字节。getScrollbackForReplay
+    // 通过 await drain + serialize 保证读到的状态与 lastSeq 一致。
     managed.scrollbackLastSeq = lastSeq;
     const payload: SessionOutputPayload = {
       sessionId: managed.info.id,
@@ -1269,33 +1260,6 @@ export class SessionManager extends EventEmitter {
       seq: lastSeq,
     };
     this.emit('sessionOutput', payload);
-  }
-
-  private appendScrollback(managed: ManagedSession, bytes: Buffer): void {
-    if (managed.scrollback.length === 0) {
-      managed.scrollback = bytes;
-    } else {
-      managed.scrollback = Buffer.concat([managed.scrollback, bytes]);
-    }
-    if (managed.scrollback.length > SCROLLBACK_LIMIT) {
-      // OSC-2:尾部裁切对齐 ESC/换行边界,避免接管首屏乱码。
-      //
-      // 历史:`subarray(length - LIMIT)` 在裸字节上做裁切,落点可能在:
-      //   - 多字节 UTF-8 序列中间 → 首字符 U+FFFD(轻微)
-      //   - CSI/OSC/DCS 转义序列中间 → xterm 进 OSC parse 状态吞数十-数百
-      //     字节直到下一个 BEL/ST(严重,首屏大段隐形或状态污染)
-      //   - SGR 颜色序列中间 → 颜色错位直到下一个完整 SGR
-      //
-      // 修复:findSafeTruncationBoundary 从目标偏移向前找最近的 \n,把
-      // 实际裁切点对齐到完整 ANSI 行的边界。最多回退 4KB(防极端 case
-      // 整段没换行时永远回退)。
-      const minStart = managed.scrollback.length - SCROLLBACK_LIMIT;
-      const safeStart = findSafeTruncationBoundary(
-        managed.scrollback,
-        minStart,
-      );
-      managed.scrollback = managed.scrollback.subarray(safeStart);
-    }
   }
 
   private handlePtyExit(
@@ -1428,17 +1392,13 @@ export class SessionManager extends EventEmitter {
         this.aiClient &&
         this.aiClient.isConfigured()
       ) {
-        // BETA-006 v2:按 settings.ai.statusRecheckSource 选输入源。
-        // headless = 从 @xterm/headless buffer 拿"已渲染"文本(无 ANSI 噪音 /
-        // 无 PSReadLine 重绘残影),raw = 保留旧路径(scrollback 末 2KB 原始
-        // 字节)。screenshot 暂未实现 → fallback 到 raw。
-        const source = s.ai.statusRecheckSource ?? 'headless';
-        const tail =
-          source === 'headless' && managed.headlessTerm
-            ? this.getHeadlessTail(managed, 40)
-            : managed.scrollback
-                .subarray(Math.max(0, managed.scrollback.length - 2048))
-                .toString('utf8');
+        // BETA-006 v2:从 @xterm/headless buffer 拿"已渲染"文本(无 ANSI
+        // 噪音 / 无 PSReadLine 重绘残影)。
+        // CURSOR-1 后:原 settings.ai.statusRecheckSource='raw' 路径(裸字节
+        // ring 末 2KB)已删除,headless 是唯一输入源。screenshot 选项仍预留。
+        const tail = managed.headlessTerm
+          ? this.getHeadlessTail(managed, 40)
+          : '';
         // BETA-006 v2.1:把"上次 Enter / 上次任意输入距今多久"喂给 LLM,
         // 帮它区分"长命令在跑"vs"用户打字未按回车"。
         // BETA-006 v2.2:再附最近按键事件 ring buffer(类别+时间,无内容),
@@ -1795,36 +1755,6 @@ function sanitizeTitle(raw: string): string {
   s = s.replace(/\s+/g, ' ').trim();
   if (s.length > TITLE_MAX_LEN) s = s.slice(0, TITLE_MAX_LEN);
   return s;
-}
-
-/**
- * OSC-2:scrollback 尾部裁切对齐 ANSI/UTF-8 边界。
- *
- * 从 minStart 开始向后扫描,找到最近的 `\n`(0x0A)作为安全起点。
- * 没找到时最多向后扫 4KB,仍没找到 → 用 minStart 兜底(整段无换行的
- * 极端 case,只能接受可能的 ANSI 半截);防止扫遍整段 buffer。
- *
- * 为什么找 \n 而不是找 ESC 边界:
- *   - 找 ESC 边界更精确(任何完整 SGR/CSI 之后都是安全的),但实现复杂
- *     (需识别完整 vt 状态机)
- *   - \n 总是 ANSI 行边界,xterm 解析时一定回到 ground state,简单可靠
- *   - 4KB 上限保证最坏情况下损失数十行,远好过乱码风险
- *
- * 测试覆盖:OSC-2 test case 见 session-manager.test.ts。
- */
-export function findSafeTruncationBoundary(
-  buf: Buffer,
-  minStart: number,
-): number {
-  if (minStart <= 0) return 0;
-  const maxScanEnd = Math.min(buf.length, minStart + 4096);
-  for (let i = minStart; i < maxScanEnd; i++) {
-    if (buf[i] === 0x0a /* \n */) {
-      return i + 1; // \n 后的下一个字节才是安全起点
-    }
-  }
-  // 没找到合理边界 — 用 minStart 兜底,接受可能的 ANSI 半截
-  return minStart;
 }
 
 /**

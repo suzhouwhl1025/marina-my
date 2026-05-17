@@ -343,11 +343,12 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
 
   ipcMain.handle(
     COMMAND_CHANNELS.SESSION_EXPORT_SCROLLBACK,
-    (
+    async (
       _e,
       envelope: CommandEnvelope<{ sessionId: string }>,
-    ): { text: string } => {
-      // BETA-028:工具栏"复制全部"按钮 → 返回 UTF-8 字符串
+    ): Promise<{ text: string }> => {
+      // BETA-028:工具栏"复制全部"按钮 → 返回 UTF-8 字符串。
+      // CURSOR-1 后 exportScrollback 改 async(读 headless 前需 drain parser)。
       return sessionManager.exportScrollback(envelope.payload.sessionId);
     },
   );

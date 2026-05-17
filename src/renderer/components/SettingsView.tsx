@@ -1651,7 +1651,7 @@ function AiPanel({
 
           <SettingRow
             label={tx('复核输入源', 'Recheck input source')}
-            hint={tx('raw=原始字节(含 ANSI 转义);headless=已渲染的字符矩阵(推荐,无重绘残影)', 'raw=raw bytes (with ANSI escapes); headless=rendered character matrix (recommended, no redraw artifacts)')}
+            hint={tx('headless=已渲染的字符矩阵(无 ANSI 噪音、无重绘残影)', 'headless=rendered character matrix (no ANSI noise, no redraw artifacts)')}
           >
             <select
               className="settings-input"
@@ -1660,7 +1660,7 @@ function AiPanel({
                 void updateSettings(
                   {
                     ai: {
-                      statusRecheckSource: e.target.value as 'raw' | 'headless',
+                      statusRecheckSource: e.target.value as 'headless',
                     },
                   },
                   setError,
@@ -1669,7 +1669,6 @@ function AiPanel({
               disabled={!statusRecheckEnabled}
             >
               <option value="headless">{tx('headless (已渲染文本)', 'headless (rendered text)')}</option>
-              <option value="raw">{tx('raw (原始字节)', 'raw (raw bytes)')}</option>
             </select>
           </SettingRow>
         </>
