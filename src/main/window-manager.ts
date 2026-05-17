@@ -159,13 +159,18 @@ export class WindowManager implements IWindowManager {
       minHeight: 400,
       show: false,
       title: `Marina — Window ${windowNumber}`,
-      // BETA-003b 圆角修复:Linux 上 X11/Wayland 没有 Windows 11 DWM 那样的系统级
-      // frameless 圆角,frame:false + 实色 backgroundColor 撑出方形画布,renderer 端
-      // CSS border-radius 看不见。Linux 走 transparent:true + 透明 backgroundColor,
-      // 让窗口可见区域由 .app-root 的 border-radius + overflow:hidden 决定。
-      // Windows / macOS 维持原行为(系统 DWM / NSWindow 给 frameless 圆角)。
-      backgroundColor: process.platform === 'linux' ? '#00000000' : '#191724',
-      transparent: process.platform === 'linux',
+      // 历史:BETA-003b 曾在 Linux 上启用 transparent:true 让 CSS 画圆角
+      // (Linux 没有 Windows 11 DWM 的系统级 frameless 圆角)。但 transparent
+      // + Wayland (Ubuntu 22.04 GNOME 默认 session) 触发严重 resize bug —
+      // Chromium 内层 viewport 计算异常,container.clientWidth 卡在初始值,
+      // fitAddon.fit() 永远算出错误 cols,xterm + PTY 都跟不上窗口拖动,
+      // 用户体感"resize 完全不能用"。已知 electron#28632 等 issue。
+      // 修复(BETA-003c):放弃 Linux 圆角,换回 resize 正常工作。Linux 用户
+      // 看到方角窗口,这与 gnome-terminal / wezterm 等所有主流 Linux 终端
+      // 一致;CSS 端配合 <html data-platform='linux'> 在 .app-root 上去掉
+      // border-radius 避免内部出现 #191724 实色边角。
+      backgroundColor: '#191724',
+      transparent: false,
       // M1-A:自绘标题栏。frame:false 把整条 OS 标题栏拿掉,renderer 端用
       // -webkit-app-region:drag 实现拖动,用 cmd:window:* 实现按钮动作。
       frame: false,
