@@ -1296,7 +1296,6 @@ html[data-maximized='true'] .app-root.with-shell {
 .sidebar-footer {
   flex: 0 0 auto;
   padding: 6px 12px;
-  border-top: 1px solid var(--color-bg-elevated, #f0f);
 }
 
 .settings-entry {
@@ -1468,15 +1467,15 @@ html[data-maximized='true'] .app-root.with-shell {
   background-color: var(--color-bg-secondary, #f0f);
   /* 无边框版:tab-bar 与主区靠 surface/base 背景差区分,不画底部 1px 横线 */
   min-height: 32px;
-  overflow-x: auto;
+  /* Chrome 风格:tab 多时按比例缩小而不是出水平滚动条。 */
+  overflow: hidden;
 }
 
 .tab-list {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
-  /* 微调:左侧 6px 让首个 tab 不贴 sidebar 边界,与右侧主区呼吸感保持一致 */
-  padding-left: 6px;
+  overflow: hidden;
 }
 
 /* 简易模式 app-body — 之前的浮动工具栏已迁入 terminal-statusbar */
@@ -1518,10 +1517,12 @@ html[data-maximized='true'] .app-root.with-shell {
      反馈不想要,直接抹平。tab 选中态靠下方 2px iris 横线表达,不再依赖圆角。 */
   color: var(--color-text-primary, #f0f);
   font-size: 12px;
-  min-width: 100px;
+  /* Chrome 风格:首选 180px(与原 max-width 一致),空间不够时一直缩到 40px
+     再被 .tab-name 的 ellipsis 截断;不再用 0 0 auto 强行撑满导致出滚动条。 */
+  min-width: 40px;
   max-width: 180px;
   white-space: nowrap;
-  flex: 0 0 auto;
+  flex: 0 1 180px;
 }
 
 .tab:hover {
@@ -1716,8 +1717,10 @@ html[data-maximized='true'] .app-root.with-shell {
  * 让"新建"清晰地存在于 tab 系统内,不是游离在外的页面。
  */
 .tab.tab-blank {
-  min-width: 80px;
+  /* 跟着普通 tab 一起缩,避免 "+" 占着 80px 把别的 tab 挤出滚动条 */
+  min-width: 40px;
   max-width: 140px;
+  flex: 0 1 140px;
   color: var(--color-text-secondary, #f0f);
   font-style: normal;
 }
@@ -1755,7 +1758,6 @@ html[data-maximized='true'] .app-root.with-shell {
   gap: 8px;
   padding: 4px 12px;
   background-color: var(--color-bg-secondary, #f0f);
-  border-bottom: 1px solid var(--color-bg-elevated, #f0f);
   font-size: 11px;
   color: var(--color-text-secondary, #f0f);
   font-family: var(--terminal-font-family, monospace);
@@ -1923,7 +1925,6 @@ textarea.settings-input::-webkit-scrollbar-corner {
   gap: 12px;
   padding: 8px 16px;
   background-color: var(--color-bg-secondary, #f0f);
-  border-bottom: 1px solid var(--color-bg-elevated, #f0f);
   flex: 0 0 auto;
 }
 
@@ -1974,7 +1975,6 @@ textarea.settings-input::-webkit-scrollbar-corner {
   gap: 2px;
   padding: 12px 8px;
   background-color: var(--color-bg-secondary, #f0f);
-  border-right: 1px solid var(--color-bg-elevated, #f0f);
   overflow-y: auto;
 }
 
