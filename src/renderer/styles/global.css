@@ -1555,20 +1555,18 @@ html[data-maximized='true'] .app-root.with-shell {
   color: var(--color-text-primary, #f0f);
 
   /*
-   * 勘误第二轮:外边框改用 --highlight-high 替代 --overlay,与 surface 对比
-   * 更明显;主题色越浅时这种差异越关键(原 dawn / cutie 主题下边框几乎不可见,
-   * 视觉上"飘"在白底上)。
+   * UI-1:边框走 alpha hairline 而不是实色 token。
+   * 原 `var(--color-bg-strong)` + box-shadow ring 双层实色描边在浅色主题
+   * (尤其 cutie #fff0f5 樱花粉底)上呈"莓棕墨水线",和最近 4 处删 sidebar/
+   * statusbar 边框的方向不一致。改用 color-mix 与 text-primary 8% 混合,
+   * 深浅主题都做对的事:深底叠浅文字色 → 微 highlight;浅底叠深文字色 → 微
+   * shadow line,视觉重量比实色 token 低一个数量级。
+   * 双层 ring 同步删除 — drop shadow 已经够撑立体感。
    */
-  border: 1px solid var(--color-bg-strong, #f0f);
+  border: 1px solid
+    color-mix(in srgb, var(--color-text-primary, #e0def4) 8%, transparent);
   border-radius: 6px;
-
-  /*
-   * 阴影同时叠 dark drop + theme-tinted halo:dark drop 保证深色主题下立体感,
-   * theme-tinted halo (--overlay) 让浅色主题下不至于"墨水块"突兀。
-   */
-  box-shadow:
-    0 6px 18px rgb(0 0 0 / 28%),
-    0 0 0 1px var(--color-bg-elevated, #f0f);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
   padding: 4px;
   font-size: 12px;
   user-select: none;
@@ -2924,20 +2922,21 @@ select.settings-input option {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%23736a6d' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
 }
 
-/* B8 + BETA-037:浅色主题阴影减淡 + 边框换 --muted。
+/* B8 + BETA-037:浅色主题阴影减淡。
  * 原硬编码 rgb(0 0 0 / 28-45%) 在浅底上呈"墨水块",调到 12-22% 减少视觉重量。
  * 深色主题阴影不动(28-45% 在深底正好融入)。
- * BETA-037 起 ctx-menu 边框在浅色主题改用 --muted,提升对比度,避免融在背景里。
+ *
+ * UI-1(2026-05-19):ctx-menu 边框已在主规则用 color-mix(text-primary 8%)
+ * 做 alpha hairline,跨主题自动 do-the-right-thing,这里不再特化 border-color。
+ * 同步删了 box-shadow 的 ring 第二层(原 --color-text-muted 实色描边在浅底
+ * 偏重),只剩 drop shadow 减淡。
  */
 [data-theme='rose-pine-dawn'] .ctx-menu,
 [data-theme='cutie'] .ctx-menu,
 [data-theme='catppuccin-latte'] .ctx-menu,
 [data-theme='tokyo-night-day'] .ctx-menu,
 [data-theme='light-pink'] .ctx-menu {
-  border-color: var(--color-text-muted, #f0f);
-  box-shadow:
-    0 6px 18px rgb(0 0 0 / 14%),
-    0 0 0 1px var(--color-text-muted, #f0f);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 14%);
 }
 
 /* BETA-037:浅色主题 modal backdrop 透明度降低,避免在浅底上呈"突兀黑膜"。
