@@ -2,13 +2,22 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/),版本号遵循 [SemVer](https://semver.org/)。
 
-## [Unreleased]
+## [0.1.0-beta.8] — 2026-05-19
+
+### 新增
+
+- **UI-2:新增 4 个主题 — Catppuccin Latte / Tokyo Night Day / Light Pink / Fairyfloss。**
+  补完 Catppuccin / Tokyo Night 浅色家族;Light Pink 走"多色少女"区分于 Cutie 的"单粉色家族";Fairyfloss 是项目第一个"深色可爱"主题。所有 ANSI bright 系按 BETA-035 标准在浅底 ≥4.5:1。`global.css` 加 4 个 `[data-theme]` 块 + 浅色主题 `ctx-menu / modal / toast / select-arrow / bootstrap-placeholder` 特化扩展。
+- **TERM-PROGRAM:子 shell 现在能识别 Marina 宿主身份 + 完整终端能力。** 仿 iTerm2 / WezTerm,统一注入 `TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM=Marina`、`TERM_PROGRAM_VERSION=app.getVersion()`。覆盖父进程继承的旧值(避免 Marina 从 VS Code 终端启动时子 shell 看到 `vscode`);若 `appVersion` 缺失则主动 `delete` 继承值。用户 `.bashrc / Profile.ps1` 可分支判断 `$env:TERM_PROGRAM -eq 'Marina'`;starship / oh-my-posh / fzf / bat / delta 等显式读 `COLORTERM` 决定 24-bit 渐变。node-pty `spawn name` 同步改 `xterm-256color`。
 
 ### 修复 / 改进
 
-- **IME-1 探针 v2:LEAK 判定升级 + 持久化日志通道,根治"DevTools 没开就丢现场" + 正常长输入误报。** 用户在 2026-05-18 当晚反馈
-  `[IME-LEAK]` 在 console 里只剩 "Object" 占位,定位不了哪条 race;同步抓到的另一条现场 `len=24 head=tail=taTail=24 字` 又是"一次性长 IME 提交"被原始阈值 `data.length > 20` 误报。
-  两个动作:**(a)** LEAK 判定从单一阈值升级到 `data.length > 20 AND taLen ≥ data.length + 8`(物理意义:textarea 必须严格长于 data 才说明有"前面那段历史"没被取出);**(b)** PROBE B 的 `composition* / keydown(229)` 不再 `console.warn` 每条(中文用户日常输入每按一个标点都打一条),改进 ring buffer (capacity 50) 暂存;LEAK 触发时整个 ring 一次性 IPC dump 到 main 端,通过新增的 `logger.ime` 通道落盘 `%APPDATA%/Marina/logs/ime-YYYY-MM-DD.log`(按日切、5MB rotate、保 7 天,与 `llm` 排障日志同套设施)。判定与 ring 下沉到 `src/shared/ime-probe-ring.ts`,配 10 条护栏单测。观察期结束移除探针时,本通道一并退役。详见 `docs/issues/ime-1-chinese-ime-stale-textarea-flush.md` "探针 v2 升级"段。
+- **SCROLL-1:切 session 时终端"从上往下刷屏再到底"再现 — 用 `term.write('', cb)` 作 fence 根治回归。**
+  BETA-018 在 2026-05-16 修过同一现象,但 CURSOR-1 把 `get-scrollback` 数据源从 main 端裸字节 ring 切到 SerializeAddon 序列化的完整状态 ANSI 流后,体积从"单片 16KB 一过完"变成"几十~几百 KB 必走分片 + yield",原修复(`.then` 体内直接 `scrollToBottom`)隐式依赖"parser 单帧能 drain 完",于是失效。根因:`term.write()` 是异步排队(d.ts:1216),`.then` 体内的 `scrollToBottom` 锚的"底"在后续 parser 解析新行时会被持续往下推。修复把 `scrollToBottom` 移进 `term.write('', cb)` 的 callback 内,callback 由 parser drain 后才触发,等价 fence。主路径 + catch fallback 各改一处,带 `disposed` 兜底。文件头 `@关键设计` 加"步骤 4 视口锚定",明文禁止"`.then` 体里直接调"。详见 `docs/issues/scroll-1-session-switch-progressive-refresh.md`。
+- **IME-1 探针 v2:LEAK 判定升级 + 持久化日志通道,根治"DevTools 没开就丢现场" + 正常长输入误报。**
+  用户在 2026-05-18 当晚反馈 `[IME-LEAK]` 在 console 里只剩 "Object" 占位,定位不了哪条 race;同步抓到的另一条现场 `len=24 head=tail=taTail=24 字` 又是"一次性长 IME 提交"被原始阈值 `data.length > 20` 误报。两个动作:**(a)** LEAK 判定从单一阈值升级到 `data.length > 20 AND taLen ≥ data.length + 8`(物理意义:textarea 必须严格长于 data 才说明有"前面那段历史"没被取出);**(b)** PROBE B 的 `composition* / keydown(229)` 不再 `console.warn` 每条(中文用户日常输入每按一个标点都打一条),改进 ring buffer (capacity 50) 暂存;LEAK 触发时整个 ring 一次性 IPC dump 到 main 端,通过新增的 `logger.ime` 通道落盘 `%APPDATA%/Marina/logs/ime-YYYY-MM-DD.log`(按日切、5MB rotate、保 7 天,与 `llm` 排障日志同套设施)。判定与 ring 下沉到 `src/shared/ime-probe-ring.ts`,配 10 条护栏单测。观察期结束移除探针时,本通道一并退役。详见 `docs/issues/ime-1-chinese-ime-stale-textarea-flush.md` "探针 v2 升级"段。
+- **UI-1:无边框风格收尾清理 4 处遗漏 `border` + tab 改 Chrome 风格(缩放替代横向滚动)。**
+  之前 4 个区块(`.sidebar / .sidebar-category / .tab-bar / .tab`)已固化"无边框",但还有 4 处遗漏仍画 1px 实色线:`.sidebar-footer / .terminal-statusbar / .settings-header / .settings-nav`,统一删掉。tab-bar / tab-list `overflow: hidden` 替代 `overflow-x: auto`,`.tab` 从 `flex: 0 0 auto` 改成 `flex: 0 1 180px` + `min-width: 40px`,空间不够时一直缩到 40px 被 `.tab-name` 的 ellipsis 截断,不再出水平滚动条。浅色主题 hairline 补强方案以 RFC 形式归档于 `docs/issues/ui-1-borderless-style-light-theme-hairline.md`(保留 open question)。
 
 ## [0.1.0-beta.7] — 2026-05-18
 
