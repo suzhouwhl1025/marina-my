@@ -73,6 +73,7 @@ import {
   type SessionOutputPayload,
 } from '@shared/protocol';
 import type { SessionInfo, ThemeId } from '@shared/types';
+import { attachImeCompositionEndCleaner } from '@shared/ime-textarea-workaround';
 import { useAppDispatch, useAppState } from '../store';
 import { readClipboardText, writeClipboardText } from '../clipboard';
 import { Icon } from './icons';
@@ -892,9 +893,32 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
     term.open(container);
 
+    // IME-1 workaround:挂 compositionend 兜底清空 helper-textarea。
+    // 根因在 @xterm/xterm CompositionHelper:整个 xterm 只在 Enter / Ctrl+C
+    // 时清 textarea,中文 IME 用户长时间不按 Enter 会累到几百几千字符;再叠加
+    // compositionend 用 substring(start) 取从开头到 textarea 末尾的几条 race
+    // 路径,就会把历史一起送给 onData。这里在每次 compositionend 后延迟 16ms
+    // (~1 帧)清空,从根上断"textarea 累积历史"这个前提。
+    // 详见 docs/issues/ime-1-chinese-ime-stale-textarea-flush.md 与
+    // src/shared/ime-textarea-workaround.ts 的 JSDoc。
+    let detachImeWorkaround: (() => void) | null = null;
+    try {
+      const helperTaForWorkaround = container.querySelector(
+        '.xterm-helper-textarea',
+      ) as HTMLTextAreaElement | null;
+      if (helperTaForWorkaround) {
+        detachImeWorkaround = attachImeCompositionEndCleaner(
+          helperTaForWorkaround,
+        );
+      }
+    } catch (err) {
+      console.warn('[TerminalView] IME-1 workaround attach failed', err);
+    }
+
     // [IME-1 PROBE B] 临时探针:追踪 helper-textarea 的 composition 时序与
     // keydown 229 事件,用来定位"中文 IME 按标点冲刷历史"的触发路径。
-    // 拿到 1-2 次真实复现日志后整体移除(连同 onData 内的 PROBE A)。
+    // workaround 已上线,探针保留作为长期监控:若 LEAK 再现说明 workaround
+    // 没盖到的 case,观察两周无报警后整体移除(连同 onData 内的 PROBE A)。
     // 不挂 cleanup:listener 随 term.dispose() 移除 textarea 一起被 GC。
     try {
       const helperTa = container.querySelector(
@@ -1237,6 +1261,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       resizeObserver.disconnect();
       cleanupMaxState();
       cleanupOutput();
+      detachImeWorkaround?.();
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
       searchAddon.dispose();

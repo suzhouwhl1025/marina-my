@@ -1,6 +1,6 @@
 # IME-1 · 中文 IME 偶发"按标点冲刷一大段历史输入"
 
-**状态**:已定位 xterm.js 内部漏洞,workaround 方案已设计,未实施
+**状态**:**workaround 已实施(2026-05-18),监控中** — `compositionend` 延迟 16ms 清空 helper-textarea,核心逻辑在 `src/shared/ime-textarea-workaround.ts`,7 条护栏单测就位。`[IME-LEAK]` 探针保留观察。
 **优先级**:P1(影响中文用户日常输入体感,但偶发性;切英文输入法即恢复)
 **首次报告**:2026-05-16,用户日常使用 Marina 时偶发,凭对话框输入残影确认
 **复现率**:偶发,不是每次都触发;仅在中文输入法开启时;切英文输入法立即消失
@@ -148,11 +148,41 @@ if (helperTa) {
 ## 待办
 
 - [x] 第一步埋日志(2026-05-16 已加 PROBE A / PROBE B,见下"测试步骤")
-- [ ] 本地 / 用户机复现拿证据
-- [ ] 第二步实施 workaround,加 changelog 一条
+- [x] 第二步实施 workaround,加 changelog 一条(2026-05-18 — 决策:不等复现证据,
+      理由见下"实施决策记录")
+- [x] 写护栏单测防止未来误删 listener(`src/shared/ime-textarea-workaround.test.ts`,
+      7 条覆盖延迟生效 / 不抢 substring 窗口 / 连按合并 / detach 清理 pending 等)
 - [ ] 跑回归:确认 Enter / Ctrl+C 清 textarea 路径仍工作,中文长段输入不丢字
-- [ ] 拿到证据后**移除两个探针**(grep `IME-1 PROBE` / `IME-LEAK` / `IME-EV` 一次性清掉)
+      (手动,中文 IME 必须人测)
+- [ ] **观察期**:dev / beta 版本运行两周(2026-05-18 → 2026-06-01),
+      Console 持续 filter `[IME-LEAK]`,**无报警则推进**下一项
+- [ ] 观察期通过后,**移除两个探针**(grep `IME-1 PROBE` / `IME-LEAK` / `IME-EV`
+      一次性清掉);若期间再现 LEAK,在此工单加复现证据 + 分析新 race 路径
 - [ ] 跟一下 xterm.js 上游 issue,如果将来上游修了,把本 workaround 删掉
+      (届时护栏测试也一并移除,或改成"断言上游已修")
+
+## 实施决策记录(2026-05-18)
+
+**决策**:不等复现证据,直接实施 workaround + 保留探针监控。
+
+**理由**:
+1. workaround 是治根(漏洞 1 — textarea 几乎从不清空)而非对症,对三条
+   race 路径同时有效,不依赖具体命中哪条
+2. 复现成本高:文档自己写了"重复 20-30 次 / 给重度用户用 1-2 天",
+   ROI 不如直接 ship workaround + 探针监控
+3. workaround 唯一硬约束是"16ms 不能抢在 xterm `setTimeout(0)` substring
+   读取窗口之前" — 这个用**正常中文输入不丢字**就能验证,不需要复现 bug
+4. 探针保留作为上线后监控:若 workaround 没盖到的 case 触发,Console
+   `[IME-LEAK]` 一眼可见,比"等复现再上"反应更快
+
+**护栏设计**:
+- 核心逻辑下沉到 `src/shared/ime-textarea-workaround.ts`(AGENTS.md 5.1
+  red line — renderer 不写测试,所以纯函数必须放 shared)
+- duck-typed `ImeTextareaLike` 接口,测试用 fake textarea + `vi.useFakeTimers`,
+  不引入 jsdom / happy-dom 依赖
+- 7 条测试覆盖:延迟生效 / 不抢 substring 窗口 / 默认 16ms /
+  连续 compositionend 合并 setTimeout / detach 清理 listener /
+  detach 取消 pending / 自定义 timer 注入
 
 ---
 
