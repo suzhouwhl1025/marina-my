@@ -5,7 +5,7 @@
  * @对应文档章节: AGENTS.md 5.6 (测试要"会出错"),覆盖错误输入与边界。
  */
 import { describe, expect, it } from 'vitest';
-import { buildSpawnEnv, validateDimensions } from './pty-utils';
+import { buildSpawnEnv, injectTerminalHintEnv, validateDimensions } from './pty-utils';
 
 describe('validateDimensions', () => {
   it('合法值原样返回', () => {
@@ -81,5 +81,58 @@ describe('buildSpawnEnv', () => {
   it('skipKeys 不存在时不报错 (传入空 Set 等价)', () => {
     expect(() => buildSpawnEnv({ A: '1' }, [])).not.toThrow();
     expect(() => buildSpawnEnv({ A: '1' }, new Set())).not.toThrow();
+  });
+});
+
+describe('injectTerminalHintEnv', () => {
+  it('默认写出四件套:TERM=xterm-256color / COLORTERM=truecolor / TERM_PROGRAM / TERM_PROGRAM_VERSION', () => {
+    const env: Record<string, string> = {};
+    injectTerminalHintEnv(env, { programName: 'Marina', appVersion: '0.1.0' });
+    expect(env).toEqual({
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      TERM_PROGRAM: 'Marina',
+      TERM_PROGRAM_VERSION: '0.1.0',
+    });
+  });
+
+  it('覆盖父进程继承的 TERM_PROGRAM —— 从 VS Code 终端启动 Marina 不应让子 shell 看到 vscode', () => {
+    const env: Record<string, string> = {
+      TERM_PROGRAM: 'vscode',
+      TERM_PROGRAM_VERSION: '1.95.0',
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+    };
+    injectTerminalHintEnv(env, { programName: 'Marina', appVersion: '0.1.0' });
+    expect(env.TERM_PROGRAM).toBe('Marina');
+    expect(env.TERM_PROGRAM_VERSION).toBe('0.1.0');
+  });
+
+  it('appVersion 缺失 / 空串 → 主动 delete 继承的旧值 (避免泄漏父终端版本号)', () => {
+    const env: Record<string, string> = { TERM_PROGRAM_VERSION: '1.95.0' };
+    injectTerminalHintEnv(env, { programName: 'Marina' });
+    expect(Object.hasOwn(env, 'TERM_PROGRAM_VERSION')).toBe(false);
+
+    const env2: Record<string, string> = { TERM_PROGRAM_VERSION: '1.95.0' };
+    injectTerminalHintEnv(env2, { programName: 'Marina', appVersion: '' });
+    expect(Object.hasOwn(env2, 'TERM_PROGRAM_VERSION')).toBe(false);
+  });
+
+  it('term / colorTerm option 可覆盖默认值 (给调试 / 特殊场景留口)', () => {
+    const env: Record<string, string> = {};
+    injectTerminalHintEnv(env, {
+      programName: 'Marina',
+      term: 'dumb',
+      colorTerm: '',
+    });
+    expect(env.TERM).toBe('dumb');
+    expect(env.COLORTERM).toBe('');
+  });
+
+  it('返回值就是入参 env(原地修改,方便链式),不会拷贝出新对象', () => {
+    const env: Record<string, string> = { FOO: 'bar' };
+    const ret = injectTerminalHintEnv(env, { programName: 'Marina', appVersion: '1.0' });
+    expect(ret).toBe(env);
+    expect(env.FOO).toBe('bar');
   });
 });

@@ -70,7 +70,7 @@ const { SerializeAddon } = xtermSerialize;
 type SerializeAddon = InstanceType<typeof SerializeAddon>;
 import { Osc1337Parser } from './osc1337-parser';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
-import { buildSpawnEnv, validateDimensions } from './pty-utils';
+import { buildSpawnEnv, injectTerminalHintEnv, validateDimensions } from './pty-utils';
 import { logger } from './logger';
 
 const SPAWN_ENV_SKIP = ['ELECTRON_RUN_AS_NODE', 'ELECTRON_RENDERER_URL'];
@@ -456,6 +456,12 @@ export interface SessionManagerOptions {
    * PTY chunk 立即 emit (保持现有断言的时序假设)。
    */
   emitBatchMs?: number;
+  /**
+   * 写到子 shell `TERM_PROGRAM_VERSION` 的版本号。生产从 `app.getVersion()`
+   * 注入;测试默认不传,injectTerminalHintEnv 会主动 delete 继承的旧值
+   * (避免 CI 上从 VS Code 终端继承到的 vscode 版本号污染断言)。
+   */
+  appVersion?: string;
 }
 
 export class SessionManager extends EventEmitter {
@@ -469,6 +475,7 @@ export class SessionManager extends EventEmitter {
   private readonly inputQuietMs: number;
   private readonly skipCwdValidation: boolean;
   private readonly emitBatchMs: number;
+  private readonly appVersion: string;
 
   /**
    * 缓存 detectShells 结果。首次 createSession 时填充,后续复用。
@@ -504,6 +511,7 @@ export class SessionManager extends EventEmitter {
     this.skipCwdValidation = options.skipCwdValidation ?? false;
     // 测试缺省传 0(立即 emit,保持时序断言)
     this.emitBatchMs = options.emitBatchMs ?? EMIT_BATCH_MS;
+    this.appVersion = options.appVersion ?? '';
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -574,6 +582,13 @@ export class SessionManager extends EventEmitter {
       // Windows 部分组件读 Path(不是 PATH),冗余赋值一份保持兼容
       env.Path = refreshedPath;
     }
+    // 终端宿主提示:TERM / COLORTERM / TERM_PROGRAM / TERM_PROGRAM_VERSION。
+    // 必须在合并 launchParams.env / template.env 之前,这样用户在启动模板里
+    // 显式写 `TERM=dumb` 仍能覆盖我们的默认值。详见 pty-utils.injectTerminalHintEnv。
+    injectTerminalHintEnv(env, {
+      programName: 'Marina',
+      appVersion: this.appVersion,
+    });
     Object.assign(env, launchParams.env);
     Object.assign(env, template.env);
     // BETA-ENV-1:Windows 上必做的最后一道防御 —— 补齐 canonical SystemRoot
@@ -585,7 +600,10 @@ export class SessionManager extends EventEmitter {
     let pty: IPty;
     try {
       pty = this.spawnFn(shell.executablePath, launchParams.args, {
-        name: 'xterm-color',
+        // 和 injectTerminalHintEnv 写到 env.TERM 的值保持一致 —— node-pty 的
+        // `name` 主要影响内部 winpty 路径,但环境变量 TERM 才是子进程实际看到
+        // 的值。两边对齐避免观察日志时困惑。
+        name: 'xterm-256color',
         cols: dims.cols,
         rows: dims.rows,
         cwd,

@@ -34,6 +34,53 @@ export function buildSpawnEnv(
 }
 
 /**
+ * 注入"终端宿主提示"环境变量,模仿 iTerm2 / WezTerm / VS Code 的做法,让子
+ * shell 与跑在里面的 TUI 程序能识别终端能力 + 宿主身份。
+ *
+ * 写哪几个、为什么:
+ * - TERM:                ncurses 程序 (vim / htop / less / tmux) 读它来选 terminfo。
+ *                        默认 `xterm-256color` —— xterm.js 支持 256 色 + truecolor,
+ *                        老的 `xterm-color` 会被识别为只支持 8 色,主题降级。
+ * - COLORTERM:           24-bit 真彩色显式提示。starship / oh-my-posh / fzf /
+ *                        bat / delta 等都看它决定要不要启 truecolor 渐变。
+ * - TERM_PROGRAM:        宿主名字。用户 .bashrc / Profile.ps1 里可以分支
+ *                        (`if $env:TERM_PROGRAM -eq 'Marina' ...`);第三方主题
+ *                        也会嗅探用于 host detection。
+ * - TERM_PROGRAM_VERSION:伴随 TERM_PROGRAM。若 appVersion 未给,主动 delete
+ *                        从父终端继承下来的旧值(避免 Marina 从 VS Code 终端
+ *                        启动时,子 shell 看到 `vscode` 的版本号)。
+ *
+ * 调用方应该在 buildSpawnEnv 之后、合并 launchParams.env / template.env 之前
+ * 调用,这样自定义启动模板仍能覆盖(例如调试时硬塞 `TERM=dumb`)。
+ *
+ * 这些变量总是覆盖父进程继承的值 —— 否则 Marina 从别的终端启动时,子 shell
+ * 会看到上游宿主的 TERM_PROGRAM (比如 `vscode`),完全不对。
+ */
+export function injectTerminalHintEnv(
+  env: Record<string, string>,
+  options: {
+    /** 写到 TERM_PROGRAM。生产传 'Marina'。 */
+    programName: string;
+    /** 写到 TERM_PROGRAM_VERSION;空 / 缺失时主动 delete 继承值。 */
+    appVersion?: string;
+    /** 覆盖 TERM,默认 `xterm-256color`。 */
+    term?: string;
+    /** 覆盖 COLORTERM,默认 `truecolor`。 */
+    colorTerm?: string;
+  },
+): Record<string, string> {
+  env.TERM = options.term ?? 'xterm-256color';
+  env.COLORTERM = options.colorTerm ?? 'truecolor';
+  env.TERM_PROGRAM = options.programName;
+  if (options.appVersion && options.appVersion.length > 0) {
+    env.TERM_PROGRAM_VERSION = options.appVersion;
+  } else {
+    delete env.TERM_PROGRAM_VERSION;
+  }
+  return env;
+}
+
+/**
  * 把可能不合法的 cols/rows 约束到 [min, max] 之间。非整数 / NaN / 越界
  * 都会被替换成 fallback 值。
  *

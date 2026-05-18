@@ -172,6 +172,11 @@ function bootstrap(): void {
     pathManager,
     templatesManager,
     settingsManager,
+    {
+      // 透传到子 shell 的 TERM_PROGRAM_VERSION,模仿 iTerm2 / WezTerm。
+      // 用户在 .bashrc / Profile.ps1 里可以拿这个版本号做条件判断。
+      appVersion: app.getVersion(),
+    },
   );
   const trayManager = new TrayManager(windowManager, sessionManager, settingsManager);
 
