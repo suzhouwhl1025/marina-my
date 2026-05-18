@@ -390,6 +390,113 @@ const XTERM_THEMES: Record<ThemeId, ITheme> = {
     brightCyan: '#94e2d5',
     brightWhite: '#a6adc8',
   },
+  // UI-2 — Catppuccin Latte(浅色版本,与 Mocha 对应)
+  // 官方 ANSI 调色板:https://github.com/catppuccin/iterm
+  // bright 系按 BETA-035 标准在 #eff1f5 上 ≥4.5:1(brightBlack/Yellow/Cyan 调暗)
+  'catppuccin-latte': {
+    background: '#eff1f5',
+    foreground: '#4c4f69',
+    cursor: '#dc8a78',
+    cursorAccent: '#eff1f5',
+    selectionBackground: '#acb0be',
+    black: '#5c5f77',
+    red: '#d20f39',
+    green: '#40a02b',
+    yellow: '#df8e1d',
+    blue: '#1e66f5',
+    magenta: '#ea76cb',
+    cyan: '#179299',
+    white: '#acb0be',
+    brightBlack: '#5e5d6e',
+    brightRed: '#d20f39',
+    brightGreen: '#40a02b',
+    brightYellow: '#a36e10',
+    brightBlue: '#1e66f5',
+    brightMagenta: '#8839ef',
+    brightCyan: '#0a7176',
+    brightWhite: '#4c4f69',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
+  },
+  // UI-2 — Tokyo Night Day(浅色版本)
+  // 官方调色板:folke/tokyonight.nvim(day variant)
+  // 设计要点:foreground 是钢蓝 #3760bf(非黑),是 TND 标志,保留
+  'tokyo-night-day': {
+    background: '#e1e2e7',
+    foreground: '#3760bf',
+    cursor: '#3760bf',
+    cursorAccent: '#e1e2e7',
+    selectionBackground: '#b6bdcf',
+    black: '#a1a6c5',
+    red: '#f52a65',
+    green: '#587539',
+    yellow: '#8c6c3e',
+    blue: '#2e7de9',
+    magenta: '#9854f1',
+    cyan: '#007197',
+    white: '#6172b0',
+    brightBlack: '#4f5d9e',
+    brightRed: '#f52a65',
+    brightGreen: '#587539',
+    brightYellow: '#8c6c3e',
+    brightBlue: '#2e7de9',
+    brightMagenta: '#9854f1',
+    brightCyan: '#007197',
+    brightWhite: '#3760bf',
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
+  },
+  // UI-2 — Light Pink(浅色可爱,mgwg/light-pink-theme 上游)
+  // 上游 ANSI 颜色在 #f5f5f5 bg 上多处不达 AA(yellow/magenta/cyan),
+  // 按 BETA-035 标准统一加深到 ≥4.5:1
+  'light-pink': {
+    background: '#f5f5f5',
+    foreground: '#54494b',
+    cursor: '#ff7ab3',
+    cursorAccent: '#f5f5f5',
+    selectionBackground: '#f1dde9',
+    black: '#54494b',
+    red: '#d2304b',
+    green: '#4a7559',
+    yellow: '#8a6c1f',    // 上游 #b08b35 在浅底 ~3.2:1,加深到 ≥4.5
+    blue: '#1f6e89',
+    magenta: '#9d3c5e',   // 上游 function 色,本身已 ≥4.5
+    cyan: '#2d6b75',      // 上游 #458a96 仅 ~3.7,加深到 ≥4.5
+    white: '#54494b',
+    brightBlack: '#7d6770',
+    brightRed: '#d2304b',
+    brightGreen: '#4a7559',
+    brightYellow: '#8a6c1f',
+    brightBlue: '#1f6e89',
+    brightMagenta: '#8855a0',   // 加深后的紫莓
+    brightCyan: '#2d6b75',
+    brightWhite: '#44132d',     // 深酒红(exception 色)
+    extendedAnsi: LIGHT_EXTENDED_ANSI,
+  },
+  // UI-2 — Fairyfloss(深色可爱,sailorhg 原创)
+  // https://sailorhg.github.io/fairyfloss/
+  // 上游调色板直接采用 — kawaii 工程师文化 OG,palette 是其 brand identity
+  fairyfloss: {
+    background: '#5a5475',
+    foreground: '#f8f8f2',
+    cursor: '#c5a3ff',
+    cursorAccent: '#5a5475',
+    selectionBackground: '#6959aa',
+    black: '#5a5475',
+    red: '#ff857f',
+    green: '#c2ffdf',
+    yellow: '#ffea00',
+    blue: '#c5a3ff',
+    magenta: '#ffb8d1',
+    cyan: '#c2ffdf',
+    white: '#f8f8f2',
+    brightBlack: '#a186cf',
+    brightRed: '#ff857f',
+    brightGreen: '#c2ffdf',
+    brightYellow: '#fff352',
+    brightBlue: '#9673d3',
+    brightMagenta: '#ffb8d1',
+    brightCyan: '#c2ffdf',
+    brightWhite: '#ffffff',
+  },
 };
 
 function getXtermTheme(themeId: ThemeId | undefined): ITheme {

@@ -192,6 +192,8 @@ const THEMES: Array<{ id: ThemeId; label: string; tone: '深色' | '浅色'; not
   { id: 'rose-pine-dawn', label: 'Rose Pine Dawn', tone: '浅色' },
   { id: 'rose-pine-moon', label: 'Rose Pine Moon', tone: '深色' },
   { id: 'cutie', label: 'Cutie', tone: '浅色', note: 'Kawaii' },
+  { id: 'light-pink', label: 'Light Pink', tone: '浅色', note: 'Kawaii' },
+  { id: 'fairyfloss', label: 'Fairyfloss', tone: '深色', note: 'Kawaii' },
   { id: 'business', label: 'Business', tone: '深色' },
   { id: 'ubuntu', label: 'Ubuntu', tone: '深色' },
   { id: 'windows-terminal', label: 'Windows Terminal', tone: '深色' },
@@ -199,7 +201,9 @@ const THEMES: Array<{ id: ThemeId; label: string; tone: '深色' | '浅色'; not
   { id: 'one-dark-pro', label: 'One Dark Pro', tone: '深色' },
   { id: 'dracula', label: 'Dracula', tone: '深色' },
   { id: 'tokyo-night', label: 'Tokyo Night', tone: '深色' },
+  { id: 'tokyo-night-day', label: 'Tokyo Night Day', tone: '浅色' },
   { id: 'catppuccin-mocha', label: 'Catppuccin Mocha', tone: '深色' },
+  { id: 'catppuccin-latte', label: 'Catppuccin Latte', tone: '浅色' },
 ];
 
 function AppearancePanel({

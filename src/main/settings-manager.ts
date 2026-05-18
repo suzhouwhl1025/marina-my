@@ -98,6 +98,11 @@ const VALID_THEMES: ThemeId[] = [
   'dracula',
   'tokyo-night',
   'catppuccin-mocha',
+  // UI-2
+  'catppuccin-latte',
+  'tokyo-night-day',
+  'light-pink',
+  'fairyfloss',
 ];
 
 /**

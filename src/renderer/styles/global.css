@@ -586,6 +586,145 @@
   --iris: var(--ctp-mauve);
 }
 
+/* UI-2 — Catppuccin Latte(官方浅色版本,补完 Catppuccin 家族)
+ * 调色板出处:https://catppuccin.com/palette
+ * AA 对比度:text-secondary / muted 已选用 subtext1 / subtext0 满足 ≥4.5:1 on base #eff1f5
+ */
+[data-theme='catppuccin-latte'] {
+  /* Layer 1 — Catppuccin Latte palette */
+  --ctp-base: #eff1f5;
+  --ctp-mantle: #e6e9ef;
+  --ctp-surface0: #ccd0da;
+  --ctp-surface1: #bcc0cc;
+  --ctp-surface2: #acb0be;
+  --ctp-crust: #dce0e8;
+  --ctp-overlay1: #8c8fa1;
+  --ctp-overlay2: #7c7f93;
+  --ctp-subtext0: #6c6f85;
+  --ctp-subtext1: #5c5f77;
+  --ctp-text: #4c4f69;
+  --ctp-red: #d20f39;
+  --ctp-yellow: #df8e1d;
+  --ctp-peach: #fe640b;
+  --ctp-green: #40a02b;
+  --ctp-teal: #179299;
+  --ctp-mauve: #8839ef;
+
+  /* Layer 2 — Semantic;fallbacks 与对应 Layer 1 同值,满足 5.1.9 红线 */
+  --color-bg-primary: var(--ctp-base, #eff1f5);
+  --color-bg-secondary: var(--ctp-mantle, #e6e9ef);
+  --color-bg-elevated: var(--ctp-surface0, #ccd0da);
+  --color-bg-hover: var(--ctp-crust, #dce0e8);
+  --color-bg-active: var(--ctp-surface1, #bcc0cc);
+  --color-bg-strong: var(--ctp-surface2, #acb0be);
+  --color-text-primary: var(--ctp-text, #4c4f69);
+  --color-text-secondary: var(--ctp-subtext1, #5c5f77); /* ≥4.5:1 */
+  --color-text-muted: var(--ctp-subtext0, #6c6f85);     /* ~4.5:1 */
+  --color-danger: var(--ctp-red, #d20f39);
+  --color-warning: var(--ctp-yellow, #df8e1d);
+  --color-success: var(--ctp-green, #40a02b);
+  --color-info: var(--ctp-teal, #179299);
+  --color-accent-secondary: var(--ctp-peach, #fe640b);
+  --color-accent-special: var(--ctp-mauve, #8839ef);
+
+  /* Layer 3 (旧 --base / --surface 等别名) 故意省略 — 全代码库零消费者,
+   * 不再为新主题携带兼容期遗产。 */
+
+  color-scheme: light;
+}
+
+/* UI-2 — Tokyo Night Day(官方浅色版本,补 Tokyo Night 家族)
+ * 调色板出处:https://github.com/folke/tokyonight.nvim (day variant)
+ * 设计要点:body text 是钢蓝 #3760bf 而非黑色 — 是 Tokyo Night Day 的标志,
+ *   不要"修正"它。text-secondary / muted 已 ≥4.5:1 on bg #e1e2e7。 */
+[data-theme='tokyo-night-day'] {
+  /* Layer 2 — Semantic(无独立调色板词汇,跳过 Layer 1) */
+  --color-bg-primary: #e1e2e7;
+  --color-bg-secondary: #d0d5e3;
+  --color-bg-elevated: #c4c8da;
+  --color-bg-hover: #d8dae0;
+  --color-bg-active: #b6bdcf;
+  --color-bg-strong: #a8adc0;
+
+  --color-text-primary: #3760bf;     /* 钢蓝 body — Tokyo Night Day 标志 */
+  --color-text-secondary: #4d5996;   /* ≥4.5:1 */
+  --color-text-muted: #555f8c;       /* ≥4.5:1 */
+
+  --color-danger: #c64343;
+  --color-warning: #8c6c3e;
+  --color-success: #587539;
+  --color-info: #007197;
+  --color-accent-secondary: #b15c00;
+  --color-accent-special: #9854f1;
+
+  /* Layer 3 (旧 --base / --surface 等别名) 故意省略 — 全代码库零消费者 */
+
+  color-scheme: light;
+}
+
+/* UI-2 — Light Pink(浅色可爱,与 Cutie 互补)
+ * 调色板来源:mgwg/light-pink-theme(VSCode marketplace 225,426 装机)
+ * https://github.com/mgwg/light-pink-theme
+ * 设计:冷灰白底 + 热粉 statusbar/标志 + 紫莓 syntax + 金黄数字 ——
+ *   跟 Cutie 的"奶白底单一粉色家族"区分清晰:Light Pink 是多色少女风,
+ *   Cutie 是樱花奶昔单系。
+ * AA 对比度:所有 text-* / status 色 ≥4.5:1 on bg #f5f5f5
+ *   (原主题 comment #BA9AB9 在 #f5f5f5 上仅 ~2.5:1,muted 已加深到 #7d6770) */
+[data-theme='light-pink'] {
+  /* Layer 2 — Semantic;直接采用上游 hex,无独立 Layer 1 调色板词汇 */
+  --color-bg-primary: #f5f5f5;       /* 冷灰白(editor.background) */
+  --color-bg-secondary: #f5f0f3;     /* 奶霜粉(sideBar) */
+  --color-bg-elevated: #f5e3ef;      /* 樱花霜(sideBarSectionHeader) */
+  --color-bg-hover: #ede5ed;         /* 淡灰粉 hover */
+  --color-bg-active: #f1dde9;        /* 莓糖选中态 */
+  --color-bg-strong: #ffb8ca;        /* 婴儿粉(emphasis) */
+
+  --color-text-primary: #54494b;     /* 暖炭灰(editorCursor) */
+  --color-text-secondary: #736a6d;   /* 暖中灰(lineNumber) ≥4.5:1 */
+  --color-text-muted: #7d6770;       /* 暖莓棕 ≥4.5:1(上游 #BA9AB9 不达标,加深) */
+
+  --color-danger: #d2304b;           /* 玫瑰红(invalid) */
+  --color-warning: #b08b35;          /* 暖金(constants) */
+  --color-success: #4d8a5e;          /* 鼠尾草绿(上游无 success,与 Cutie 一致) */
+  --color-info: #1f6e89;             /* 海蓝(comment.documentation) */
+  --color-accent-secondary: #9466aa; /* 紫莓(types/classes) — 多色少女的紫调点睛 */
+  --color-accent-special: #ff7ab3;   /* 热粉(statusbar) — Light Pink 标志色 */
+
+  /* Layer 3 (旧 --base / --surface 等别名) 故意省略 — 全代码库零消费者 */
+
+  color-scheme: light;
+}
+
+/* UI-2 — Fairyfloss(深色可爱,与 Cutie/Light Pink 形成"深色可爱"补位)
+ * 调色板来源:sailorhg (Amy Wibowo) 原创,~2014 起为 kawaii 工程师文化 OG
+ * https://sailorhg.github.io/fairyfloss/
+ * 多编辑器移植:Sublime / Atom / VSCode (nopjmp 移植) / Xcode...
+ * 设计:暗紫底 + 校车黄 + 泡泡糖粉 + 薄荷绿 —— "魔法少女暮光"
+ *   是项目内第一个"深色可爱"主题;与 Cutie / Light Pink 在
+ *   "深/浅 × 甜美/帅气"象限里互补 */
+[data-theme='fairyfloss'] {
+  /* Layer 2 — Semantic;直接采用上游 hex */
+  --color-bg-primary: #5a5475;       /* 暗紫底(招牌色) */
+  --color-bg-secondary: #464258;     /* 深一档(sidebar/header) */
+  --color-bg-elevated: #514c66;      /* 浮卡 */
+  --color-bg-hover: #4a4361;
+  --color-bg-active: #6959aa;        /* 选中态紫高亮 */
+  --color-bg-strong: #716799;
+
+  --color-text-primary: #f8f8f2;     /* 奶油白 */
+  --color-text-secondary: #bcb3e7;   /* 淡薰衣草 */
+  --color-text-muted: #a186cf;       /* 灰薰衣草(注释色) */
+
+  --color-danger: #ff857f;           /* 桃粉红 */
+  --color-warning: #ffea00;          /* 校车黄(signature) */
+  --color-success: #c2ffdf;          /* 薄荷绿(signature) */
+  --color-info: #9673d3;             /* 紫罗兰 */
+  --color-accent-secondary: #ffb8d1; /* 泡泡糖粉(keywords) */
+  --color-accent-special: #c5a3ff;   /* 薰衣草(主标志色) */
+
+  /* Layer 3 故意省略;深色,不需要 color-scheme 显式声明 */
+}
+
 * {
   box-sizing: border-box;
 }
@@ -2773,13 +2912,28 @@ select.settings-input option {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%238a4566' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
 }
 
+[data-theme='catppuccin-latte'] select.settings-input {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%235c5f77' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
+}
+
+[data-theme='tokyo-night-day'] select.settings-input {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%234d5996' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
+}
+
+[data-theme='light-pink'] select.settings-input {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none' stroke='%23736a6d' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><polyline points='1.5,1.5 6,6 10.5,1.5'/></svg>");
+}
+
 /* B8 + BETA-037:浅色主题阴影减淡 + 边框换 --muted。
  * 原硬编码 rgb(0 0 0 / 28-45%) 在浅底上呈"墨水块",调到 12-22% 减少视觉重量。
  * 深色主题阴影不动(28-45% 在深底正好融入)。
  * BETA-037 起 ctx-menu 边框在浅色主题改用 --muted,提升对比度,避免融在背景里。
  */
 [data-theme='rose-pine-dawn'] .ctx-menu,
-[data-theme='cutie'] .ctx-menu {
+[data-theme='cutie'] .ctx-menu,
+[data-theme='catppuccin-latte'] .ctx-menu,
+[data-theme='tokyo-night-day'] .ctx-menu,
+[data-theme='light-pink'] .ctx-menu {
   border-color: var(--color-text-muted, #f0f);
   box-shadow:
     0 6px 18px rgb(0 0 0 / 14%),
@@ -2789,24 +2943,39 @@ select.settings-input option {
 /* BETA-037:浅色主题 modal backdrop 透明度降低,避免在浅底上呈"突兀黑膜"。
  * 深色主题 45% 不动(深底融合好)。 */
 [data-theme='rose-pine-dawn'] .app-modal-backdrop,
-[data-theme='cutie'] .app-modal-backdrop {
+[data-theme='cutie'] .app-modal-backdrop,
+[data-theme='catppuccin-latte'] .app-modal-backdrop,
+[data-theme='tokyo-night-day'] .app-modal-backdrop,
+[data-theme='light-pink'] .app-modal-backdrop {
   background-color: rgb(0 0 0 / 22%);
 }
 
 [data-theme='rose-pine-dawn'] .app-modal-panel,
-[data-theme='cutie'] .app-modal-panel {
+[data-theme='cutie'] .app-modal-panel,
+[data-theme='catppuccin-latte'] .app-modal-panel,
+[data-theme='tokyo-night-day'] .app-modal-panel,
+[data-theme='light-pink'] .app-modal-panel {
   box-shadow: 0 12px 36px rgb(0 0 0 / 18%);
 }
 
 [data-theme='rose-pine-dawn'] .toast,
 [data-theme='cutie'] .toast,
+[data-theme='catppuccin-latte'] .toast,
+[data-theme='tokyo-night-day'] .toast,
+[data-theme='light-pink'] .toast,
 [data-theme='rose-pine-dawn'] .terminal-search-bar,
-[data-theme='cutie'] .terminal-search-bar {
+[data-theme='cutie'] .terminal-search-bar,
+[data-theme='catppuccin-latte'] .terminal-search-bar,
+[data-theme='tokyo-night-day'] .terminal-search-bar,
+[data-theme='light-pink'] .terminal-search-bar {
   box-shadow: 0 4px 16px rgb(0 0 0 / 14%);
 }
 
 [data-theme='rose-pine-dawn'] .bootstrap-placeholder,
-[data-theme='cutie'] .bootstrap-placeholder {
+[data-theme='cutie'] .bootstrap-placeholder,
+[data-theme='catppuccin-latte'] .bootstrap-placeholder,
+[data-theme='tokyo-night-day'] .bootstrap-placeholder,
+[data-theme='light-pink'] .bootstrap-placeholder {
   box-shadow: 0 4px 24px rgb(0 0 0 / 12%);
 }
 

@@ -66,7 +66,12 @@ export type ThemeId =
   | 'one-dark-pro'
   | 'dracula'
   | 'tokyo-night'
-  | 'catppuccin-mocha';
+  | 'catppuccin-mocha'
+  // UI-2 起新增的浅色 / 可爱主题
+  | 'catppuccin-latte'
+  | 'tokyo-night-day'
+  | 'light-pink'
+  | 'fairyfloss';
 
 /**
  * 窗口外观风格 (M1-A 引入,Milestone 1)。
