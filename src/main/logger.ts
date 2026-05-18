@@ -28,7 +28,7 @@ import { promises as fs, createWriteStream, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
-type Channel = 'main' | 'llm';
+type Channel = 'main' | 'llm' | 'ime';
 
 const LEVEL_ORDER: Record<Level, number> = {
   debug: 10,
@@ -75,6 +75,7 @@ function makeChannelState(filePrefix: string): ChannelState {
 const channels: Record<Channel, ChannelState> = {
   main: makeChannelState('main'),
   llm: makeChannelState('llm'),
+  ime: makeChannelState('ime'),
 };
 
 function todayStr(): string {
@@ -216,6 +217,16 @@ export const logger = {
    */
   llm: (module: string, message: string, ...extra: unknown[]): void =>
     log('llm', 'info', module, message, ...extra),
+
+  /**
+   * IME-1 探针 dump — 写 `ime-YYYY-MM-DD.log`,不进主日志,不 mirror console。
+   * 永远 info 级(LEAK 报警 + 前置 EV 序列就是排障证据)。
+   * 用途:renderer 端 ring buffer 在 onData 触发疑似 LEAK 时通过 IPC 落到这里,
+   * 不依赖 DevTools 打开。观察期结束移除探针时,本通道一并退役。
+   * 详见 src/shared/ime-probe-ring.ts / docs/issues/ime-1-*.md。
+   */
+  ime: (module: string, message: string, ...extra: unknown[]): void =>
+    log('ime', 'info', module, message, ...extra),
 
   /** 绑定日志目录;调用之前的日志会缓存到内存,绑定后批量 flush。 */
   async setLogDir(dir: string): Promise<void> {

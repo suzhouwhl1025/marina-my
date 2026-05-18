@@ -78,11 +78,18 @@ import {
   EVENT_CHANNELS,
   type GetScrollbackPayload,
   type GetScrollbackResponse,
+  type ImeProbeDumpPayload,
+  type ImeProbeDumpResponse,
   type SendInputResponse,
   type SessionOutputPayload,
 } from '@shared/protocol';
 import type { SessionInfo, ThemeId } from '@shared/types';
 import { attachImeCompositionEndCleaner } from '@shared/ime-textarea-workaround';
+import {
+  createImeProbeRing,
+  isLikelyHistoryFlush,
+  type ImeProbeEntry,
+} from '@shared/ime-probe-ring';
 import { useAppDispatch, useAppState } from '../store';
 import { readClipboardText, writeClipboardText } from '../clipboard';
 import { Icon } from './icons';
@@ -1009,6 +1016,11 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
     term.open(container);
 
+    // IME-1 探针 ring buffer — 暂存最近 50 条 EV,onData 触发疑似 LEAK 时
+    // 一并 IPC 发到 main 端 logger.ime 落盘。capacity=50 覆盖 LEAK 前 1-2s
+    // 的 composition 事件,足够定位 race 路径而不会让单条日志体积失控。
+    const imeProbeRing = createImeProbeRing(50);
+
     // IME-1 workaround:挂 compositionend 兜底清空 helper-textarea。
     // 根因在 @xterm/xterm CompositionHelper:整个 xterm 只在 Enter / Ctrl+C
     // 时清 textarea,中文 IME 用户长时间不按 Enter 会累到几百几千字符;再叠加
@@ -1033,23 +1045,32 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
     // [IME-1 PROBE B] 临时探针:追踪 helper-textarea 的 composition 时序与
     // keydown 229 事件,用来定位"中文 IME 按标点冲刷历史"的触发路径。
-    // workaround 已上线,探针保留作为长期监控:若 LEAK 再现说明 workaround
-    // 没盖到的 case,观察两周无报警后整体移除(连同 onData 内的 PROBE A)。
-    // 不挂 cleanup:listener 随 term.dispose() 移除 textarea 一起被 GC。
+    //
+    // 升级(2026-05-18 第二轮):原先直接 console.warn 每条 EV,
+    //   (1) 中文用户日常输入每个标点都打一条 console,噪音淹没真问题
+    //   (2) 真 LEAK 触发时若 DevTools 没开,前置 EV 序列就丢了 — 而 LEAK 判定
+    //       race 路径必须靠 LEAK 前面那几条 EV
+    // 改成 ring buffer (50 条) 暂存,onData 触发疑似 LEAK 时一次性 IPC dump
+    // 到 main 端 logger.ime 通道落盘。详见 @shared/ime-probe-ring。
+    //
+    // 不挂 cleanup:listener 随 term.dispose() 移除 textarea 一起被 GC;
+    // ring 在 useEffect 结束闭包内,组件 unmount 时整个引用消失。
     try {
       const helperTa = container.querySelector(
         '.xterm-helper-textarea',
       ) as HTMLTextAreaElement | null;
       if (helperTa) {
-        const trace = (tag: string) => (e: Event) => {
-          console.warn('[IME-EV]', {
-            t: performance.now().toFixed(1),
-            ev: tag,
-            data: (e as CompositionEvent).data ?? '',
-            taLen: helperTa.value.length,
-            taTail: helperTa.value.slice(-40),
-          });
-        };
+        const trace =
+          (tag: ImeProbeEntry['ev']) =>
+          (e: Event): void => {
+            imeProbeRing.push({
+              t: performance.now().toFixed(1),
+              ev: tag,
+              data: (e as CompositionEvent).data ?? '',
+              taLen: helperTa.value.length,
+              taTail: helperTa.value.slice(-40),
+            });
+          };
         helperTa.addEventListener('compositionstart', trace('start'));
         helperTa.addEventListener('compositionupdate', trace('update'));
         helperTa.addEventListener('compositionend', trace('end'));
@@ -1057,7 +1078,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
           // 微软拼音标点 auto-convert 走 keyCode 229 + !isComposing 路径,
           // 不经过 compositionstart — 只能从 keydown 抓
           if (e.keyCode === 229) {
-            console.warn('[IME-EV]', {
+            imeProbeRing.push({
               t: performance.now().toFixed(1),
               ev: 'kd229',
               key: e.key,
@@ -1341,22 +1362,51 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
     // XTM-7:打字时若有待定 resize,先 flush 再发输入 — 拖窗 + 立刻打字
     // 场景下避免 PTY 用旧 cols/rows 处理 prompt 折行错位。
     const dataHandler = term.onData((data) => {
-      // [IME-1 PROBE A] 临时探针:正常一次 IME 提交基本 ≤ 6 字,> 20 字
-      // 强烈怀疑被 CompositionHelper 的 substring(start) 把 textarea 历史
-      // 一起冲刷出来。head/tail + textarea 末尾足以判断是否子串包含关系。
-      // 拿到证据后整体移除(连同 term.open 后的 PROBE B)。
-      if (data.length > 20) {
-        const ta = container.querySelector(
-          '.xterm-helper-textarea',
-        ) as HTMLTextAreaElement | null;
-        console.warn('[IME-LEAK]', {
+      // [IME-1 PROBE A] 临时探针 — 检测 onData 收到的 data 是否疑似
+      // "textarea 累积历史被冲刷出去"。判定下沉到 isLikelyHistoryFlush
+      // (依赖 data.length + taLen 两个字段,不依赖子串比较,边界稳健):
+      //   - data.length > 20  AND  taLen >= data.length + 8
+      //
+      // 原阈值 `data.length > 20` 会把"用户一口气输入 24 字按 Enter"的
+      // 正常长 IME 提交误报为 leak (实例:2026-05-18 用户 head/tail/taTail
+      // 三字段完全一致的现场)。新判定通过 taLen ≥ data.length + 8 的富余
+      // 把"textarea 内容就是 data 本身"的长输入场景排除。
+      //
+      // 触发时:
+      //   - push 一条 ev='leak' 到 ring(包含 leakLen/head/tail 字段)
+      //   - drain ring 整体经 IPC 发到 main 端 logger.ime 落盘 — 不依赖
+      //     DevTools 打开
+      //   - 同时 console.warn 一条,DevTools 开着的话第一时间能看到
+      const ta = container.querySelector(
+        '.xterm-helper-textarea',
+      ) as HTMLTextAreaElement | null;
+      const taLen = ta?.value.length ?? -1;
+      if (isLikelyHistoryFlush(data.length, taLen)) {
+        const taTail = ta?.value.slice(-60) ?? '';
+        const leakEntry: ImeProbeEntry = {
           t: performance.now().toFixed(1),
-          len: data.length,
-          head: data.slice(0, 60),
-          tail: data.slice(-30),
-          taLen: ta?.value.length ?? -1,
-          taTail: ta?.value.slice(-60) ?? '',
-        });
+          ev: 'leak',
+          taLen,
+          taTail,
+          leakLen: data.length,
+          leakHead: data.slice(0, 60),
+          leakTail: data.slice(-30),
+        };
+        imeProbeRing.push(leakEntry);
+        const entries = imeProbeRing.drain();
+        console.warn('[IME-LEAK]', leakEntry);
+        // fire-and-forget — IPC 失败不阻塞用户输入,main handler 已有兜底
+        void window.api
+          .invoke<ImeProbeDumpPayload, ImeProbeDumpResponse>(
+            COMMAND_CHANNELS.LOGGER_IME_DUMP,
+            {
+              meta: { t: leakEntry.t, sessionId: session.id },
+              entries,
+            },
+          )
+          .catch((err) => {
+            console.warn('[IME-1] ime-dump IPC failed', err);
+          });
       }
       if (resizeTimer !== null) {
         clearTimeout(resizeTimer);

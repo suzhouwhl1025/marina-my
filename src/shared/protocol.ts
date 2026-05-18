@@ -133,6 +133,13 @@ export const COMMAND_CHANNELS = {
 
   /** BETA-031:AI 助手测试连接 — 主进程用 SDK 跑一次 ping,返回成功 / 错误描述 */
   AI_TEST_CONNECTION: 'cmd:ai:test-connection',
+
+  /**
+   * IME-1 探针 dump — renderer 在 onData 检测到疑似 LEAK 时,把 ring buffer
+   * 里的前置 EV 序列 + LEAK 详情一次性发到 main 端 logger.ime 通道落盘,
+   * 不依赖 DevTools 打开。详见 src/shared/ime-probe-ring.ts。
+   */
+  LOGGER_IME_DUMP: 'cmd:logger:ime-dump',
 } as const;
 
 export type CommandChannel = (typeof COMMAND_CHANNELS)[keyof typeof COMMAND_CHANNELS];
@@ -744,4 +751,33 @@ export interface SettingsChangedPayload {
 export interface TemplateListUpdatedPayload {
   templates: Template[];
   defaultTemplateId: string;
+}
+
+/**
+ * IME-1 探针 dump payload。entries 是 ring 的快照(按时序),最后一条
+ * 通常是 ev='leak'(若不是,说明 ring 里有更新的 EV 把 leak 挤出去了)。
+ * meta 给 main 端写日志时定位用,不重复 entries 里的信息。
+ */
+export interface ImeProbeDumpPayload {
+  meta: {
+    /** renderer 端的 performance.now() 时间戳字符串(便于和 entries 对齐) */
+    t: string;
+    /** session id,用来在多个终端里区分哪一个触发的 */
+    sessionId: string;
+  };
+  entries: Array<{
+    t: string;
+    ev: 'start' | 'update' | 'end' | 'kd229' | 'leak';
+    data?: string;
+    key?: string;
+    taLen: number;
+    taTail: string;
+    leakLen?: number;
+    leakHead?: string;
+    leakTail?: string;
+  }>;
+}
+
+export interface ImeProbeDumpResponse {
+  ok: true;
 }

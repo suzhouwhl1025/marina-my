@@ -101,6 +101,8 @@ import {
   type UpdateSettingsPayload,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
+  type ImeProbeDumpPayload,
+  type ImeProbeDumpResponse,
 } from '@shared/protocol';
 import type { AppSnapshot, Settings, Template } from '@shared/types';
 import type { WindowManager } from './window-manager';
@@ -109,6 +111,7 @@ import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { AIClient } from './ai-client';
+import { logger } from './logger';
 import { setQuitting } from './index';
 
 export interface IpcLayerDeps {
@@ -683,6 +686,27 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       // BETA-031:AI 助手设置页"测试连接"按钮调用。失败信息透传 UI。
       if (!aiClient) return { ok: false, message: 'AI client 未初始化' };
       return aiClient.testConnection();
+    },
+  );
+
+  // IME-1 探针 dump — renderer 端 ring buffer 触发 LEAK 时一次性送过来。
+  // 不依赖 DevTools 打开,事后可通过 `cmd:system:open-logs-dir` 按钮直达
+  // `%APPDATA%/Marina/logs/ime-YYYY-MM-DD.log` 查看。
+  // 设计:无 throw、无大规模 stringify(已在 logger.format 内做 JSON.stringify
+  // 兜底),让 renderer 的 fire-and-forget 调用永不影响主链路。
+  ipcMain.handle(
+    COMMAND_CHANNELS.LOGGER_IME_DUMP,
+    (
+      _e,
+      envelope: CommandEnvelope<ImeProbeDumpPayload>,
+    ): ImeProbeDumpResponse => {
+      const { meta, entries } = envelope.payload;
+      logger.ime(
+        'ime-probe',
+        `leak dump session=${meta.sessionId} t=${meta.t} entries=${entries.length}`,
+        { meta, entries },
+      );
+      return { ok: true };
     },
   );
 

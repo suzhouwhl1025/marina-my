@@ -1,6 +1,6 @@
 # IME-1 · 中文 IME 偶发"按标点冲刷一大段历史输入"
 
-**状态**:**workaround 已实施(2026-05-18),监控中** — `compositionend` 延迟 16ms 清空 helper-textarea,核心逻辑在 `src/shared/ime-textarea-workaround.ts`,7 条护栏单测就位。`[IME-LEAK]` 探针保留观察。
+**状态**:**workaround 已实施(2026-05-18),探针已二次升级(2026-05-18 当晚),监控中** — `compositionend` 延迟 16ms 清空 helper-textarea,核心逻辑在 `src/shared/ime-textarea-workaround.ts`,7 条护栏单测就位。探针不再 console.warn 每条 EV(噪音过大且 DevTools 没开就丢现场),改为 ring buffer + LEAK 触发时 IPC dump 到 main `logger.ime` 落盘 `%APPDATA%/Marina/logs/ime-YYYY-MM-DD.log`。LEAK 判定从"`data.length > 20`"升级为"`data.length > 20 AND taLen ≥ data.length + 8`",排除"正常长 IME 提交"的误报(2026-05-18 用户实例:24 字一次性输入,head/tail/taTail 三字段完全一致)。
 **优先级**:P1(影响中文用户日常输入体感,但偶发性;切英文输入法即恢复)
 **首次报告**:2026-05-16,用户日常使用 Marina 时偶发,凭对话框输入残影确认
 **复现率**:偶发,不是每次都触发;仅在中文输入法开启时;切英文输入法立即消失
@@ -152,14 +152,66 @@ if (helperTa) {
       理由见下"实施决策记录")
 - [x] 写护栏单测防止未来误删 listener(`src/shared/ime-textarea-workaround.test.ts`,
       7 条覆盖延迟生效 / 不抢 substring 窗口 / 连按合并 / detach 清理 pending 等)
+- [x] 探针升级:ring buffer + 持久化 LEAK 判定升级(2026-05-18 当晚,见下"探针 v2 升级")
 - [ ] 跑回归:确认 Enter / Ctrl+C 清 textarea 路径仍工作,中文长段输入不丢字
       (手动,中文 IME 必须人测)
 - [ ] **观察期**:dev / beta 版本运行两周(2026-05-18 → 2026-06-01),
-      Console 持续 filter `[IME-LEAK]`,**无报警则推进**下一项
+      不再依赖 DevTools — 读 `%APPDATA%/Marina/logs/ime-*.log`,**无报警则推进**下一项
 - [ ] 观察期通过后,**移除两个探针**(grep `IME-1 PROBE` / `IME-LEAK` / `IME-EV`
-      一次性清掉);若期间再现 LEAK,在此工单加复现证据 + 分析新 race 路径
+      一次性清掉,连同 `ime-probe-ring.ts` / `LOGGER_IME_DUMP` channel /
+      `logger.ime` 通道一起退役);若期间再现 LEAK,在此工单加复现证据 +
+      分析新 race 路径
 - [ ] 跟一下 xterm.js 上游 issue,如果将来上游修了,把本 workaround 删掉
       (届时护栏测试也一并移除,或改成"断言上游已修")
+
+## 探针 v2 升级(2026-05-18 当晚)
+
+**触发**:用户在没开 DevTools 的情况下报告 `[IME-LEAK]` 出现,但 console 里只有
+"Object" 占位 — 字段全丢,定位不了哪条 race。同晚补打一次现场 `len=24
+head=tail=taTail=24 字`,确认这是"正常一次性长 IME 提交"被探针误报为 leak。
+两个问题:**(a) 阈值粗糙、(b) 现场易失**。
+
+**实施**:
+
+1. **LEAK 判定升级** — `src/shared/ime-probe-ring.ts#isLikelyHistoryFlush`:
+   - 原条件:`data.length > 20`
+   - 新条件:`data.length > 20 AND taLen >= data.length + 8`
+   - 物理意义:textarea 必须比 data 严格"多出富余" — 否则 textarea 内容就是
+     data 本身,是正常长输入,不是历史冲刷
+
+2. **EV 改 ring buffer + LEAK 一次性 dump**:
+   - PROBE B 的 `composition* / keydown(229)` 不再 `console.warn`,改 push 到
+     `imeProbeRing`(capacity=50,满了覆盖最老)
+   - PROBE A 检测到 LEAK 时:push 一条 `ev='leak'` 到 ring,drain 整个 ring
+     一次性 IPC 发到 `cmd:logger:ime-dump`,main 端 `logger.ime` 落盘
+     `%APPDATA%/Marina/logs/ime-YYYY-MM-DD.log`(按日切、5MB rotate、保 7 天,
+     与 `llm` 通道同套设施,不 mirror console)
+   - 仍保留一次 `console.warn('[IME-LEAK]', ...)` 第一时间在 DevTools 可见
+
+3. **新文件 / 文件变更**:
+   - 新:`src/shared/ime-probe-ring.ts`(57 行,纯函数 + duck-typed)
+   - 新:`src/shared/ime-probe-ring.test.ts`(10 条护栏单测覆盖 ring 满覆盖
+     / drain 清空 / `isLikelyHistoryFlush` 边界)
+   - 改:`src/shared/protocol.ts`(加 `LOGGER_IME_DUMP` channel + payload/response)
+   - 改:`src/main/logger.ts`(`Channel` 加 `'ime'`,加 `logger.ime(...)` 方法)
+   - 改:`src/main/ipc.ts`(handler 接 dump 后调 `logger.ime`)
+   - 改:`src/renderer/components/TerminalView.tsx`(PROBE A/B 改造)
+
+**怎么读 `ime-*.log`**:
+
+设置页 → 数据 → "打开日志目录"(或 `cmd:system:open-logs-dir`),找
+`ime-YYYY-MM-DD.log`。每条 LEAK 是一行 JSON:
+```
+2026-05-18T22:00:01.234Z [INFO] [ime-probe] leak dump session=<id> t=501654.0 entries=27 {"meta":{...},"entries":[{...},...,{"ev":"leak",...}]}
+```
+按 docs 里的"3 条 race 路径对照表"看 entries 末尾(最后一条 `ev:'leak'`)前面
+的 EV 序列即可定位。
+
+**预期日志体积**:LEAK 偶发,每次 dump ~3-5KB;`ime-*.log` 日均预计 ≤ 100KB,
+5MB 限制下绰绰有余。
+
+**退役条件**:同上面"观察期"待办,workaround 真正生效则一并删 `ime-probe-ring.*`
+/ `LOGGER_IME_DUMP` channel / `logger.ime` 通道。
 
 ## 实施决策记录(2026-05-18)
 
