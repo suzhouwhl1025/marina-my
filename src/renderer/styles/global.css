@@ -1104,23 +1104,28 @@ html[data-maximized='true'] .app-root.with-shell {
   font-size: 10px;
 }
 
+/* UI-1:无边框 ghost 风格 — 删 1px solid var(--color-bg-elevated) 实色描边,
+ * 跟同批 ctx-menu / 4 处 sidebar 已删 border 一致。按钮的 affordance 完全靠
+ * lucide plus icon 形状本身 + hover 出 bg,跟 .tab-close / .titlebar-btn 同种语言。
+ * 原 + 是 14px 字符,改 icon 后字号声明不再相关 — 已移除。 */
 .sidebar-category-action {
   background: transparent;
-  border: 1px solid var(--color-bg-elevated, #f0f);
-  color: var(--color-text-primary, #f0f);
+  border: none;
+  color: var(--color-text-muted, #f0f);
   width: 18px;
   height: 18px;
   border-radius: 3px;
-  font-size: 14px;
-  line-height: 14px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .sidebar-category-action:hover {
   background-color: var(--color-bg-active, #f0f);
+  color: var(--color-text-primary, #f0f);
 }
 
 .sidebar-empty {

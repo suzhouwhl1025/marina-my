@@ -23,6 +23,7 @@ import {
   useRef,
   type DragEvent,
   type MouseEvent,
+  type ReactNode,
 } from 'react';
 import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from 'lucide-react';
 import {
@@ -226,7 +227,7 @@ export function Sidebar(): JSX.Element {
           title={t('sidebar.category.bookmark')}
           iconName="bookmark"
           paths={state.pathTree.bookmarks}
-          actionLabel="+"
+          actionLabel={<Icon name="plus" size={12} />}
           actionTitle={t('sidebar.addBookmark.title')}
           onAction={() => void handlePickFolder()}
         />
@@ -234,7 +235,7 @@ export function Sidebar(): JSX.Element {
           title={t('sidebar.category.temporary')}
           iconName="clock"
           paths={state.pathTree.temporary}
-          actionLabel="+"
+          actionLabel={<Icon name="plus" size={12} />}
           actionTitle={t('sidebar.addTemporary.title')}
           onAction={() => void handlePickFolderForTemp()}
         />
@@ -259,7 +260,8 @@ interface CategoryProps {
   title: string;
   iconName: IconName;
   paths: PathNode[];
-  actionLabel?: string;
+  /** affordance 内容 — 通常是 lucide icon (<Icon name="plus" .../>) */
+  actionLabel?: ReactNode;
   actionTitle?: string;
   onAction?: () => void;
 }
