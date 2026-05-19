@@ -302,7 +302,7 @@ function Category({
       ) : (
         <ul className="sidebar-paths">
           {paths.map((p) => {
-            const override = displayNames.get(p.id);
+            const override = p.kind === 'ssh' ? undefined : displayNames.get(p.id);
             return (
               <PathItem
                 key={p.id}
@@ -336,8 +336,17 @@ function PathItem({
   );
   const activeCount = sessions.length;
   // BETA-014:优先用 Category 算好的去重名;退到本节点 displayName / 末段
+  const sshProfile = node.sshProfileId
+    ? state.sshProfiles.find((p) => p.id === node.sshProfileId)
+    : undefined;
   const displayName =
-    displayNameOverride ?? node.displayName ?? lastSegmentOf(node.path);
+    displayNameOverride ??
+    node.displayName ??
+    formatPathDisplayName(node, sshProfile?.name);
+  const displayPath =
+    node.kind === 'ssh' && sshProfile
+      ? `${sshProfile.username}@${sshProfile.host}:${node.path}`
+      : node.path;
 
   // M1-C:行内重命名 (仅收藏支持)
   const [renaming, setRenaming] = useState(false);
@@ -359,7 +368,7 @@ function PathItem({
     if (!v || v === displayName) return;
     window.api
       .invoke(COMMAND_CHANNELS.BOOKMARK_RENAME, {
-        pathId: node.path,
+        pathId: node.id,
         newDisplayName: v,
       })
       .catch((err: unknown) => {
@@ -388,9 +397,9 @@ function PathItem({
     try {
       const dims = state.lastTerminalDims;
       const res = await window.api.invoke<unknown, CreateSessionResponse>(
-        COMMAND_CHANNELS.SESSION_CREATE,
+          COMMAND_CHANNELS.SESSION_CREATE,
         {
-          pathId: node.path,
+          pathId: node.id,
           templateId,
           cols: dims.cols,
           rows: dims.rows,
@@ -405,7 +414,7 @@ function PathItem({
       const msg = err instanceof Error ? err.message : String(err);
       toast.push({
         kind: 'error',
-        message: `打开终端失败 (${node.path}):${msg}`,
+        message: `打开终端失败 (${displayPath}):${msg}`,
         durationMs: 10000,
       });
     }
@@ -424,21 +433,23 @@ function PathItem({
     // 通用项
     items.push({
       label: '复制路径',
-      onSelect: () => copyToClipboard(node.path, '路径'),
+      onSelect: () => copyToClipboard(displayPath, '路径'),
     });
-    items.push({
-      label: '在 Explorer 中显示',
-      onSelect: () => {
-        window.api
-          .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path: node.path })
-          .catch((err: unknown) =>
-            toast.push({
-              kind: 'error',
-              message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
-            }),
-          );
-      },
-    });
+    if (node.kind !== 'ssh') {
+      items.push({
+        label: '在 Explorer 中显示',
+        onSelect: () => {
+          window.api
+            .invoke(COMMAND_CHANNELS.SYSTEM_SHOW_IN_EXPLORER, { path: node.path })
+            .catch((err: unknown) =>
+              toast.push({
+                kind: 'error',
+                message: `打开 Explorer 失败:${err instanceof Error ? err.message : String(err)}`,
+              }),
+            );
+        },
+      });
+    }
 
     if (node.category === 'bookmarked') {
       items.push({ divider: true, label: '' });
@@ -448,7 +459,7 @@ function PathItem({
         danger: true,
         onSelect: () => {
           window.api
-            .invoke(COMMAND_CHANNELS.BOOKMARK_REMOVE, { pathId: node.path })
+            .invoke(COMMAND_CHANNELS.BOOKMARK_REMOVE, { pathId: node.id })
             .then(() => toast.push({ kind: 'success', message: `已移除收藏 ${displayName}` }))
             .catch((err: unknown) =>
               toast.push({
@@ -469,7 +480,7 @@ function PathItem({
           onSelect: () => {
             window.api
               .invoke(COMMAND_CHANNELS.BOOKMARK_SET_DEFAULT_TEMPLATE, {
-                pathId: node.path,
+                pathId: node.id,
                 templateId: t.id,
               })
               .catch((err: unknown) =>
@@ -487,7 +498,18 @@ function PathItem({
         label: '加入收藏',
         onSelect: () => {
           window.api
-            .invoke(COMMAND_CHANNELS.BOOKMARK_ADD, { path: node.path })
+            .invoke(
+              node.kind === 'ssh'
+                ? COMMAND_CHANNELS.REMOTE_BOOKMARK_ADD
+                : COMMAND_CHANNELS.BOOKMARK_ADD,
+              node.kind === 'ssh'
+                ? {
+                    sshProfileId: node.sshProfileId,
+                    remotePath: node.path,
+                    ...(node.displayName ? { displayName: node.displayName } : {}),
+                  }
+                : { path: node.path },
+            )
             .then(() => toast.push({ kind: 'success', message: `已加入收藏 ${displayName}` }))
             .catch((err: unknown) =>
               toast.push({
@@ -503,7 +525,7 @@ function PathItem({
           danger: true,
           onSelect: () => {
             window.api
-              .invoke(COMMAND_CHANNELS.PATH_REMOVE_FROM_RECENT, { path: node.path })
+              .invoke(COMMAND_CHANNELS.PATH_REMOVE_FROM_RECENT, { path: node.id })
               .catch((err: unknown) =>
                 toast.push({
                   kind: 'error',
@@ -530,7 +552,7 @@ function PathItem({
         onClick={handleSelect}
         onDoubleClick={() => void handleDoubleClick()}
         onContextMenu={handleContextMenu}
-        title={node.invalid ? `${node.path}\n⚠️ 路径不可访问` : node.path}
+        title={node.invalid ? `${displayPath}\n⚠️ 路径不可访问` : displayPath}
       >
         {/*
           F2(beta 勘误2):左侧固定 12px 槽位,按优先级选一个内容渲染 —
@@ -840,6 +862,12 @@ function samePath(a: string, b: string): boolean {
   // Windows 上 C:\Foo 和 c:\foo 指同一目录。SessionManager 已经把卷符大写,
   // 但 OSC 报告的 cwd 卷符大小写可能不一致,这里再松一层。
   return a.toLowerCase() === b.toLowerCase();
+}
+
+function formatPathDisplayName(node: PathNode, sshProfileName?: string): string {
+  const leaf = lastSegmentOf(node.path);
+  if (node.kind !== 'ssh') return leaf;
+  return `${sshProfileName ?? 'SSH'}:${leaf}`;
 }
 
 function lastSegmentOf(path: string): string {

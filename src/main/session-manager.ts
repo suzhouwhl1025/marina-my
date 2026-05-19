@@ -69,6 +69,7 @@ import xtermSerialize from '@xterm/addon-serialize';
 const { SerializeAddon } = xtermSerialize;
 type SerializeAddon = InstanceType<typeof SerializeAddon>;
 import { Osc1337Parser } from './osc1337-parser';
+import { pathRefFromId } from './path-manager';
 import { getPlatformAdapter, type PlatformAdapter, type ShellInfo } from './platform';
 import { buildSpawnEnv, injectTerminalHintEnv, validateDimensions } from './pty-utils';
 import { logger } from './logger';
@@ -393,6 +394,15 @@ export interface CreateSessionInput {
   ownerWindowId: string;
   cols: number;
   rows: number;
+  sshProfile?: {
+    id: string;
+    name: string;
+    host: string;
+    port: number;
+    username: string;
+    authType: 'agent' | 'keyFile' | 'password';
+    keyFilePath?: string;
+  };
   /**
    * 勘误第二轮 #3:可选 shell id 覆盖。给定时跳过 pickShell 的 settings 兜底,
    * 直接用此 id 命中 detectShells 列表里的 shell。EmptyPathState 的"检测到的
@@ -536,7 +546,23 @@ export class SessionManager extends EventEmitter {
       );
     }
     const shell = pickShell(shells, this.settingsManager.get(), input.shellIdOverride);
-    const cwd = input.pathId || homedir();
+    const pathRef = pathRefFromId(input.pathId || homedir());
+    const isSsh = pathRef.kind === 'ssh';
+    if (isSsh && !input.sshProfile) {
+      throw new SessionManagerError(
+        'PathNotFound',
+        `SSH 路径缺少 profile: pathId="${input.pathId}"`,
+      );
+    }
+    const cwd = isSsh ? homedir() : pathRef.path || homedir();
+    const sessionPathId = isSsh ? input.pathId : cwd;
+    const displayShell = isSsh
+      ? ({
+          ...shell,
+          displayName: 'SSH',
+          executablePath: 'ssh',
+        } satisfies ShellInfo)
+      : shell;
 
     // cwd 预校验:不存在 / 不是目录 → 直接抛 CwdNotAccessible,带友好消息。
     // 否则交给 node-pty,ConPTY 在 CreateProcess 时会因 lpCurrentDirectory 失败
@@ -544,7 +570,7 @@ export class SessionManager extends EventEmitter {
     // 完全看不出问题在 cwd。此外 Explorer 集成场景下用户可能把右键时存在的
     // 文件夹在 Marina 处理过程中删了,这里给出明确兜底。
     // 单测用伪路径,通过 options.skipCwdValidation=true 跳过此检查。
-    if (!this.skipCwdValidation) {
+    if (!isSsh && !this.skipCwdValidation) {
       try {
         if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
           throw new SessionManagerError(
@@ -564,13 +590,15 @@ export class SessionManager extends EventEmitter {
     }
 
     const hookFile = this.hookFileResolver(shell.id);
-    const launchParams = this.platformAdapter.buildShellLaunchParams(
-      shell,
-      hookFile,
-      template.command
-        ? { command: template.command, args: template.args }
-        : undefined,
-    );
+    const launchParams = isSsh
+      ? buildSshLaunchParams(input.sshProfile!, pathRef.path)
+      : this.platformAdapter.buildShellLaunchParams(
+          shell,
+          hookFile,
+          template.command
+            ? { command: template.command, args: template.args }
+            : undefined,
+        );
 
     const env = buildSpawnEnv(process.env, SPAWN_ENV_SKIP);
     // BETA-001:Windows 上 process.env.PATH 是启动时的快照,装新软件后不会自动
@@ -597,9 +625,28 @@ export class SessionManager extends EventEmitter {
     // reg / wmic / ssh 等)从 PATH 上消失。Linux / macOS 走 no-op。
     this.platformAdapter.normalizeSpawnEnv(env);
 
+    let spawnFile: string;
+    if (isSsh) {
+      const resolvedSsh = this.platformAdapter.resolveExecutable('ssh', env);
+      if (!resolvedSsh) {
+        throw new SessionManagerError(
+          'PtySpawnFailed',
+          `无法定位本机 ssh.exe,无法连接 SSH profile "${input.sshProfile!.name}" cwd="${cwd}". ` +
+            `可能原因: (1) Windows OpenSSH Client 未安装; ` +
+            `(2) PATH 缺少 %SystemRoot%\\System32\\OpenSSH; ` +
+            `(3) Marina 继承的环境变量损坏。请在 Windows 设置 → 可选功能中安装 OpenSSH Client,` +
+            `或确认 C:\\Windows\\System32\\OpenSSH\\ssh.exe 存在。`,
+          { executable: 'ssh', cwd, sshProfileId: input.sshProfile!.id },
+        );
+      }
+      spawnFile = resolvedSsh;
+    } else {
+      spawnFile = shell.executablePath;
+    }
+
     let pty: IPty;
     try {
-      pty = this.spawnFn(shell.executablePath, launchParams.args, {
+      pty = this.spawnFn(spawnFile, launchParams.args, {
         // 和 injectTerminalHintEnv 写到 env.TERM 的值保持一致 —— node-pty 的
         // `name` 主要影响内部 winpty 路径,但环境变量 TERM 才是子进程实际看到
         // 的值。两边对齐避免观察日志时困惑。
@@ -616,26 +663,29 @@ export class SessionManager extends EventEmitter {
     } catch (err) {
       throw new SessionManagerError(
         'PtySpawnFailed',
-        `无法启动 "${shell.executablePath}" cwd="${cwd}". ` +
-          `可能原因: (1) shell 不在 PATH; (2) cwd 不可访问; ` +
+        `无法启动 "${spawnFile}" cwd="${cwd}". ` +
+          `可能原因: ${isSsh ? '(1) ssh.exe 不存在或不可执行' : '(1) shell 不在 PATH'}; ` +
+          `(2) cwd 不可访问; ` +
           `(3) node-pty 原生模块未为当前 Electron 重编译。原始错误: ${
             err instanceof Error ? err.message : String(err)
           }`,
-        { shellPath: shell.executablePath, cwd },
+        { shellPath: spawnFile, cwd },
       );
     }
 
     const sessionId = randomUUID();
     const info: SessionInfo = {
       id: sessionId,
-      pathId: input.pathId,
+      pathId: sessionPathId,
       templateId: template.id,
-      originalCwd: cwd,
-      currentCwd: cwd,
+      originalCwd: isSsh ? pathRef.path : cwd,
+      currentCwd: isSsh ? pathRef.path : cwd,
       cols: dims.cols,
       rows: dims.rows,
       pid: pty.pid,
-      displayName: pickDisplayName(template, shell),
+      displayName: isSsh
+        ? `${input.sshProfile!.name}:${pathRef.path}`
+        : pickDisplayName(template, displayShell),
       ownerWindowId: input.ownerWindowId || null,
       state: 'idle',
       createdAt: Date.now(),
@@ -711,7 +761,7 @@ export class SessionManager extends EventEmitter {
     // 对应工单库 BETA-008、软件定义书 8.3 节(ADR-014)。
 
     // 把 session 挂到 path 上 (PathManager 自动触发分类流转 + emit)
-    this.pathManager.attachSession(sessionId, input.pathId);
+    this.pathManager.attachSession(sessionId, sessionPathId);
 
     // 事件顺序见 CP-2 的 createSession (避免 renderer 闪 EmptyPathState)
     this.emit('sessionCreated', { ...info });
@@ -1696,6 +1746,53 @@ function pickDisplayName(template: Template, shell: ShellInfo): string {
   return inferDisplayName(shell.executablePath);
 }
 
+function buildSshLaunchParams(
+  profile: {
+    host: string;
+    port: number;
+    username: string;
+    authType: 'agent' | 'keyFile' | 'password';
+    keyFilePath?: string;
+  },
+  remoteCwd: string,
+): { args: string[]; env: Record<string, string> } {
+  const args = [
+    '-tt',
+    '-p',
+    String(profile.port),
+    '-o',
+    'ServerAliveInterval=30',
+  ];
+  if (profile.authType === 'keyFile' && profile.keyFilePath) {
+    args.push('-i', profile.keyFilePath);
+  }
+  args.push(`${profile.username}@${profile.host}`);
+  args.push(buildRemoteLoginCommand(remoteCwd));
+  return { args, env: {} };
+}
+
+function buildRemoteLoginCommand(remoteCwd: string): string {
+  const cwd = remoteCwd.trim() || '~';
+  let cdCommand: string;
+  if (cwd === '~') {
+    // `cd '~'` 会把 ~ 当普通目录名,不会展开到 home。无参数 cd 是 POSIX
+    // shell 进入 $HOME 的标准写法,也避开不同远端 shell 对 tilde expansion
+    // 的细节差异。
+    cdCommand = 'cd';
+  } else if (cwd.startsWith('~/')) {
+    // 不能把整段 `~/repo` 单引号包起来,否则 ~ 不展开。用 "$HOME"/'repo'
+    // 拼接:home 由远端 shell 展开,后半段仍保持严格 quote,支持空格等字符。
+    cdCommand = `cd "$HOME"/${shQuote(cwd.slice(2))}`;
+  } else {
+    cdCommand = `cd ${shQuote(cwd)}`;
+  }
+  return `${cdCommand} && exec "\${SHELL:-/bin/sh}" -l`;
+}
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
  * OSC 标题"启动垃圾"识别(TIT-1):
  *
@@ -1828,6 +1925,10 @@ function createNoopAdapter(): PlatformAdapter {
           executablePath: process.env['SHELL'] ?? '/bin/sh',
         },
       ];
+    },
+    resolveExecutable(commandName) {
+      if (!commandName.trim()) return null;
+      return commandName;
     },
     buildShellLaunchParams(_shell, _hookFilePath, _commandToRun) {
       return { args: [], env: {} };

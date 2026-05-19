@@ -10,6 +10,9 @@
  * @对应文档章节: 软件定义书.md 12.2;Explorer 右键集成工作记录
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   WindowsAdapter,
   __setReadRegistryPathImplForTest,
@@ -245,6 +248,43 @@ describe('WindowsAdapter — getRefreshedPath (BETA-001 + BETA-ENV-1)', () => {
       if (origPath === undefined) delete process.env.PATH;
       else process.env.PATH = origPath;
     }
+  });
+});
+
+describe('WindowsAdapter — resolveExecutable', () => {
+  let tempDir: string | null = null;
+
+  afterEach(() => {
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it('按 PATH + PATHEXT 解析 ssh → ssh.exe', () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'marina-win-exe-'));
+    const sshPath = join(tempDir, 'ssh.exe');
+    writeFileSync(sshPath, '');
+
+    const adapter = new WindowsAdapter();
+    const resolved = adapter.resolveExecutable('ssh', {
+      PATH: tempDir,
+      PATHEXT: '.COM;.EXE;.BAT;.CMD',
+      SystemRoot: 'C:\\DefinitelyMissingWindowsRoot',
+    });
+    expect(resolved).toBeTruthy();
+    expect(resolved!.toLowerCase()).toBe(sshPath.toLowerCase());
+  });
+
+  it('找不到命令时返回 null,由调用方生成明确诊断', () => {
+    const adapter = new WindowsAdapter();
+    expect(
+      adapter.resolveExecutable('definitely-not-a-real-command', {
+        PATH: 'C:\\missing',
+        PATHEXT: '.EXE',
+        SystemRoot: 'C:\\Windows',
+      }),
+    ).toBeNull();
   });
 });
 

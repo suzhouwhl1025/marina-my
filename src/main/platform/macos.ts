@@ -31,6 +31,11 @@ export class MacOSAdapter implements PlatformAdapter {
   async detectShells(): Promise<ShellInfo[]> {
     throw new Error(NOT_IMPLEMENTED);
   }
+  resolveExecutable(commandName: string): string | null {
+    if (!commandName.trim()) return null;
+    if (commandName.startsWith('/')) return commandName;
+    return commandName;
+  }
   buildShellLaunchParams(): { args: string[]; env: Record<string, string> } {
     throw new Error(NOT_IMPLEMENTED);
   }

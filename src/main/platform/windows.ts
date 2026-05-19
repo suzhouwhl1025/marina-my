@@ -21,7 +21,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { logger } from '../logger';
 import type { DefaultBookmarkSeed, PlatformAdapter, ShellInfo } from './index';
@@ -84,16 +84,22 @@ interface ShellCandidate {
 
 function getShellCandidates(): ShellCandidate[] {
   const env = process.env;
-  const programFiles = env['ProgramFiles'] ?? 'C:\\Program Files';
-  const programFilesX86 = env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
+  const programFiles = uniqueStrings([
+    'C:\\Program Files',
+    env['ProgramFiles'],
+  ]);
+  const programFilesX86 = uniqueStrings([
+    'C:\\Program Files (x86)',
+    env['ProgramFiles(x86)'],
+  ]);
   const systemRoot = env['SystemRoot'] ?? env['windir'] ?? 'C:\\Windows';
   return [
     {
       id: 'pwsh',
       displayName: 'PowerShell 7',
       paths: [
-        join(programFiles, 'PowerShell', '7', 'pwsh.exe'),
-        join(programFilesX86, 'PowerShell', '7', 'pwsh.exe'),
+        ...programFiles.map((root) => join(root, 'PowerShell', '7', 'pwsh.exe')),
+        ...programFilesX86.map((root) => join(root, 'PowerShell', '7', 'pwsh.exe')),
         // PATH 兜底:用纯文件名让 spawn 走 PATH 解析。
         // existsSync 对纯文件名总是 false,所以这条只在前面所有绝对路径都
         // 不存在时,才作为 ShellInfo.executablePath 返回 (但下面 detectShells
@@ -117,8 +123,8 @@ function getShellCandidates(): ShellCandidate[] {
       id: 'git-bash',
       displayName: 'Git Bash',
       paths: [
-        join(programFiles, 'Git', 'bin', 'bash.exe'),
-        join(programFilesX86, 'Git', 'bin', 'bash.exe'),
+        ...programFiles.map((root) => join(root, 'Git', 'bin', 'bash.exe')),
+        ...programFilesX86.map((root) => join(root, 'Git', 'bin', 'bash.exe')),
       ],
     },
   ];
@@ -149,6 +155,52 @@ export class WindowsAdapter implements PlatformAdapter {
       }
     }
     return result;
+  }
+
+  /**
+   * 解析 Windows 可执行文件路径。
+   *
+   * 为什么不直接把 "ssh" 交给 node-pty:
+   * - 远程 session 需要直接 spawn ssh.exe,不经过 cmd / PowerShell shell 搜索。
+   * - 用户机器上的 PATH 可能来自 REG_EXPAND_SZ,含 `%SystemRoot%` 占位符;
+   *   Marina 已在 spawn env 里规整,这里复用规整后的 env 做搜索。
+   * - OpenSSH 是 Windows 10/11 的系统组件,标准位置在
+   *   `%SystemRoot%\System32\OpenSSH\ssh.exe`;显式优先检查这个位置能绕开
+   *   node-pty / CreateProcess 对 PATH casing 的差异。
+   */
+  resolveExecutable(commandName: string, env: Record<string, string>): string | null {
+    if (!commandName.trim()) return null;
+    if (isAbsolute(commandName) || /[\\/]/.test(commandName)) {
+      return existsSync(commandName) ? commandName : null;
+    }
+
+    const pathExt = getEnvCaseInsensitive(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD';
+    const extensions = pathExt
+      .split(';')
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean);
+    const baseNames = /\.[^.\\/]+$/.test(commandName)
+      ? [commandName]
+      : extensions.map((ext) => `${commandName}${ext}`);
+
+    const systemRoot = getEnvCaseInsensitive(env, 'SystemRoot') || 'C:\\Windows';
+    const searchDirs = uniqueStrings([
+      join(systemRoot, 'System32', 'OpenSSH'),
+      join(systemRoot, 'System32'),
+      ...(getEnvCaseInsensitive(env, 'PATH') || '')
+        .split(delimiter)
+        .map((part) => part.trim())
+        .filter(Boolean),
+    ]);
+
+    for (const dir of searchDirs) {
+      for (const base of baseNames) {
+        const candidate = join(dir, base);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -541,6 +593,30 @@ function quoteCmd(s: string): string {
 function quoteBash(s: string): string {
   if (!/[\s"'$`\\&|<>()*?#!]/.test(s)) return s;
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function getEnvCaseInsensitive(
+  env: Record<string, string>,
+  name: string,
+): string | undefined {
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toLowerCase() === wanted && value) return value;
+  }
+  return undefined;
 }
 
 /**

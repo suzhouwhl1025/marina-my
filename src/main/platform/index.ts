@@ -56,6 +56,19 @@ export interface PlatformAdapter {
   detectShells(): Promise<ShellInfo[]>;
 
   /**
+   * 解析一个命令名对应的可执行文件路径。
+   *
+   * 主要服务于 SSH 这类"不是登录 shell,但需要由 PTY 直接 spawn"的本机工具。
+   * Windows 上 CreateProcess / node-pty 对 PATH、PATHEXT 和 SystemRoot casing
+   * 很敏感,由平台层统一解析能避免核心 SessionManager 写平台分支。
+   *
+   * @param commandName 命令名或路径,如 "ssh" / "ssh.exe" / "/usr/bin/ssh"
+   * @param env 即将传给 spawn 的环境变量;平台层可用它读取 PATH / PATHEXT
+   * @returns 可直接传给 node-pty spawn 的路径;找不到时返回 null
+   */
+  resolveExecutable(commandName: string, env: Record<string, string>): string | null;
+
+  /**
    * 给定一个 shell,返回启动它时注入 OSC 1337 hook 所需的额外参数和环境变量。
    *
    * 当 `commandToRun` 提供时,hook 注入完成后还要 exec 该命令。具体如何

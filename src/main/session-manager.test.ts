@@ -24,6 +24,7 @@ import {
 } from './session-manager';
 import { Osc1337Parser } from './osc1337-parser';
 import { BUILTIN_TEMPLATES, mergeBuiltins } from './templates-manager';
+import { makePathId } from './path-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { SettingsManager } from './settings-manager';
 import type { WindowManager } from './window-manager';
@@ -221,6 +222,10 @@ function makeFakeAdapter(opts: FakeAdapterOpts = {}): PlatformAdapter {
     async detectShells() {
       return [shell];
     },
+    resolveExecutable(commandName: string) {
+      if (!commandName.trim()) return null;
+      return commandName;
+    },
     buildShellLaunchParams() {
       return { args: ['-NoLogo'], env: {} };
     },
@@ -397,6 +402,119 @@ describe('SessionManager — createSession', () => {
         rows: 24,
       }),
     ).rejects.toThrow(/NoShellAvailable/);
+  });
+
+  it('SSH session 用平台解析出的 ssh.exe 启动,而不是默认 shell 路径', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    const info = await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    expect(info.displayName).toBe('prod:~/repo');
+    expect(FakePty.instances[0]!.file).toBe(
+      'C:\\Windows\\System32\\OpenSSH\\ssh.exe',
+    );
+    expect(FakePty.instances[0]!.args).toEqual([
+      '-tt',
+      '-p',
+      '22',
+      '-o',
+      'ServerAliveInterval=30',
+      'alice@example.com',
+      "cd \"$HOME\"/'repo' && exec \"${SHELL:-/bin/sh}\" -l",
+    ]);
+  });
+
+  it('SSH remotePath 为 ~ 时使用无参数 cd,避免 quote 后禁用 home 展开', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    expect(FakePty.instances[0]!.args).toContain(
+      'cd && exec "${SHELL:-/bin/sh}" -l',
+    );
+  });
+
+  it('SSH 本机 ssh.exe 找不到时,错误信息明确指向 ssh 而不是 PowerShell', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable() {
+        return null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await expect(
+      mgr.createSession({
+        pathId,
+        templateId: 'shell',
+        ownerWindowId: 'w-1',
+        cols: 80,
+        rows: 24,
+        sshProfile: {
+          id: 'ssh-1',
+          name: 'prod',
+          host: 'example.com',
+          port: 22,
+          username: 'alice',
+          authType: 'agent',
+        },
+      }),
+    ).rejects.toThrow(/无法定位本机 ssh\.exe/);
   });
 });
 
