@@ -26,6 +26,12 @@
 export type PathCategory = 'bookmarked' | 'temporary' | 'recent';
 
 /**
+ * Path 的来源。local 是本机文件夹;ssh 是某个 SSH profile 下的远程目录。
+ * 旧数据没有 kind 字段时一律按 local 处理。
+ */
+export type PathKind = 'local' | 'ssh';
+
+/**
  * Session 的运行时状态 (软件定义书 8.3 节状态机)。
  *
  * v1.2 起 (ADR-008):状态机砍掉了 tombstoned (5 分钟自动过期 + 重启)。
@@ -167,8 +173,12 @@ export interface SessionInfo {
 export interface PathNode {
   /** UUID 内部 id */
   id: string;
-  /** 文件系统绝对路径 */
+  /** 本地文件系统绝对路径,或 SSH 远程目录路径 */
   path: string;
+  /** 路径来源。旧节点缺省视为 local。 */
+  kind?: PathKind;
+  /** kind === 'ssh' 时指向 SshProfile.id */
+  sshProfileId?: string;
   /** 用户自定义显示名,无则取路径最后一段 */
   displayName?: string;
   category: PathCategory;
@@ -348,7 +358,10 @@ export interface BookmarksFile {
 
 export interface Bookmark {
   id: string;
+  /** 旧数据缺省为 local */
+  kind?: PathKind;
   path: string;
+  sshProfileId?: string;
   displayName?: string;
   defaultTemplateId?: string;
   /** Unix ms */
@@ -364,10 +377,34 @@ export interface RecentFile {
 }
 
 export interface RecentEntry {
+  /** 旧数据缺省为 local */
+  kind?: PathKind;
   path: string;
+  sshProfileId?: string;
   /** Unix ms,降序排序的依据 */
   lastUsedAt: number;
   useCount: number;
+}
+
+/**
+ * SSH 服务器连接配置。第一版不持久化密码;推荐使用系统 ssh-agent
+ * 或 key file。password auth 只作为 UI 选项,连接时仍交给 ssh CLI 交互提示。
+ */
+export interface SshProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'agent' | 'keyFile' | 'password';
+  keyFilePath?: string;
+  defaultRemoteCwd?: string;
+  addedAt: number;
+}
+
+export interface SshProfilesFile {
+  version: 1;
+  profiles: SshProfile[];
 }
 
 /**
@@ -404,6 +441,7 @@ export interface AppSnapshot {
   windows: WindowInfo[];
   sessions: SessionInfo[];
   pathTree: PathTree;
+  sshProfiles: SshProfile[];
   templates: Template[];
   defaultTemplateId: string;
   settings: Settings;

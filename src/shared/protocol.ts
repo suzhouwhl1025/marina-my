@@ -18,6 +18,7 @@ import type {
   PathTree,
   SessionInfo,
   Settings,
+  SshProfile,
   Template,
   WindowInfo,
 } from './types';
@@ -86,6 +87,14 @@ export const COMMAND_CHANNELS = {
   BOOKMARK_SET_DEFAULT_TEMPLATE: 'cmd:bookmark:set-default-template',
   BOOKMARK_PICK_FOLDER: 'cmd:bookmark:pick-folder',
   PATH_REMOVE_FROM_RECENT: 'cmd:path:remove-from-recent',
+
+  // SSH profile / remote path 域
+  SSH_PROFILE_LIST: 'cmd:ssh-profile:list',
+  SSH_PROFILE_ADD: 'cmd:ssh-profile:add',
+  SSH_PROFILE_UPDATE: 'cmd:ssh-profile:update',
+  SSH_PROFILE_DELETE: 'cmd:ssh-profile:delete',
+  SSH_PROFILE_TEST: 'cmd:ssh-profile:test',
+  REMOTE_BOOKMARK_ADD: 'cmd:remote-bookmark:add',
 
   // Settings 域
   SETTINGS_GET: 'cmd:settings:get',
@@ -167,6 +176,7 @@ export const EVENT_CHANNELS = {
   // Path / Bookmark / Settings
   PATH_TREE_UPDATED: 'evt:path:tree-updated',
   BOOKMARKS_UPDATED: 'evt:bookmarks:updated',
+  SSH_PROFILES_UPDATED: 'evt:ssh-profiles:updated',
   SETTINGS_CHANGED: 'evt:settings:changed',
   TEMPLATES_UPDATED: 'evt:templates:updated',
 
@@ -447,6 +457,57 @@ export interface RemoveFromRecentPayload {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// SSH / Remote Path 域
+// ──────────────────────────────────────────────────────────────────
+
+export interface AddSshProfilePayload {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'agent' | 'keyFile' | 'password';
+  keyFilePath?: string;
+  defaultRemoteCwd?: string;
+}
+
+export interface AddSshProfileResponse {
+  profile: SshProfile;
+}
+
+export interface UpdateSshProfilePayload {
+  id: string;
+  partial: Partial<AddSshProfilePayload>;
+}
+
+export interface UpdateSshProfileResponse {
+  profile: SshProfile;
+}
+
+export interface DeleteSshProfilePayload {
+  id: string;
+}
+
+export interface ListSshProfilesResponse {
+  profiles: SshProfile[];
+}
+
+export interface TestSshProfilePayload {
+  id: string;
+}
+
+export interface TestSshProfileResponse {
+  ok: boolean;
+  message: string;
+}
+
+export interface AddRemoteBookmarkPayload {
+  sshProfileId: string;
+  remotePath: string;
+  displayName?: string;
+  defaultTemplateId?: string;
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Settings 域
 // ──────────────────────────────────────────────────────────────────
 
@@ -528,6 +589,7 @@ export interface SettingsArchiveV1 {
   settings: Settings;
   bookmarks: { paths: Bookmark[] };
   recent: { paths: Array<{ path: string; lastUsedAt: number; useCount: number }> };
+  sshProfiles?: { profiles: SshProfile[] };
   templates: { defaultTemplateId: string; templates: Template[] };
 }
 
@@ -737,6 +799,10 @@ export interface PathTreeUpdatedPayload {
 
 export interface BookmarksUpdatedPayload {
   bookmarks: Bookmark[];
+}
+
+export interface SshProfilesUpdatedPayload {
+  profiles: SshProfile[];
 }
 
 export interface SettingsChangedPayload {

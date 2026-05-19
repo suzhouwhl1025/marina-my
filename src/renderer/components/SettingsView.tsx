@@ -32,6 +32,7 @@ import {
 import {
   COMMAND_CHANNELS,
   type AddTemplatePayload,
+  type AddSshProfileResponse,
   type AddTemplateResponse,
   type ExplorerIntegrationStatus,
   type ImportSettingsResponse,
@@ -1089,8 +1090,18 @@ function DataPanel({
   setError: (msg: string | null) => void;
 }): JSX.Element {
   const { tx } = useTranslation();
+  const state = useAppState();
   const [busy, setBusy] = useState<'export' | 'import' | null>(null);
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  const [sshName, setSshName] = useState('');
+  const [sshHost, setSshHost] = useState('');
+  const [sshPort, setSshPort] = useState('22');
+  const [sshUser, setSshUser] = useState('');
+  const [sshAuthType, setSshAuthType] = useState<'agent' | 'keyFile' | 'password'>('agent');
+  const [sshKeyFile, setSshKeyFile] = useState('');
+  const [remoteProfileId, setRemoteProfileId] = useState('');
+  const [remotePath, setRemotePath] = useState('~');
+  const [remoteName, setRemoteName] = useState('');
   // BETA-039:从主进程取真实 userData 路径(app.getPath('userData')),
   // portable / dev / 自定义 userData 场景下 UI 都准确;首次渲染前显示占位。
   const [dataDir, setDataDir] = useState<string>('…');
@@ -1154,9 +1165,134 @@ function DataPanel({
     }
   };
 
+  const handleAddSshProfile = async (): Promise<void> => {
+    setError(null);
+    try {
+      const port = Number.parseInt(sshPort, 10);
+      const res = await window.api.invoke<unknown, AddSshProfileResponse>(
+        COMMAND_CHANNELS.SSH_PROFILE_ADD,
+        {
+          name: sshName,
+          host: sshHost,
+          port,
+          username: sshUser,
+          authType: sshAuthType,
+          ...(sshKeyFile.trim() ? { keyFilePath: sshKeyFile.trim() } : {}),
+          defaultRemoteCwd: remotePath || '~',
+        },
+      );
+      setRemoteProfileId(res.profile.id);
+      setSshName('');
+      setSshHost('');
+      setSshPort('22');
+      setSshUser('');
+      setSshAuthType('agent');
+      setSshKeyFile('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDeleteSshProfile = async (id: string): Promise<void> => {
+    setError(null);
+    try {
+      await window.api.invoke(COMMAND_CHANNELS.SSH_PROFILE_DELETE, { id });
+      if (remoteProfileId === id) setRemoteProfileId('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleAddRemoteBookmark = async (): Promise<void> => {
+    setError(null);
+    try {
+      const profileId = remoteProfileId || state.sshProfiles[0]?.id;
+      if (!profileId) {
+        setError(tx('请先添加 SSH 服务器', 'Add an SSH server first'));
+        return;
+      }
+      await window.api.invoke(COMMAND_CHANNELS.REMOTE_BOOKMARK_ADD, {
+        sshProfileId: profileId,
+        remotePath,
+        ...(remoteName.trim() ? { displayName: remoteName.trim() } : {}),
+      });
+      setRemotePath('~');
+      setRemoteName('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">{tx('数据', 'Data')}</h2>
+
+      <SettingRow
+        label={tx('SSH 服务器', 'SSH servers')}
+        hint={tx('保存连接参数;密码不会保存,连接时由 ssh CLI 交互提示', 'Stores connection parameters; passwords are not saved and are prompted by ssh CLI')}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 520 }}>
+          {state.sshProfiles.length > 0 && (
+            <ul className="acknowledgements-list" style={{ margin: 0 }}>
+              {state.sshProfiles.map((p) => (
+                <li key={p.id}>
+                  <span className="settings-info-text">
+                    {p.name} — {p.username}@{p.host}:{p.port}
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-button danger"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => void handleDeleteSshProfile(p.id)}
+                  >
+                    {tx('删除', 'Delete')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <input className="settings-input" value={sshName} onChange={(e) => setSshName(e.target.value)} placeholder={tx('名称', 'Name')} />
+            <input className="settings-input" value={sshHost} onChange={(e) => setSshHost(e.target.value)} placeholder="host.example.com" />
+            <input className="settings-input" value={sshUser} onChange={(e) => setSshUser(e.target.value)} placeholder={tx('用户名', 'Username')} />
+            <input className="settings-input" type="number" value={sshPort} onChange={(e) => setSshPort(e.target.value)} placeholder="22" />
+            <select className="settings-input" value={sshAuthType} onChange={(e) => setSshAuthType(e.target.value as 'agent' | 'keyFile' | 'password')}>
+              <option value="agent">ssh-agent</option>
+              <option value="keyFile">{tx('密钥文件', 'Key file')}</option>
+              <option value="password">{tx('密码(不保存)', 'Password (not saved)')}</option>
+            </select>
+            <input className="settings-input" value={sshKeyFile} onChange={(e) => setSshKeyFile(e.target.value)} placeholder={tx('密钥路径(可选)', 'Key path (optional)')} />
+          </div>
+          <button type="button" className="settings-button" onClick={() => void handleAddSshProfile()}>
+            {tx('添加服务器', 'Add server')}
+          </button>
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('远程文件夹收藏', 'Remote folder bookmark')}
+        hint={tx('添加后会出现在左侧收藏;双击即通过 SSH 进入该远程目录', 'Appears in Bookmarks; double-click opens SSH in that remote directory')}
+      >
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select
+            className="settings-input"
+            value={remoteProfileId || state.sshProfiles[0]?.id || ''}
+            onChange={(e) => setRemoteProfileId(e.target.value)}
+            disabled={state.sshProfiles.length === 0}
+          >
+            {state.sshProfiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <input className="settings-input" value={remotePath} onChange={(e) => setRemotePath(e.target.value)} placeholder="/home/user/project" />
+          <input className="settings-input" value={remoteName} onChange={(e) => setRemoteName(e.target.value)} placeholder={tx('显示名(可选)', 'Display name (optional)')} />
+          <button type="button" className="settings-button" onClick={() => void handleAddRemoteBookmark()}>
+            {tx('加入收藏', 'Add bookmark')}
+          </button>
+        </div>
+      </SettingRow>
 
       <SettingRow label={tx('数据目录', 'Data directory')} hint={tx('所有 Marina 配置文件存放处', 'Where all Marina configuration files live')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

@@ -34,6 +34,7 @@ import {
 import type { SessionInfo, Template } from '@shared/types';
 import {
   findMyOwnedSessionId,
+  findPathNode,
   getDisplayableSession,
   getSessionsInSelectedPath,
   useAppDispatch,
@@ -200,12 +201,23 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const dispatch = useAppDispatch();
   const toast = useToast();
   const [creating, setCreating] = useState(false);
-  const displayPath = pathId;
+  const node = findPathNode(state.pathTree, pathId);
+  const sshProfile =
+    node?.sshProfileId ? state.sshProfiles.find((p) => p.id === node.sshProfileId) : undefined;
+  const isSshPath = node?.kind === 'ssh';
+  const displayPath =
+    isSshPath && sshProfile
+      ? `${sshProfile.username}@${sshProfile.host}:${node.path}`
+      : node?.path ?? pathId;
   // 勘误第二轮 #3:启动期拉一次 detectShells,缓存到组件状态。SessionManager
   // 内部已 cache,所以二次以上调用是 O(1)。
   const [shells, setShells] = useState<DetectedShell[] | null>(null);
 
   useEffect(() => {
+    if (isSshPath) {
+      setShells([]);
+      return;
+    }
     let cancelled = false;
     window.api
       .invoke<unknown, ListShellsResponse>(
@@ -222,7 +234,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isSshPath]);
 
   const handleCreate = async (
     templateId: string,
@@ -267,7 +279,27 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
         {tx(' 新建终端', '')}
       </p>
 
-      {shells && shells.length > 0 && (
+      {isSshPath && (
+        <div className="empty-section">
+          <div className="empty-section-title">SSH</div>
+          <div className="empty-button-grid">
+            <button
+              type="button"
+              className="template-button"
+              onClick={() => void handleCreate(state.defaultTemplateId ?? 'shell')}
+              disabled={creating}
+              title={displayPath}
+            >
+              <span className="template-icon">
+                <Icon name="shell" size={18} />
+              </span>
+              <span className="template-label">{tx('连接', 'Connect')}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!isSshPath && shells && shells.length > 0 && (
         <div className="empty-section">
           <div className="empty-section-title">{tx('检测到的 Shell', 'Detected shells')}</div>
           <div className="empty-button-grid">
@@ -293,7 +325,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
       <div className="empty-section">
         <div className="empty-section-title">{tx('启动模板', 'Launch templates')}</div>
         <div className="empty-button-grid">
-          {templates.map((t) => (
+          {!isSshPath && templates.map((t) => (
             <TemplateLaunchButton
               key={t.id}
               template={t}

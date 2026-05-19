@@ -39,6 +39,7 @@ import {
   type SessionOwnerChangedPayload,
   type SessionStateChangedPayload,
   type SettingsChangedPayload,
+  type SshProfilesUpdatedPayload,
   type TemplateListUpdatedPayload,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
@@ -49,6 +50,7 @@ import type {
   PathTree,
   SessionInfo,
   Settings,
+  SshProfile,
   Template,
   WindowInfo,
 } from '@shared/types';
@@ -62,6 +64,7 @@ export interface AppState {
   pathTree: PathTree;
   sessions: Map<string, SessionInfo>;
   bookmarks: Bookmark[];
+  sshProfiles: SshProfile[];
   windows: WindowInfo[];
   templates: Template[];
   defaultTemplateId: string;
@@ -115,6 +118,7 @@ export type AppAction =
   | { type: 'snapshot/load'; snapshot: GetSnapshotResponse }
   | { type: 'pathTree/update'; tree: PathTree }
   | { type: 'bookmarks/update'; bookmarks: Bookmark[] }
+  | { type: 'sshProfiles/update'; profiles: SshProfile[] }
   | { type: 'sessions/created'; session: SessionInfo }
   | { type: 'sessions/owner-changed'; sessionId: string; ownerWindowId: string | null }
   | { type: 'sessions/state-changed'; sessionId: string; changes: Partial<SessionInfo> }
@@ -154,6 +158,7 @@ function reducer(state: AppState, action: AppAction): AppState {
         pathTree: s.pathTree,
         sessions: sessionsMap,
         windows: s.windows,
+        sshProfiles: s.sshProfiles,
         templates: s.templates,
         defaultTemplateId: s.defaultTemplateId,
         settings: s.settings,
@@ -168,6 +173,9 @@ function reducer(state: AppState, action: AppAction): AppState {
 
     case 'bookmarks/update':
       return { ...state, bookmarks: action.bookmarks };
+
+    case 'sshProfiles/update':
+      return { ...state, sshProfiles: action.profiles };
 
     case 'sessions/created': {
       const sessions = new Map(state.sessions);
@@ -383,6 +391,7 @@ export function makeDefaultState(myWindowId: string, myWindowNumber: number): Ap
     pathTree: EMPTY_TREE,
     sessions: new Map(),
     bookmarks: [],
+    sshProfiles: [],
     windows: [],
     templates: [],
     defaultTemplateId: 'shell',
@@ -520,6 +529,10 @@ export function useIpcSync(): { ready: boolean; error: string | null } {
           window.api.on<BookmarksUpdatedPayload>(
             EVENT_CHANNELS.BOOKMARKS_UPDATED,
             (p) => dispatch({ type: 'bookmarks/update', bookmarks: p.bookmarks }),
+          ),
+          window.api.on<SshProfilesUpdatedPayload>(
+            EVENT_CHANNELS.SSH_PROFILES_UPDATED,
+            (p) => dispatch({ type: 'sshProfiles/update', profiles: p.profiles }),
           ),
           window.api.on<SessionCreatedPayload>(
             EVENT_CHANNELS.SESSION_CREATED,

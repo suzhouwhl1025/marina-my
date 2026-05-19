@@ -38,6 +38,9 @@ import {
   PROTOCOL_VERSION,
   type AddBookmarkPayload,
   type AddBookmarkResponse,
+  type AddRemoteBookmarkPayload,
+  type AddSshProfilePayload,
+  type AddSshProfileResponse,
   type AppStateChangedPayload,
   type BookmarksUpdatedPayload,
   type ClaimSessionPayload,
@@ -57,6 +60,7 @@ import {
   type AddTemplatePayload,
   type AddTemplateResponse,
   type DeleteTemplatePayload,
+  type DeleteSshProfilePayload,
   type ExportSettingsResponse,
   type GetAutoStartResponse,
   type GetProtocolVersionResponse,
@@ -66,6 +70,7 @@ import {
   type GetSnapshotPayload,
   type ImportSettingsResponse,
   type ListShellsResponse,
+  type ListSshProfilesResponse,
   type OpenExternalPayload,
   type SetDefaultTemplatePayload,
   type SettingsArchiveV1,
@@ -96,9 +101,14 @@ import {
   type SessionStateChangedPayload,
   type SetDefaultTemplateForBookmarkPayload,
   type SettingsChangedPayload,
+  type SshProfilesUpdatedPayload,
   type ShowInExplorerPayload,
   type TemplateListUpdatedPayload,
+  type TestSshProfilePayload,
+  type TestSshProfileResponse,
   type UpdateSettingsPayload,
+  type UpdateSshProfilePayload,
+  type UpdateSshProfileResponse,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
   type ImeProbeDumpPayload,
@@ -107,8 +117,10 @@ import {
 import type { AppSnapshot, Settings, Template } from '@shared/types';
 import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
+import { pathRefFromId } from './path-manager';
 import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
+import type { SshProfileManager } from './ssh-profile-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { AIClient } from './ai-client';
 import { logger } from './logger';
@@ -119,6 +131,7 @@ export interface IpcLayerDeps {
   pathManager: PathManager;
   settingsManager: SettingsManager;
   sessionManager: SessionManager;
+  sshProfileManager?: SshProfileManager;
   templatesManager: TemplatesManager;
   /** BETA-031:可选,未注入时 AI_TEST_CONNECTION 返回 ok:false */
   aiClient?: AIClient;
@@ -168,6 +181,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     pathManager,
     settingsManager,
     sessionManager,
+    sshProfileManager,
     templatesManager,
   } = deps;
 
@@ -272,6 +286,14 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
+      const pathRef = pathId ? pathRefFromId(pathId) : null;
+      const sshProfile =
+        pathRef?.kind === 'ssh' && pathRef.sshProfileId
+          ? sshProfileManager?.get(pathRef.sshProfileId)
+          : null;
+      if (pathRef?.kind === 'ssh' && !sshProfile) {
+        throw makeIpcError('SshProfileNotFound', `sshProfileId="${pathRef.sshProfileId}"`);
+      }
       // takeOwnership=false 时直接传空 owner — createSession 内部
       // `input.ownerWindowId || null` 会落到 info.ownerWindowId = null。
       // 不要先创建带 owner 再 releaseOwner:那条路径在 owner=='' 时已被
@@ -283,6 +305,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         cols,
         rows,
         ...(shellId ? { shellIdOverride: shellId } : {}),
+        ...(sshProfile ? { sshProfile } : {}),
       });
       const pathTreeChanged =
         JSON.stringify(pathManager.getTree()) !== oldTreeJson;
@@ -583,6 +606,95 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     COMMAND_CHANNELS.PATH_REMOVE_FROM_RECENT,
     (_e, envelope: CommandEnvelope<RemoveFromRecentPayload>): void => {
       pathManager.removeFromRecent(envelope.payload.path);
+    },
+  );
+
+  // SSH profiles / remote bookmarks
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_LIST,
+    (_e, _envelope: CommandEnvelope<undefined>): ListSshProfilesResponse => {
+      return { profiles: sshProfileManager?.list() ?? [] };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_ADD,
+    (_e, envelope: CommandEnvelope<AddSshProfilePayload>): AddSshProfileResponse => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      const profile = sshProfileManager.add(envelope.payload);
+      return { profile };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_UPDATE,
+    (_e, envelope: CommandEnvelope<UpdateSshProfilePayload>): UpdateSshProfileResponse => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      const profile = sshProfileManager.update(
+        envelope.payload.id,
+        envelope.payload.partial,
+      );
+      return { profile };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_DELETE,
+    (_e, envelope: CommandEnvelope<DeleteSshProfilePayload>): void => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      if (pathManager.hasSshProfileReferences(envelope.payload.id)) {
+        throw makeIpcError(
+          'SshProfileInUse',
+          '该 SSH 服务器仍被收藏 / 最近 / 运行中的会话引用,请先移除这些远程路径。',
+        );
+      }
+      sshProfileManager.delete(envelope.payload.id);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_TEST,
+    async (
+      _e,
+      envelope: CommandEnvelope<TestSshProfilePayload>,
+    ): Promise<TestSshProfileResponse> => {
+      const profile = sshProfileManager?.get(envelope.payload.id);
+      if (!profile) return { ok: false, message: 'SSH 配置不存在' };
+      // MVP:不主动建立后台连接,避免无交互密码/host key prompt 卡死。
+      // 真正连接由 session 启动时的 ssh CLI 处理;这里做可执行输入校验。
+      return {
+        ok: true,
+        message: `${profile.username}@${profile.host}:${profile.port}`,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.REMOTE_BOOKMARK_ADD,
+    (_e, envelope: CommandEnvelope<AddRemoteBookmarkPayload>): AddBookmarkResponse => {
+      const profile = sshProfileManager?.get(envelope.payload.sshProfileId);
+      if (!profile) {
+        throw makeIpcError(
+          'SshProfileNotFound',
+          `sshProfileId="${envelope.payload.sshProfileId}"`,
+        );
+      }
+      const bookmark = pathManager.addBookmark({
+        kind: 'ssh',
+        sshProfileId: profile.id,
+        path: envelope.payload.remotePath,
+        ...(envelope.payload.displayName ? { displayName: envelope.payload.displayName } : {}),
+        ...(envelope.payload.defaultTemplateId
+          ? { defaultTemplateId: envelope.payload.defaultTemplateId }
+          : {}),
+      });
+      return { bookmark };
     },
   );
 
@@ -982,6 +1094,7 @@ async function buildArchive(deps: IpcLayerDeps): Promise<SettingsArchiveV1> {
   await Promise.all([
     deps.settingsManager.flush(),
     deps.pathManager.flush(),
+    deps.sshProfileManager?.flush() ?? Promise.resolve(),
     deps.templatesManager.flush(),
   ]);
   const settings = deps.settingsManager.get();
@@ -1001,6 +1114,7 @@ async function buildArchive(deps: IpcLayerDeps): Promise<SettingsArchiveV1> {
     // 类型断言:JSON 上读出来已经是合法 schema (持久化文件不通过 IPC 不需要严格 schema 校验)
     bookmarks: bookmarks as SettingsArchiveV1['bookmarks'],
     recent: recent as SettingsArchiveV1['recent'],
+    sshProfiles: { profiles: deps.sshProfileManager?.list() ?? [] },
     templates,
   };
 }
@@ -1082,10 +1196,19 @@ async function applyArchiveInMemory(
     throw new Error(`paths: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  if (archive.sshProfiles?.profiles && deps.sshProfileManager) {
+    try {
+      deps.sshProfileManager.replaceAll(archive.sshProfiles.profiles);
+    } catch (err) {
+      throw new Error(`sshProfiles: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // 等待所有 store debounce 落盘
   await Promise.all([
     deps.settingsManager.flush(),
     deps.pathManager.flush(),
+    deps.sshProfileManager?.flush() ?? Promise.resolve(),
     deps.templatesManager.flush(),
   ]);
 }
@@ -1100,6 +1223,7 @@ function wireEventBroadcasts(deps: IpcLayerDeps): void {
     pathManager,
     settingsManager,
     sessionManager,
+    sshProfileManager,
     templatesManager,
   } = deps;
 
@@ -1114,6 +1238,13 @@ function wireEventBroadcasts(deps: IpcLayerDeps): void {
     broadcastEvent<BookmarksUpdatedPayload>(EVENT_CHANNELS.BOOKMARKS_UPDATED, {
       bookmarks: pathManager.listBookmarks(),
     });
+  });
+
+  sshProfileManager?.on('sshProfilesUpdated', (e: SshProfilesUpdatedPayload) => {
+    broadcastEvent<SshProfilesUpdatedPayload>(
+      EVENT_CHANNELS.SSH_PROFILES_UPDATED,
+      e,
+    );
   });
 
   // 设置变化 → 广播 evt:settings:changed
@@ -1214,6 +1345,7 @@ function buildSnapshot(deps: IpcLayerDeps, myWindowId: string): AppSnapshot {
     windows: deps.windowManager.list(),
     sessions: deps.sessionManager.list(),
     pathTree: deps.pathManager.getTree(),
+    sshProfiles: deps.sshProfileManager?.list() ?? [],
     templates: deps.templatesManager.list(),
     defaultTemplateId: deps.templatesManager.getDefaultTemplateId(),
     settings: deps.settingsManager.get(),
