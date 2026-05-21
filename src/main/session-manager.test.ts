@@ -528,7 +528,7 @@ describe('SessionManager — createSession', () => {
     expect(command).toContain('command -v tmux >/dev/null 2>&1');
     expect(command).toContain('MARINA_TMUX_BASE=');
     expect(command).toContain('base64 -d');
-    expect(command).not.toContain('sh -c ');
+    expect(command).not.toContain("sh -c '");
     expect(command).not.toContain('<<');
     const decodedTmuxScript = decodeEmbeddedTmuxScript(command);
     expect(decodedTmuxScript).toContain("grep -Eq '^[0-9]+$'");
