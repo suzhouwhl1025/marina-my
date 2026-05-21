@@ -40,6 +40,7 @@ import {
   type ExportSettingsResponse,
   type PickSshKeyFileResponse,
   type SetExplorerIntegrationResponse,
+  type UpdateSshProfileResponse,
   type UpdateTemplatePayload,
   type UpdateTemplateResponse,
 } from '@shared/protocol';
@@ -1102,6 +1103,8 @@ function DataPanel({
   const [sshKeyFile, setSshKeyFile] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [sshSavePassword, setSshSavePassword] = useState(false);
+  /** 非 null 时表单进入"编辑"模式;按钮文案/提交动作随之切换 */
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [remoteProfileId, setRemoteProfileId] = useState('');
   const [remotePath, setRemotePath] = useState('~');
   const [remoteName, setRemoteName] = useState('');
@@ -1168,36 +1171,87 @@ function DataPanel({
     }
   };
 
-  const handleAddSshProfile = async (): Promise<void> => {
+  const resetSshForm = (): void => {
+    setEditingProfileId(null);
+    setSshName('');
+    setSshHost('');
+    setSshPort('22');
+    setSshUser('');
+    setSshAuthType('password');
+    setSshKeyFile('');
+    setSshPassword('');
+    setSshSavePassword(false);
+  };
+
+  const handleEditSshProfile = (id: string): void => {
+    const p = state.sshProfiles.find((x) => x.id === id);
+    if (!p) return;
+    setError(null);
+    setEditingProfileId(id);
+    setSshName(p.name);
+    setSshHost(p.host);
+    setSshPort(String(p.port));
+    setSshUser(p.username);
+    setSshAuthType(p.authType === 'keyFile' ? 'keyFile' : 'password');
+    setSshKeyFile(p.keyFilePath ?? '');
+    // 密码不回填(main 永远不会送明文给 renderer);留空 + 未勾保存 = 保留旧密码。
+    setSshPassword('');
+    setSshSavePassword(false);
+  };
+
+  const handleSubmitSshProfile = async (): Promise<void> => {
     setError(null);
     try {
       const port = Number.parseInt(sshPort, 10);
-      const res = await window.api.invoke<unknown, AddSshProfileResponse>(
-        COMMAND_CHANNELS.SSH_PROFILE_ADD,
-        {
+      if (editingProfileId) {
+        // 更新:password 字段的语义见 protocol.ts —— undefined 保留旧密码,
+        // ''(空串) 清除已保存密码,非空字符串则替换。
+        const partial: Record<string, unknown> = {
           name: sshName,
           host: sshHost,
           port,
           username: sshUser,
           authType: sshAuthType,
-          ...(sshAuthType === 'keyFile' && sshKeyFile.trim()
-            ? { keyFilePath: sshKeyFile.trim() }
-            : {}),
-          ...(sshAuthType === 'password' && sshSavePassword && sshPassword
-            ? { password: sshPassword }
-            : {}),
           defaultRemoteCwd: remotePath || '~',
-        },
-      );
-      setRemoteProfileId(res.profile.id);
-      setSshName('');
-      setSshHost('');
-      setSshPort('22');
-      setSshUser('');
-      setSshAuthType('password');
-      setSshKeyFile('');
-      setSshPassword('');
-      setSshSavePassword(false);
+        };
+        if (sshAuthType === 'keyFile' && sshKeyFile.trim()) {
+          partial.keyFilePath = sshKeyFile.trim();
+        }
+        if (sshAuthType === 'password') {
+          if (sshSavePassword && sshPassword) {
+            partial.password = sshPassword;
+          } else if (sshSavePassword && !sshPassword) {
+            // 勾了保存但密码框为空 → 用户想清除已保存密码
+            partial.password = '';
+          }
+          // 未勾 → 不带 password 字段,保留旧值
+        }
+        await window.api.invoke<unknown, UpdateSshProfileResponse>(
+          COMMAND_CHANNELS.SSH_PROFILE_UPDATE,
+          { id: editingProfileId, partial },
+        );
+        resetSshForm();
+      } else {
+        const res = await window.api.invoke<unknown, AddSshProfileResponse>(
+          COMMAND_CHANNELS.SSH_PROFILE_ADD,
+          {
+            name: sshName,
+            host: sshHost,
+            port,
+            username: sshUser,
+            authType: sshAuthType,
+            ...(sshAuthType === 'keyFile' && sshKeyFile.trim()
+              ? { keyFilePath: sshKeyFile.trim() }
+              : {}),
+            ...(sshAuthType === 'password' && sshSavePassword && sshPassword
+              ? { password: sshPassword }
+              : {}),
+            defaultRemoteCwd: remotePath || '~',
+          },
+        );
+        setRemoteProfileId(res.profile.id);
+        resetSshForm();
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1221,6 +1275,7 @@ function DataPanel({
     try {
       await window.api.invoke(COMMAND_CHANNELS.SSH_PROFILE_DELETE, { id });
       if (remoteProfileId === id) setRemoteProfileId('');
+      if (editingProfileId === id) resetSshForm();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1262,7 +1317,16 @@ function DataPanel({
                   <span className="settings-info-text">
                     {p.name} — {p.username}@{p.host}:{p.port}
                     {p.hasSavedPassword ? tx(' · 已保存密码', ' · password saved') : ''}
+                    {editingProfileId === p.id ? tx(' · 编辑中', ' · editing') : ''}
                   </span>
+                  <button
+                    type="button"
+                    className="settings-button"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => handleEditSshProfile(p.id)}
+                  >
+                    {tx('编辑', 'Edit')}
+                  </button>
                   <button
                     type="button"
                     className="settings-button danger"
@@ -1310,7 +1374,11 @@ function DataPanel({
                 type="password"
                 value={sshPassword}
                 onChange={(e) => setSshPassword(e.target.value)}
-                placeholder={tx('密码(可选,留空则连接时手动输入)', 'Password (optional; leave blank to type at connect time)')}
+                placeholder={
+                  editingProfileId
+                    ? tx('新密码(留空则保留旧密码)', 'New password (leave blank to keep existing)')
+                    : tx('密码(可选,留空则连接时手动输入)', 'Password (optional; leave blank to type at connect time)')
+                }
                 autoComplete="new-password"
               />
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
@@ -1318,15 +1386,23 @@ function DataPanel({
                   type="checkbox"
                   checked={sshSavePassword}
                   onChange={(e) => setSshSavePassword(e.target.checked)}
-                  disabled={!sshPassword}
                 />
-                {tx('保存密码(OS 加密;需 sshpass 才能自动登录)', 'Save password (OS-encrypted; needs sshpass on PATH for auto-login)')}
+                {editingProfileId
+                  ? tx('应用密码修改(勾选 + 留空可清除已保存密码)', 'Apply password change (checked + empty clears saved password)')
+                  : tx('保存密码(OS 加密;需 sshpass 才能自动登录)', 'Save password (OS-encrypted; needs sshpass on PATH for auto-login)')}
               </label>
             </div>
           )}
-          <button type="button" className="settings-button" onClick={() => void handleAddSshProfile()}>
-            {tx('添加服务器', 'Add server')}
-          </button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" className="settings-button" onClick={() => void handleSubmitSshProfile()}>
+              {editingProfileId ? tx('保存修改', 'Save changes') : tx('添加服务器', 'Add server')}
+            </button>
+            {editingProfileId && (
+              <button type="button" className="settings-button" onClick={resetSshForm}>
+                {tx('取消', 'Cancel')}
+              </button>
+            )}
+          </div>
         </div>
       </SettingRow>
 
