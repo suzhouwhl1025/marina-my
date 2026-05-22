@@ -15,9 +15,85 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   WindowsAdapter,
+  __getShellCandidatesForTest,
+  __parseWslDistroListOutputForTest,
+  __setListWslDistrosImplForTest,
   __setReadRegistryPathImplForTest,
   __setRunRegImplForTest,
 } from './windows';
+
+describe('WindowsAdapter — WSL shell support', () => {
+  afterEach(() => {
+    __setListWslDistrosImplForTest(null);
+  });
+
+  it('候选 shell 列表包含 wsl.exe 路径', () => {
+    const candidates = __getShellCandidatesForTest();
+    const wsl = candidates.find((s) => s.id === 'wsl');
+    expect(wsl).toBeTruthy();
+    expect(wsl?.displayName).toBe('WSL');
+    expect(wsl?.paths.some((p) => p.toLowerCase().endsWith('\\system32\\wsl.exe'))).toBe(true);
+  });
+
+  it('buildShellLaunchParams(wsl) 无命令时不传参数(走发行版默认 shell)', () => {
+    const adapter = new WindowsAdapter();
+    const result = adapter.buildShellLaunchParams(
+      { id: 'wsl', displayName: 'WSL', executablePath: 'C:\\Windows\\System32\\wsl.exe' },
+      'C:\\ignored\\hook.sh',
+    );
+    expect(result.args).toEqual([]);
+    expect(result.env).toEqual({});
+  });
+
+  it('buildShellLaunchParams(wsl) 有命令时走 sh -lc "<cmd>"', () => {
+    const adapter = new WindowsAdapter();
+    const result = adapter.buildShellLaunchParams(
+      { id: 'wsl', displayName: 'WSL', executablePath: 'C:\\Windows\\System32\\wsl.exe' },
+      'C:\\ignored\\hook.sh',
+      { command: 'echo', args: ['hello world'] },
+    );
+    expect(result.args[0]).toBe('-e');
+    expect(result.args[1]).toBe('sh');
+    expect(result.args[2]).toBe('-lc');
+    expect(result.args[3]).toMatch(/echo.*hello world/);
+    expect(result.env).toEqual({});
+  });
+
+  it('detectShells: 有多个发行版时,追加 WSL(<distro>) 选项', async () => {
+    __setListWslDistrosImplForTest(async () => ['Ubuntu', 'Debian']);
+    const adapter = new WindowsAdapter();
+    const shells = await adapter.detectShells();
+    const ids = shells.map((s) => s.id);
+    expect(ids).not.toContain('wsl');
+    expect(ids).toContain('wsl:Ubuntu');
+    expect(ids).toContain('wsl:Debian');
+    expect(shells.find((s) => s.id === 'wsl:Ubuntu')?.displayName).toBe('WSL (Ubuntu)');
+  });
+
+  it('buildShellLaunchParams(wsl:<distro>) 带 -d <distro>', () => {
+    const adapter = new WindowsAdapter();
+    const result = adapter.buildShellLaunchParams(
+      {
+        id: 'wsl:Ubuntu',
+        displayName: 'WSL (Ubuntu)',
+        executablePath: 'C:\\Windows\\System32\\wsl.exe',
+      },
+      'C:\\ignored\\hook.sh',
+      { command: 'pwd', args: [] },
+    );
+    expect(result.args[0]).toBe('-d');
+    expect(result.args[1]).toBe('Ubuntu');
+    expect(result.args[2]).toBe('-e');
+    expect(result.args[3]).toBe('sh');
+  });
+
+  it('WSL 发行版解析兼容 UTF-16LE 输出,避免中文名乱码', () => {
+    const text = ['Ubuntu', '我', ''].join('\r\n');
+    const buf = Buffer.from(text, 'utf16le');
+    const got = __parseWslDistroListOutputForTest(buf);
+    expect(got).toEqual(['Ubuntu', '我']);
+  });
+});
 
 describe('WindowsAdapter — registerFileManagerIntegration', () => {
   let calls: string[][] = [];

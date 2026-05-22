@@ -82,6 +82,13 @@ interface ShellCandidate {
   paths: string[];
 }
 
+interface WslShellIdParts {
+  /** 是否 WSL shell id (wsl 或 wsl:<distro>) */
+  isWsl: boolean;
+  /** 可选发行版名 */
+  distro?: string;
+}
+
 function getShellCandidates(): ShellCandidate[] {
   const env = process.env;
   const programFiles = uniqueStrings([
@@ -127,7 +134,29 @@ function getShellCandidates(): ShellCandidate[] {
         ...programFilesX86.map((root) => join(root, 'Git', 'bin', 'bash.exe')),
       ],
     },
+    {
+      // WSL 可执行入口。Windows 10/11 默认位于 System32。
+      id: 'wsl',
+      displayName: 'WSL',
+      paths: [join(systemRoot, 'System32', 'wsl.exe')],
+    },
   ];
+}
+
+/**
+ * 仅供测试:读取当前 Windows shell 候选清单。
+ * 生产代码不要依赖此函数。
+ */
+export function __getShellCandidatesForTest(): Array<{
+  id: string;
+  displayName: string;
+  paths: string[];
+}> {
+  return getShellCandidates().map((item) => ({
+    id: item.id,
+    displayName: item.displayName,
+    paths: [...item.paths],
+  }));
 }
 
 export class WindowsAdapter implements PlatformAdapter {
@@ -152,6 +181,32 @@ export class WindowsAdapter implements PlatformAdapter {
           });
           break; // 同 id 只取第一个命中的路径
         }
+      }
+    }
+    // WSL:若可执行存在,进一步枚举发行版,让用户在 shell 列表中显式选择目标 distro。
+    // 若枚举到至少 1 个 distro,移除通用 "WSL" 条目,避免 UI 出现重复/歧义入口。
+    // 只有枚举失败或结果为空时才保留通用 "WSL" 作为兜底入口(默认发行版)。
+    const wslBase = result.find((s) => s.id === 'wsl');
+    if (wslBase) {
+      try {
+        const distros = await listWslDistrosImpl();
+        if (distros.length > 0) {
+          const baseIndex = result.findIndex((s) => s.id === 'wsl');
+          if (baseIndex >= 0) result.splice(baseIndex, 1);
+          for (const distro of distros) {
+            result.push({
+              id: `wsl:${distro}`,
+              displayName: `WSL (${distro})`,
+              executablePath: wslBase.executablePath,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          'WindowsAdapter',
+          'WSL distro enumeration failed; fallback to default distro only',
+          err,
+        );
       }
     }
     return result;
@@ -268,9 +323,30 @@ export class WindowsAdapter implements PlatformAdapter {
         return { args: [], env };
       }
       case 'git-bash':
+      case 'wsl':
       default: {
         // bash --rcfile <file> 让 bash 加载我们的 hook;
         // 有命令时先跑命令再 exec bash (postExitAction=keep_shell)。
+        const wsl = parseWslShellId(shell.id);
+        if (wsl.isWsl) {
+          // WSL MVP:避免硬编码依赖 bash(部分发行版无 bash 或不在 PATH)。
+          // 无命令时直接进默认发行版默认 shell;有命令时走 sh -lc 兜底。
+          // 完整版再补 hook 透传与 Windows/WSL 路径映射。
+          const distroArgs = wsl.distro ? ['-d', wsl.distro] : [];
+          if (commandToRun) {
+            const cmdLine = [commandToRun.command, ...commandToRun.args]
+              .map(quoteBash)
+              .join(' ');
+            return {
+              args: [...distroArgs, '-e', 'sh', '-lc', cmdLine],
+              env: {},
+            };
+          }
+          return {
+            args: distroArgs,
+            env: {},
+          };
+        }
         if (commandToRun) {
           const cmdLine = [commandToRun.command, ...commandToRun.args]
             .map(quoteBash)
@@ -620,6 +696,76 @@ function getEnvCaseInsensitive(
 }
 
 /**
+ * 解析 shell id 是否为 WSL 目标。
+ *
+ * 支持:
+ * - wsl            -> 默认发行版
+ * - wsl:Ubuntu-24.04 -> 指定发行版
+ */
+function parseWslShellId(id: string): WslShellIdParts {
+  if (id === 'wsl') return { isWsl: true };
+  if (id.startsWith('wsl:') && id.length > 4) {
+    return { isWsl: true, distro: id.slice(4) };
+  }
+  return { isWsl: false };
+}
+
+/**
+ * 列举 WSL 发行版名。
+ *
+ * 来源: `wsl.exe -l -q` 的逐行输出。过滤空行和 docker-desktop 内部发行版。
+ * 保持输出顺序,但做大小写去重。
+ */
+let listWslDistrosImpl: () => Promise<string[]> = defaultListWslDistros;
+
+async function defaultListWslDistros(): Promise<string[]> {
+  const systemRoot = process.env['SystemRoot'] ?? process.env['windir'] ?? 'C:\\Windows';
+  const wslExe = join(systemRoot, 'System32', 'wsl.exe');
+  const { stdout } = await execFileAsync(wslExe, ['-l', '-q'], {
+    windowsHide: true,
+    maxBuffer: 1024 * 1024,
+    encoding: 'buffer',
+  });
+  return parseWslDistroListOutput(stdout);
+}
+
+/**
+ * 解析 `wsl -l -q` 输出为发行版列表。
+ *
+ * WSL 在 Windows 上可能输出 UTF-16LE(常见)或 UTF-8。这里按字节特征自动判定:
+ * - 若包含大量 NUL 字节,按 UTF-16LE 解码
+ * - 否则按 UTF-8 解码
+ */
+function parseWslDistroListOutput(stdout: Buffer): string[] {
+  const text = decodePossiblyUtf16Le(stdout);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const name = rawLine.trim();
+    if (!name) continue;
+    const normalized = name.toLowerCase();
+    if (normalized === 'docker-desktop' || normalized === 'docker-desktop-data') continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(name);
+  }
+  return result;
+}
+
+function decodePossiblyUtf16Le(input: Buffer): string {
+  // UTF-16LE 文本里偶数字节位置常出现大量 0x00。
+  const sample = input.subarray(0, Math.min(input.length, 2048));
+  let nulCount = 0;
+  for (const b of sample) {
+    if (b === 0) nulCount++;
+  }
+  const looksUtf16Le = sample.length > 0 && nulCount / sample.length > 0.15;
+  const text = looksUtf16Le ? input.toString('utf16le') : input.toString('utf8');
+  // 去除可能的 BOM 与残留 NUL
+  return text.replace(/^\uFEFF/, '').replace(/\u0000/g, '');
+}
+
+/**
  * 调 reg.exe,等待退出。
  *
  * 测试 hook:由 `__setRunRegImpl` 注入 mock,生产代码总是真实 execFile。
@@ -711,4 +857,21 @@ export function __setReadRegistryPathImplForTest(
   impl: ((hive: string) => string | null) | null,
 ): void {
   readRegistryPathImpl = impl ?? defaultReadRegistryPath;
+}
+
+/**
+ * 仅供测试用:注入 WSL 发行版枚举实现。
+ * 传 null 恢复真实 `wsl.exe -l -q` 调用。
+ */
+export function __setListWslDistrosImplForTest(
+  impl: (() => Promise<string[]>) | null,
+): void {
+  listWslDistrosImpl = impl ?? defaultListWslDistros;
+}
+
+/**
+ * 仅供测试用:解析 wsl -l -q 原始输出。
+ */
+export function __parseWslDistroListOutputForTest(stdout: Buffer): string[] {
+  return parseWslDistroListOutput(stdout);
 }
