@@ -35,6 +35,7 @@ import type {
   RecentEntry,
   RecentFile,
 } from '@shared/types';
+import { normalizeRemotePath } from '@shared/remote-path';
 import type { JsonStore } from './persistence';
 import { logger } from './logger';
 
@@ -66,15 +67,6 @@ export interface PathRef {
   kind: PathKind;
   path: string;
   sshProfileId?: string;
-}
-
-export function normalizeRemotePath(input: string): string {
-  let value = input.trim();
-  if (!value) value = '~';
-  value = value.replace(/\\/g, '/');
-  value = value.replace(/\/+/g, '/');
-  if (value.length > 1 && value.endsWith('/')) value = value.slice(0, -1);
-  return value;
 }
 
 export function makePathId(ref: PathRef): string {

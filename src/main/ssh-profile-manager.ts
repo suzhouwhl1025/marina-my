@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import type { SshProfile, SshProfilesFile } from '@shared/types';
+import { normalizeRemotePath } from '@shared/remote-path';
 import type { JsonStore } from './persistence';
 
 const DEFAULT_SSH_PROFILES_FILE: SshProfilesFile = { version: 1, profiles: [] };
@@ -216,15 +217,6 @@ function normalizeTmuxSessionName(input: string): string {
       'tmux session 名称只能包含字母、数字、下划线、点和连字符',
     );
   }
-  return value;
-}
-
-export function normalizeRemotePath(input: string): string {
-  let value = input.trim();
-  if (!value) value = '~';
-  value = value.replace(/\\/g, '/');
-  value = value.replace(/\/+/g, '/');
-  if (value.length > 1 && value.endsWith('/')) value = value.slice(0, -1);
   return value;
 }
 
