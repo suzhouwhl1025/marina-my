@@ -136,9 +136,11 @@ function makeStubPathManager(): StubPathManager {
   return stub as unknown as StubPathManager;
 }
 
-function makeStubTemplatesManager(): TemplatesManager {
+function makeStubTemplatesManager(
+  extraTemplates: Template[] = [],
+): TemplatesManager {
   // 用真实的 BUILTIN_TEMPLATES,resolve('shell') 返回内置 shell 模板
-  const templates = BUILTIN_TEMPLATES;
+  const templates = [...BUILTIN_TEMPLATES, ...extraTemplates];
   return {
     resolve(id: string | undefined | null): Template {
       if (id) {
@@ -271,6 +273,7 @@ function makeManager(
     inputQuietMs?: number;
     /** PER-2 / F1:默认 0 — 测试每个 chunk 立即 emit,保持现有时序断言 */
     emitBatchMs?: number;
+    templates?: Template[];
   } = {},
 ): {
   mgr: SessionManager;
@@ -280,7 +283,7 @@ function makeManager(
   FakePty.reset();
   const win = makeStubWindowManager();
   const path = makeStubPathManager();
-  const tmpl = makeStubTemplatesManager();
+  const tmpl = makeStubTemplatesManager(opts.templates ?? []);
   const settings = opts.settings ?? makeStubSettingsManager();
   const mgr = new SessionManager(win, path, tmpl, settings, {
     spawnFn: opts.spawnFn ?? fakeSpawn,
@@ -490,6 +493,58 @@ describe('SessionManager — createSession', () => {
     expect(FakePty.instances[0]!.args).toContain(
       'cd && exec "${SHELL:-/bin/sh}" -l',
     );
+  });
+
+  it('SSH 启动模板在远端 cwd 中执行命令/参数/env', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const template: Template = {
+      id: 'remote-codex',
+      name: 'Remote Codex',
+      icon: 'R',
+      isBuiltin: false,
+      command: 'codex',
+      args: ['--model', 'gpt-5', "it's-ok"],
+      env: { MARINA_MODE: 'remote test' },
+      shellFirst: true,
+      postExitAction: 'keep_shell',
+    };
+    const { mgr } = makeManager({ adapter, templates: [template] });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'remote-codex',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('cd "$HOME"/');
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -lc');
+    expect(command).toContain("env '\\''MARINA_MODE=remote test'\\''");
+    expect(command).toContain("'\\''codex'\\''");
+    expect(command).toContain("'\\''--model'\\''");
+    expect(command).toContain("'\\''gpt-5'\\''");
+    expect(command).toContain("'\\''it'\\''\\'\\'''\\''s-ok'\\''");
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -l');
   });
 
   it('SSH 启用 tmux 时自动 attach-or-create,远端无 tmux 默认回退 shell', async () => {

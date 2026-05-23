@@ -605,10 +605,19 @@ export class SessionManager extends EventEmitter {
     const existingSshSessionsForPath = isSsh
       ? this.list().filter((s) => s.pathId === input.pathId && s.state !== 'exited').length
       : 0;
+    const sshLaunchOptions: {
+      forceTmuxChoice?: boolean;
+      commandToRun?: { command: string; args: string[]; env?: Record<string, string> };
+    } = { forceTmuxChoice: existingSshSessionsForPath > 0 };
+    if (template.command) {
+      sshLaunchOptions.commandToRun = {
+        command: template.command,
+        args: template.args,
+        env: template.env,
+      };
+    }
     const launchParams = isSsh
-      ? buildSshLaunchParams(input.sshProfile!, pathRef.path, {
-          forceTmuxChoice: existingSshSessionsForPath > 0,
-        })
+      ? buildSshLaunchParams(input.sshProfile!, pathRef.path, sshLaunchOptions)
       : this.platformAdapter.buildShellLaunchParams(
           shell,
           hookFile,
@@ -1810,7 +1819,10 @@ function buildSshLaunchParams(
     tmuxOnMissing?: 'fallback-shell' | 'fail';
   },
   remoteCwd: string,
-  options: { forceTmuxChoice?: boolean } = {},
+  options: {
+    forceTmuxChoice?: boolean;
+    commandToRun?: { command: string; args: string[]; env?: Record<string, string> };
+  } = {},
 ): { args: string[]; env: Record<string, string> } {
   const args = [
     '-tt',
@@ -1838,7 +1850,10 @@ function buildRemoteLoginCommand(
     tmuxSessionPolicy?: 'reuse' | 'new-per-launch';
     tmuxOnMissing?: 'fallback-shell' | 'fail';
   },
-  options: { forceTmuxChoice?: boolean } = {},
+  options: {
+    forceTmuxChoice?: boolean;
+    commandToRun?: { command: string; args: string[]; env?: Record<string, string> };
+  } = {},
 ): string {
   const cwd = remoteCwd.trim() || '~';
   let cdCommand: string;
@@ -1855,8 +1870,14 @@ function buildRemoteLoginCommand(
     cdCommand = `cd ${shQuote(cwd)}`;
   }
   const shellCommand = 'exec "${SHELL:-/bin/sh}" -l';
+  const commandLine = options.commandToRun
+    ? buildRemoteTemplateCommand(options.commandToRun)
+    : null;
+  const launchCommand = commandLine
+    ? `exec "\${SHELL:-/bin/sh}" -lc ${shQuote(`${commandLine}; ${shellCommand}`)}`
+    : shellCommand;
   if (profile.tmuxMode !== 'attach-or-create') {
-    return `${cdCommand} && ${shellCommand}`;
+    return `${cdCommand} && ${launchCommand}`;
   }
   const baseSessionName = defaultTmuxSessionName(cwd);
   // 目录派生是产品语义:同一个远程目录的 tmux 会话族必须统一落在
@@ -1870,7 +1891,7 @@ function buildRemoteLoginCommand(
   const failCommand =
     'printf %s\\\\n "Marina: tmux attach/create failed on the remote host." >&2; exit 127';
   const fallbackAfterFailure =
-    profile.tmuxOnMissing === 'fail' ? failCommand : shellCommand;
+    profile.tmuxOnMissing === 'fail' ? failCommand : launchCommand;
   // tmux 本身只是远端 shell 里的一个全屏程序,不是 Marina session 的终点。
   // 用户在 tmux pane 里输入 exit 后,tmux client 会正常返回;此时必须继续
   // exec 回登录 shell,否则 ssh.exe 会结束,Main 只能把整个 Marina session
@@ -1878,7 +1899,7 @@ function buildRemoteLoginCommand(
   // 错误伪装成一次正常 shell 回落。
   const tmuxBootstrap =
     `${cdCommand} && if command -v tmux >/dev/null 2>&1; then ` +
-    `if ${tmuxCommand}\nthen ${shellCommand}; else ` +
+    `if ${tmuxCommand}\nthen ${launchCommand}; else ` +
     `{ printf %s\\\\n "Marina: tmux attach/create failed; falling back to shell." >&2; ${fallbackAfterFailure}; }; fi; ` +
     `else ${fallbackAfterFailure}; fi`;
   // SSH remote command 默认由远端 login shell 以非登录/非交互方式执行。
@@ -1891,6 +1912,19 @@ function buildRemoteLoginCommand(
 
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildRemoteTemplateCommand(input: {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}): string {
+  const envPairs = Object.entries(input.env ?? {})
+    .filter(([key]) => key.length > 0)
+    .map(([key, value]) => shQuote(`${key}=${value}`));
+  const argv = [input.command, ...input.args].map(shQuote);
+  if (envPairs.length === 0) return argv.join(' ');
+  return ['env', ...envPairs, ...argv].join(' ');
 }
 
 function defaultTmuxSessionName(remoteCwd: string): string {

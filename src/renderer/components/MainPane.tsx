@@ -31,6 +31,7 @@ import {
   type CreateSessionResponse,
   type ListShellsResponse,
 } from '@shared/protocol';
+import { formatPathDisplayPath } from '@shared/path-display';
 import type { SessionInfo, Template } from '@shared/types';
 import {
   findMyOwnedSessionId,
@@ -219,15 +220,15 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const toast = useToast();
   const [creating, setCreating] = useState(false);
   const node = findPathNode(state.pathTree, pathId);
-  const sshProfile =
-    node?.sshProfileId ? state.sshProfiles.find((p) => p.id === node.sshProfileId) : undefined;
   const isSshPath = node?.kind === 'ssh';
   const wslDistroName = node ? getWslDistroName(node.path) : null;
   const isWslPath = !!wslDistroName;
   const displayPath =
-    isSshPath && sshProfile
-      ? `${sshProfile.username}@${sshProfile.host}:${node.path}`
-      : node?.path ?? pathId;
+    isSshPath && node
+      ? node.path
+      : node
+        ? formatPathDisplayPath(node)
+        : pathId;
   // 勘误第二轮 #3:启动期拉一次 detectShells,缓存到组件状态。SessionManager
   // 内部已 cache,所以二次以上调用是 O(1)。
   const [shells, setShells] = useState<DetectedShell[] | null>(null);
@@ -312,7 +313,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
             <button
               type="button"
               className="template-button"
-              onClick={() => void handleCreate(state.defaultTemplateId ?? 'shell', undefined, 'disabled')}
+              onClick={() => void handleCreate('shell', undefined, 'disabled')}
               disabled={creating}
               title={displayPath}
             >
@@ -324,7 +325,7 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
             <button
               type="button"
               className="template-button"
-              onClick={() => void handleCreate(state.defaultTemplateId ?? 'shell', undefined, 'attach-or-create')}
+              onClick={() => void handleCreate('shell', undefined, 'attach-or-create')}
               disabled={creating}
               title={tx(`通过 tmux 连接 ${displayPath}`, `Connect with tmux to ${displayPath}`)}
             >
@@ -363,12 +364,12 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
       <div className="empty-section">
         <div className="empty-section-title">{tx('启动模板', 'Launch templates')}</div>
         <div className="empty-button-grid">
-          {!isSshPath && (!isWslPath || wslShellId) && templates.map((t) => (
+          {(isSshPath || !isWslPath || wslShellId) && templates.map((t) => (
             <TemplateLaunchButton
               key={t.id}
               template={t}
               creating={creating}
-              onLaunch={() => void handleCreate(t.id, wslShellId)}
+              onLaunch={() => void handleCreate(t.id, isSshPath ? undefined : wslShellId, 'disabled')}
             />
           ))}
         </div>
