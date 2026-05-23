@@ -475,7 +475,7 @@ function ShellPanel({
     return () => {
       cancelled = true;
     };
-  }, [setError]);
+  }, [setError, tx]);
 
   if (templateMode.kind === 'edit') {
     return (

@@ -592,12 +592,13 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
   // 把"创建期"读到的初始值用 useMemo 锁定 (terminal 创建后只用 mutator 调整),
   // 否则每次 settings 引用变化都会重建 xterm 实例。
-  const initialTheme = useMemo(() => getXtermTheme(themeId), [
+  const initialTheme = useMemo(
+    () => getXtermTheme(themeId),
     // initial 仅依赖一次,但 themeId 仅作 dep 进入 effect 不等于 recreate
     // 这里读初值,运行时切换走另一个 effect。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    session.id,
-  ]);
+    [session.id],
+  );
 
   // 搜索栏状态
   const [searchVisible, setSearchVisible] = useState(false);
@@ -761,7 +762,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       // CPB-P1:粘贴完成无论成功失败都归还焦点。
       focusTerminal(termRef, searchVisibleRef);
     }
-  }, [session.id, modal, bracketedPaste]);
+  }, [session.id, modal, bracketedPaste, tx]);
 
   const handleClear = useCallback(() => {
     const term = termRef.current;
