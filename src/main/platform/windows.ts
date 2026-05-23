@@ -771,7 +771,7 @@ function decodePossiblyUtf16Le(input: Buffer): string {
   const looksUtf16Le = sample.length > 0 && nulCount / sample.length > 0.15;
   const text = looksUtf16Le ? input.toString('utf16le') : input.toString('utf8');
   // 去除可能的 BOM 与残留 NUL
-  return text.replace(/^\uFEFF/, '').replace(/\u0000/g, '');
+  return text.replace(/^\uFEFF/, '').replaceAll('\u0000', '');
 }
 
 /**
