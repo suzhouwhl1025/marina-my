@@ -34,7 +34,11 @@ import {
   type PickFolderResponse,
 } from '@shared/protocol';
 import type { PathNode, SessionInfo, SshProfile } from '@shared/types';
-import { disambiguatePathNames } from '@shared/path-display';
+import {
+  disambiguatePathNames,
+  formatPathDisplayPath,
+  toWslUncPath,
+} from '@shared/path-display';
 import { useTranslation } from './LanguageProvider';
 import {
   findMyOwnedSessionId,
@@ -70,6 +74,7 @@ interface DeviceSection {
   iconName: IconName;
   kind: 'local' | 'ssh' | 'wsl';
   sshProfileId?: string;
+  wslDistroName?: string;
   paths: PathNode[];
 }
 
@@ -155,6 +160,25 @@ export function Sidebar(): JSX.Element {
   const handleAddDevicePath = async (section: DeviceSection): Promise<void> => {
     if (section.kind === 'ssh') {
       await handleAddSshBookmark(section);
+      return;
+    }
+    if (section.kind === 'wsl') {
+      try {
+        const result = await window.api.invoke<unknown, PickFolderResponse>(
+          COMMAND_CHANNELS.BOOKMARK_PICK_FOLDER,
+          { defaultPath: toWslUncPath(section.wslDistroName ?? '') },
+        );
+        if (result.path === null) return;
+        await window.api.invoke<unknown, AddBookmarkResponse>(
+          COMMAND_CHANNELS.BOOKMARK_ADD,
+          { path: result.path },
+        );
+      } catch (err) {
+        toast.push({
+          kind: 'error',
+          message: `添加 WSL 文件夹失败:${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
       return;
     }
     await handleAddLocalBookmark();
@@ -449,17 +473,13 @@ function PathItem({
   );
   const activeCount = sessions.length;
   // BETA-014:优先用 Category 算好的去重名;退到本节点 displayName / 末段
-  const sshProfile = node.sshProfileId
-    ? state.sshProfiles.find((p) => p.id === node.sshProfileId)
-    : undefined;
   const displayName =
     displayNameOverride ??
     node.displayName ??
     formatPathDisplayName(node);
+  const actionPath = node.path;
   const displayPath =
-    node.kind === 'ssh' && sshProfile
-      ? `${sshProfile.username}@${sshProfile.host}:${node.path}`
-      : node.path;
+    node.kind === 'ssh' ? node.path : formatPathDisplayPath(node);
 
   // M1-C:行内重命名 (仅收藏支持)
   const [renaming, setRenaming] = useState(false);
@@ -549,7 +569,7 @@ function PathItem({
     // 通用项
     items.push({
       label: '复制路径',
-      onSelect: () => copyToClipboard(displayPath, '路径'),
+      onSelect: () => copyToClipboard(actionPath, '路径'),
     });
     if (node.kind !== 'ssh') {
       items.push({
@@ -1039,6 +1059,7 @@ function buildDeviceSections(pathTree: {
       title: `WSL ${distro}`,
       iconName: 'shell',
       kind: 'wsl',
+      wslDistroName: distro,
       paths,
     });
   }

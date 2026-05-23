@@ -44,6 +44,7 @@ import {
   type UpdateTemplatePayload,
   type UpdateTemplateResponse,
 } from '@shared/protocol';
+import { formatDisplayPath, toWslUncPath } from '@shared/path-display';
 import type {
   NewTerminalShellPolicy,
   PostExitAction,
@@ -262,33 +263,24 @@ function AppearancePanel({
         label={tx('主题', 'Theme')}
         hint={tx('所有窗口立即同步;xterm 颜色与 UI 同步切换', 'Applies to all windows immediately; xterm colors stay in sync')}
       >
-        {/* BETA-032:主题选择改纯文本列表 + tone tag,不再色卡 */}
-        <ul className="settings-theme-list" role="radiogroup" aria-label={tx('主题', 'Theme')}>
+        <select
+          className="settings-input"
+          value={theme}
+          aria-label={tx('主题', 'Theme')}
+          onChange={(e) =>
+            void updateSettings(
+              { appearance: { theme: e.target.value as ThemeId } },
+              setError,
+            )
+          }
+        >
           {THEMES.map((t) => (
-            <li
-              key={t.id}
-              className={`settings-theme-row${theme === t.id ? ' active' : ''}`}
-              role="radio"
-              aria-checked={theme === t.id}
-              tabIndex={0}
-              onClick={() =>
-                void updateSettings({ appearance: { theme: t.id } }, setError)
-              }
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  void updateSettings({ appearance: { theme: t.id } }, setError);
-                }
-              }}
-            >
-              <span className="theme-name">{t.label}</span>
-              <span className={`theme-tone-tag tone-${t.tone === '深色' ? 'dark' : 'light'}`}>
-                {t.tone === '深色' ? tx('深色', 'Dark') : tx('浅色', 'Light')}
-                {t.note ? ` · ${t.note === '默认' ? tx('默认', 'Default') : t.note}` : ''}
-              </span>
-            </li>
+            <option key={t.id} value={t.id}>
+              {t.label} · {t.tone === '深色' ? tx('深色', 'Dark') : tx('浅色', 'Light')}
+              {t.note ? ` · ${t.note === '默认' ? tx('默认', 'Default') : t.note}` : ''}
+            </option>
           ))}
-        </ul>
+        </select>
       </SettingRow>
 
       <SettingRow
@@ -1111,6 +1103,7 @@ function DataPanel({
   const [wslDistros, setWslDistros] = useState<Array<{ id: string; name: string }>>([]);
   const [wslDistroId, setWslDistroId] = useState('');
   const [wslPath, setWslPath] = useState('/home');
+  const [wslPickedUncPath, setWslPickedUncPath] = useState<string | null>(null);
   const [wslName, setWslName] = useState('');
   // BETA-039:从主进程取真实 userData 路径(app.getPath('userData')),
   // portable / dev / 自定义 userData 场景下 UI 都准确;首次渲染前显示占位。
@@ -1342,17 +1335,22 @@ function DataPanel({
         return;
       }
       const normalizedPath = wslPath.trim().replaceAll('\\', '/');
-      if (!normalizedPath.startsWith('/')) {
+      const usePickedUnc =
+        wslPickedUncPath !== null &&
+        formatDisplayPath(wslPickedUncPath) === normalizedPath;
+      if (!normalizedPath.startsWith('/') && !usePickedUnc) {
         setError(tx('WSL 路径必须是 Linux 绝对路径,例如 /home/user/project', 'WSL path must be an absolute Linux path, for example /home/user/project'));
         return;
       }
-      const relative = normalizedPath.replace(/^\/+/, '').replace(/\/+/g, '\\');
-      const uncPath = `\\\\wsl$\\${distro}${relative ? `\\${relative}` : '\\'}`;
+      const uncPath = usePickedUnc
+        ? wslPickedUncPath
+        : toWslUncPath(distro, normalizedPath);
       await window.api.invoke(COMMAND_CHANNELS.BOOKMARK_ADD, {
         path: uncPath,
         ...(wslName.trim() ? { displayName: wslName.trim() } : {}),
       });
       setWslPath('/home');
+      setWslPickedUncPath(null);
       setWslName('');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1362,16 +1360,20 @@ function DataPanel({
   const handlePickWslFolder = async (): Promise<void> => {
     setError(null);
     try {
+      const distro = wslDistroId.startsWith('wsl:')
+        ? wslDistroId.slice('wsl:'.length)
+        : '';
+      if (!distro) {
+        setError(tx('请先选择 WSL 发行版', 'Select a WSL distro first'));
+        return;
+      }
       const result = await window.api.invoke<unknown, { path: string | null }>(
         COMMAND_CHANNELS.BOOKMARK_PICK_FOLDER,
-        {},
+        { defaultPath: toWslUncPath(distro, wslPath) },
       );
       if (!result.path) return;
-      await window.api.invoke(COMMAND_CHANNELS.BOOKMARK_ADD, {
-        path: result.path,
-        ...(wslName.trim() ? { displayName: wslName.trim() } : {}),
-      });
-      setWslName('');
+      setWslPickedUncPath(result.path);
+      setWslPath(formatDisplayPath(result.path));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1528,7 +1530,15 @@ function DataPanel({
               ))
             )}
           </select>
-          <input className="settings-input" value={wslPath} onChange={(e) => setWslPath(e.target.value)} placeholder="/home/user/project" />
+          <input
+            className="settings-input"
+            value={wslPath}
+            onChange={(e) => {
+              setWslPickedUncPath(null);
+              setWslPath(e.target.value);
+            }}
+            placeholder="/home/user/project"
+          />
           <input className="settings-input" value={wslName} onChange={(e) => setWslName(e.target.value)} placeholder={tx('显示名(可选)', 'Display name (optional)')} />
           <button type="button" className="settings-button" onClick={() => void handleAddWslBookmark()} disabled={wslDistros.length === 0}>
             {tx('加入 WSL', 'Add WSL')}
