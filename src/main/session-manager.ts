@@ -1374,6 +1374,29 @@ export class SessionManager extends EventEmitter {
     this.emit('sessionOutput', payload);
   }
 
+  /**
+   * 在 session 退出或销毁前同步发出仍在 8ms 聚合窗口内的输出。
+   *
+   * @param managed 待处理的 session
+   *
+   * @副作用:
+   * - 取消 pendingEmitTimer
+   * - 若存在 pendingEmit,立即 emit sessionOutput 并推进 scrollbackLastSeq
+   *
+   * @常见问题排查:
+   * - 如果 renderer 在 exited/destroyed 之后才收到最后输出,检查调用方是否
+   *   在 clearTimers() 之前调用了本函数。
+   */
+  private flushPendingEmitBeforeLifecycleChange(managed: ManagedSession): void {
+    if (managed.pendingEmitTimer) {
+      clearTimeout(managed.pendingEmitTimer);
+      managed.pendingEmitTimer = null;
+    }
+    if (managed.pendingEmit) {
+      this.flushPendingEmit(managed);
+    }
+  }
+
   private handlePtyExit(
     managed: ManagedSession,
     exitCode: number,
@@ -1386,13 +1409,7 @@ export class SessionManager extends EventEmitter {
     // 保证 renderer 看到的因果序是"最后一段输出 → exited",而不是相反。
     // 否则 PER-2 引入的 8ms 聚合窗口可能含 PTY 退出前最后一波字节,等到
     // exited 已发出后才 fire → renderer 收到"已退出 session 的延迟输出"。
-    if (managed.pendingEmitTimer) {
-      clearTimeout(managed.pendingEmitTimer);
-      managed.pendingEmitTimer = null;
-    }
-    if (managed.pendingEmit) {
-      this.flushPendingEmit(managed);
-    }
+    this.flushPendingEmitBeforeLifecycleChange(managed);
 
     // emit session-exited 事件 (用于通知 renderer 显示 exitCode 等)
     const payload: SessionExitedPayload = {
@@ -1429,13 +1446,7 @@ export class SessionManager extends EventEmitter {
 
     // PER-2:destroy 前 flush pending emit,让 owner 收到最后一段字节
     // 之后再标记 destroyed。否则会丢掉 destroy 前 8ms 内的最后 burst。
-    if (managed.pendingEmitTimer) {
-      clearTimeout(managed.pendingEmitTimer);
-      managed.pendingEmitTimer = null;
-    }
-    if (managed.pendingEmit) {
-      this.flushPendingEmit(managed);
-    }
+    this.flushPendingEmitBeforeLifecycleChange(managed);
 
     this.clearTimers(managed);
     for (const d of managed.disposables) {
