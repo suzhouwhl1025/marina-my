@@ -36,10 +36,14 @@ import {
   type AddTemplateResponse,
   type ExplorerIntegrationStatus,
   type ImportSettingsResponse,
+  type KnownHostsRefreshResponse,
   type ListShellsResponse,
   type ExportSettingsResponse,
   type PickSshKeyFileResponse,
   type SetExplorerIntegrationResponse,
+  type SshAgentStatusResponse,
+  type SshConfigEntryDto,
+  type SshConfigListResponse,
   type UpdateSshProfileResponse,
   type UpdateTemplatePayload,
   type UpdateTemplateResponse,
@@ -1461,12 +1465,56 @@ function RemotePanel({
   const [sshKeyFile, setSshKeyFile] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [sshSavePassword, setSshSavePassword] = useState(false);
+  /** SSH 方案 §阶段 2.3:ProxyJump 多跳板,UI 用逗号分隔字符串展示 */
+  const [sshProxyJump, setSshProxyJump] = useState('');
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [remoteProfileId, setRemoteProfileId] = useState('');
   const [remotePath, setRemotePath] = useState('~');
   const [remoteName, setRemoteName] = useState('');
 
   const enableRemote = state.settings?.advanced?.enableRemote === true;
+  const includeSshConfig = state.settings?.advanced?.includeSshConfig === true;
+  const enableControlMaster = state.settings?.advanced?.enableControlMaster !== false;
+
+  // §阶段 2.2 / 2.1 / 3.1:ssh-agent / ssh_config / known_hosts 异步查询 — UI
+  // 加载时拉一次,提供"刷新"按钮供用户手动重查
+  const [agentStatus, setAgentStatus] = useState<SshAgentStatusResponse | null>(null);
+  const [sshConfigEntries, setSshConfigEntries] = useState<SshConfigEntryDto[]>([]);
+  const [knownHosts, setKnownHosts] = useState<KnownHostsRefreshResponse | null>(null);
+
+  const refreshAgent = useCallback(() => {
+    window.api
+      .invoke<unknown, SshAgentStatusResponse>(COMMAND_CHANNELS.SSH_AGENT_STATUS, {})
+      .then(setAgentStatus)
+      .catch((err) => {
+        console.warn('[RemotePanel] ssh-agent status query failed', err);
+      });
+  }, []);
+  const refreshSshConfig = useCallback(() => {
+    window.api
+      .invoke<unknown, SshConfigListResponse>(COMMAND_CHANNELS.SSH_CONFIG_LIST, {})
+      .then((r) => setSshConfigEntries(r.entries))
+      .catch((err) => {
+        console.warn('[RemotePanel] ssh_config list failed', err);
+      });
+  }, []);
+  const refreshKnownHosts = useCallback(() => {
+    window.api
+      .invoke<unknown, KnownHostsRefreshResponse>(COMMAND_CHANNELS.KNOWN_HOSTS_REFRESH, {})
+      .then(setKnownHosts)
+      .catch((err) => {
+        console.warn('[RemotePanel] known_hosts refresh failed', err);
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshAgent();
+    refreshKnownHosts();
+  }, [refreshAgent, refreshKnownHosts]);
+  useEffect(() => {
+    if (includeSshConfig) refreshSshConfig();
+    else setSshConfigEntries([]);
+  }, [includeSshConfig, refreshSshConfig]);
 
   const resetSshForm = (): void => {
     setEditingProfileId(null);
@@ -1478,6 +1526,7 @@ function RemotePanel({
     setSshKeyFile('');
     setSshPassword('');
     setSshSavePassword(false);
+    setSshProxyJump('');
   };
 
   const handleEditSshProfile = (id: string): void => {
@@ -1493,12 +1542,20 @@ function RemotePanel({
     setSshKeyFile(p.keyFilePath ?? '');
     setSshPassword('');
     setSshSavePassword(false);
+    setSshProxyJump((p.proxyJump ?? []).join(', '));
   };
+
+  const parsedProxyJump = (): string[] =>
+    sshProxyJump
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
 
   const handleSubmitSshProfile = async (): Promise<void> => {
     setError(null);
     try {
       const port = Number.parseInt(sshPort, 10);
+      const proxyJump = parsedProxyJump();
       if (editingProfileId) {
         const partial: Record<string, unknown> = {
           name: sshName,
@@ -1507,6 +1564,7 @@ function RemotePanel({
           username: sshUser,
           authType: sshAuthType,
           defaultRemoteCwd: remotePath || '~',
+          proxyJump,
         };
         if (sshAuthType === 'keyFile' && sshKeyFile.trim()) {
           partial.keyFilePath = sshKeyFile.trim();
@@ -1539,6 +1597,7 @@ function RemotePanel({
               ? { password: sshPassword }
               : {}),
             defaultRemoteCwd: remotePath || '~',
+            proxyJump,
           },
         );
         setRemoteProfileId(res.profile.id);
@@ -1686,6 +1745,17 @@ function RemotePanel({
               </button>
             </div>
           </div>
+          <div className="ssh-password-field">
+            <input
+              className="settings-input"
+              value={sshProxyJump}
+              onChange={(e) => setSshProxyJump(e.target.value)}
+              placeholder={tx(
+                'ProxyJump 跳板(可选,逗号分隔,如 bastion1, user@bastion2:2222)',
+                'ProxyJump hops (optional, comma-separated, e.g. bastion1, user@bastion2:2222)',
+              )}
+            />
+          </div>
           {sshAuthType === 'password' && (
             <div className="ssh-password-field">
               <input
@@ -1786,6 +1856,194 @@ function RemotePanel({
           >
             {tx('加入收藏', 'Add bookmark')}
           </button>
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('SSH-agent 状态', 'SSH agent status')}
+        hint={tx(
+          '查询当前 ssh-agent 是否运行 + 已加载的密钥。POSIX 通过 SSH_AUTH_SOCK / Windows 通过 OpenSSH Service。',
+          'Probes ssh-agent (via SSH_AUTH_SOCK on POSIX, OpenSSH Service on Windows) and lists loaded keys.',
+        )}
+      >
+        <div className="ssh-agent-card">
+          {agentStatus === null ? (
+            <span className="settings-info-text">{tx('正在探测…', 'Probing…')}</span>
+          ) : agentStatus.status === 'agent-running' ? (
+            <>
+              <span className="ssh-agent-status-line ok">
+                ✅ {tx('agent 正在运行', 'agent running')}
+                {agentStatus.keys.length === 0
+                  ? tx('(0 把密钥)', ' (0 keys)')
+                  : tx(
+                      `,已加载 ${agentStatus.keys.length} 把密钥`,
+                      `, ${agentStatus.keys.length} key(s) loaded`,
+                    )}
+              </span>
+              {agentStatus.keys.length > 0 && (
+                <ul className="ssh-agent-key-list">
+                  {agentStatus.keys.map((k) => (
+                    <li key={k.fingerprint}>
+                      <code>{k.fingerprint}</code> · {k.keyType} · {k.bits} bit
+                      {k.comment && ` · ${k.comment}`}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <span className="ssh-agent-status-line warn">
+              ⚠️ {agentStatus.message}
+            </span>
+          )}
+          <button
+            type="button"
+            className="settings-button"
+            onClick={refreshAgent}
+          >
+            {tx('刷新', 'Refresh')}
+          </button>
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('集成 ~/.ssh/config', 'Integrate ~/.ssh/config')}
+        hint={tx(
+          '启用后,sidebar / 设置页同时显示 ssh_config 里的 Host 条目(只读;改请直接编辑 ~/.ssh/config)。Match 块当前跳过,V1 仅支持 Host + Include。',
+          'When on, Host entries from ssh_config appear in the sidebar / settings (read-only — edit ~/.ssh/config directly). Match blocks are skipped in V1; Host + Include supported.',
+        )}
+      >
+        <div className="ssh-agent-card">
+          <label className="ssh-enable-toggle">
+            <input
+              type="checkbox"
+              checked={includeSshConfig}
+              onChange={(e) =>
+                void updateSettings(
+                  { advanced: { includeSshConfig: e.target.checked } },
+                  setError,
+                )
+              }
+            />
+            {tx('合并 ~/.ssh/config 到 profile 列表', 'Merge ~/.ssh/config into profile list')}
+          </label>
+          {includeSshConfig && (
+            <>
+              <span className="settings-info-text">
+                {tx(`发现 ${sshConfigEntries.length} 条 Host`, `Discovered ${sshConfigEntries.length} Host entries`)}
+              </span>
+              {sshConfigEntries.length > 0 && (
+                <ul className="ssh-config-list">
+                  {sshConfigEntries.slice(0, 20).map((e) => (
+                    <li key={`${e.sourceFile}#${e.alias}`} title={e.sourceFile}>
+                      <strong>{e.alias}</strong> → {e.user ? `${e.user}@` : ''}
+                      {e.hostName}:{e.port}
+                      {e.proxyJump.length > 0 && (
+                        <span className="ssh-config-hint">
+                          {' '}· {tx('via', 'via')} {e.proxyJump.join(',')}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                  {sshConfigEntries.length > 20 && (
+                    <li className="ssh-config-hint">
+                      {tx(
+                        `… 还有 ${sshConfigEntries.length - 20} 条未显示`,
+                        `… ${sshConfigEntries.length - 20} more not shown`,
+                      )}
+                    </li>
+                  )}
+                </ul>
+              )}
+              <button
+                type="button"
+                className="settings-button"
+                onClick={refreshSshConfig}
+              >
+                {tx('重新加载 ssh_config', 'Reload ssh_config')}
+              </button>
+            </>
+          )}
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('启用 ControlMaster 连接复用', 'Enable ControlMaster connection sharing')}
+        hint={tx(
+          '同一主机的多个 session 共享首次握手,从 ~3 秒降到 <100ms。Windows OpenSSH 8.x+ 走 named pipe;不稳定时 OpenSSH 自动回退到新连接。',
+          'Reuse the first SSH handshake across sessions to the same host (~3s → <100ms). Windows OpenSSH 8.x+ uses a named pipe; falls back to a fresh connection if unavailable.',
+        )}
+      >
+        <label className="ssh-enable-toggle">
+          <input
+            type="checkbox"
+            checked={enableControlMaster}
+            onChange={(e) =>
+              void updateSettings(
+                { advanced: { enableControlMaster: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          {tx('启用 ControlMaster(推荐)', 'Enable ControlMaster (recommended)')}
+        </label>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('已知主机指纹', 'Known host fingerprints')}
+        hint={tx(
+          '解析 ~/.ssh/known_hosts;同主机指纹变化时高亮(可能是 MITM 或服务器换 key)。Marina 记录指纹历史跨重启保留。',
+          'Parses ~/.ssh/known_hosts; highlights host-key changes (potential MITM or server key rotation). Marina keeps fingerprint history across restarts.',
+        )}
+      >
+        <div className="ssh-agent-card">
+          {knownHosts === null ? (
+            <span className="settings-info-text">{tx('正在加载…', 'Loading…')}</span>
+          ) : (
+            <>
+              {knownHosts.changes.length > 0 && (
+                <ul className="ssh-known-hosts-changes">
+                  {knownHosts.changes.map((c) => (
+                    <li key={`${c.host}:${c.newFingerprint}`}>
+                      ⚠️ <strong>{c.host}</strong> {c.keyType} {tx('指纹已变化', 'fingerprint changed')}:
+                      <br />
+                      &nbsp;&nbsp;{tx('原', 'was')}: <code>{c.previousFingerprint}</code>
+                      <br />
+                      &nbsp;&nbsp;{tx('现', 'now')}: <code>{c.newFingerprint}</code>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <span className="settings-info-text">
+                {tx(`共 ${knownHosts.entries.length} 条`, `${knownHosts.entries.length} entries`)}
+              </span>
+              {knownHosts.entries.length > 0 && (
+                <ul className="ssh-known-hosts-list">
+                  {knownHosts.entries.slice(0, 10).map((e) => (
+                    <li key={`${e.hosts}#${e.fingerprint}`}>
+                      <strong>{e.isHashed ? '(hashed)' : e.hosts}</strong> · {e.keyType}{' '}
+                      · <code>{e.fingerprint}</code>
+                    </li>
+                  ))}
+                  {knownHosts.entries.length > 10 && (
+                    <li className="ssh-config-hint">
+                      {tx(
+                        `… 还有 ${knownHosts.entries.length - 10} 条未显示`,
+                        `… ${knownHosts.entries.length - 10} more not shown`,
+                      )}
+                    </li>
+                  )}
+                </ul>
+              )}
+              <button
+                type="button"
+                className="settings-button"
+                onClick={refreshKnownHosts}
+              >
+                {tx('刷新', 'Refresh')}
+              </button>
+            </>
+          )}
         </div>
       </SettingRow>
 
