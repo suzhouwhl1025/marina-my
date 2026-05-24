@@ -2562,6 +2562,11 @@ function AdvancedPanel({
   const adv = state.settings.advanced;
   const logLevel = adv?.logLevel ?? 'INFO';
   const terminalRenderer = adv?.terminalRenderer ?? 'auto';
+  // SSH 入口发现性兜底:RemotePanel 自身只在 hasSshProfiles || enableRemote
+  // 时显示,全新用户没 profile 也没开关 → 永远见不到"远程"分类。
+  // 解法:把同一个 enableRemote 开关也放在"高级"分类里(始终可见),
+  // 让用户能从"高级"主动启用远程模式,RemotePanel 随之出现可加 profile。
+  const enableRemote = adv?.enableRemote === true;
 
   const [confirmingReset, setConfirmingReset] = useState(false);
 
@@ -2629,6 +2634,28 @@ function AdvancedPanel({
         <button type="button" className="settings-button" onClick={handleOpenLogs}>
           {tx('打开日志目录', 'Open log directory')}
         </button>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('启用 SSH / 远程模式', 'Enable SSH / Remote mode')}
+        hint={tx(
+          '勾选后,sidebar 顶部出现 [本地] [远程] 切换,设置页第 5 位多一个"远程"分类,可在那里添加 SSH 服务器、配置 ssh_config 集成、查看 known_hosts。不勾或无 SSH 服务器时,Marina 跟 beta.9 完全一致(本地用户视野不变)。',
+          'When on, the sidebar shows a [Local] [Remote] toggle and Settings gains a "Remote" category where you can add SSH servers, integrate ssh_config, view known_hosts, etc. When off and no SSH server is configured, Marina behaves exactly like beta.9 (local-only view is preserved).',
+        )}
+      >
+        <label className="ssh-enable-toggle">
+          <input
+            type="checkbox"
+            checked={enableRemote}
+            onChange={(e) =>
+              void updateSettings(
+                { advanced: { enableRemote: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          {tx('启用远程入口(看 ↑ hint)', 'Enable remote entry (see hint above)')}
+        </label>
       </SettingRow>
 
       <SettingRow
