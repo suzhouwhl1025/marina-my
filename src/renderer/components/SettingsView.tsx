@@ -1776,21 +1776,23 @@ function RemotePanel({
                 }
                 autoComplete="new-password"
               />
-              <label className="ssh-password-save">
+              <label className="settings-checkbox">
                 <input
                   type="checkbox"
                   checked={sshSavePassword}
                   onChange={(e) => setSshSavePassword(e.target.checked)}
                 />
-                {editingProfileId
-                  ? tx(
-                      '应用密码修改(勾选 + 留空可清除已保存密码)',
-                      'Apply password change (checked + empty clears saved password)',
-                    )
-                  : tx(
-                      '保存密码(OS 加密;需 sshpass 才能自动登录)',
-                      'Save password (OS-encrypted; needs sshpass on PATH for auto-login)',
-                    )}
+                <span>
+                  {editingProfileId
+                    ? tx(
+                        '应用密码修改(勾选 + 留空可清除已保存密码)',
+                        'Apply password change (checked + empty clears saved password)',
+                      )
+                    : tx(
+                        '保存密码(OS 加密;需 sshpass 才能自动登录)',
+                        'Save password (OS-encrypted; needs sshpass on PATH for auto-login)',
+                      )}
+                </span>
               </label>
             </div>
           )}
@@ -1914,7 +1916,7 @@ function RemotePanel({
         )}
       >
         <div className="ssh-agent-card">
-          <label className="ssh-enable-toggle">
+          <label className="settings-checkbox">
             <input
               type="checkbox"
               checked={includeSshConfig}
@@ -1925,7 +1927,7 @@ function RemotePanel({
                 )
               }
             />
-            {tx('合并 ~/.ssh/config 到 profile 列表', 'Merge ~/.ssh/config into profile list')}
+            <span>{tx('合并 ~/.ssh/config 到 profile 列表', 'Merge ~/.ssh/config into profile list')}</span>
           </label>
           {includeSshConfig && (
             <>
@@ -1974,7 +1976,7 @@ function RemotePanel({
           'Reuse the first SSH handshake across sessions to the same host (~3s → <100ms). Windows OpenSSH 8.x+ uses a named pipe; falls back to a fresh connection if unavailable.',
         )}
       >
-        <label className="ssh-enable-toggle">
+        <label className="settings-checkbox">
           <input
             type="checkbox"
             checked={enableControlMaster}
@@ -1985,7 +1987,7 @@ function RemotePanel({
               )
             }
           />
-          {tx('启用 ControlMaster(推荐)', 'Enable ControlMaster (recommended)')}
+          <span>{tx('启用 ControlMaster(推荐)', 'Enable ControlMaster (recommended)')}</span>
         </label>
       </SettingRow>
 
@@ -2054,7 +2056,7 @@ function RemotePanel({
           'Show the remote entry in the sidebar and settings even without any SSH server. Turning this off hides this panel if no profile exists (takes effect after re-entering settings).',
         )}
       >
-        <label className="ssh-enable-toggle">
+        <label className="settings-checkbox">
           <input
             type="checkbox"
             checked={enableRemote}
@@ -2065,7 +2067,7 @@ function RemotePanel({
               )
             }
           />
-          {tx('启用远程入口', 'Enable remote entry')}
+          <span>{tx('启用远程入口', 'Enable remote entry')}</span>
         </label>
       </SettingRow>
     </section>
@@ -2643,7 +2645,7 @@ function AdvancedPanel({
           'When on, the sidebar shows a [Local] [Remote] toggle and Settings gains a "Remote" category where you can add SSH servers, integrate ssh_config, view known_hosts, etc. When off and no SSH server is configured, Marina behaves exactly like beta.9 (local-only view is preserved).',
         )}
       >
-        <label className="ssh-enable-toggle">
+        <label className="settings-checkbox">
           <input
             type="checkbox"
             checked={enableRemote}
@@ -2654,7 +2656,7 @@ function AdvancedPanel({
               )
             }
           />
-          {tx('启用远程入口(看 ↑ hint)', 'Enable remote entry (see hint above)')}
+          <span>{tx('启用远程入口(看 ↑ hint)', 'Enable remote entry (see hint above)')}</span>
         </label>
       </SettingRow>
 

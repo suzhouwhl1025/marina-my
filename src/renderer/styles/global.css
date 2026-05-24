@@ -2071,23 +2071,9 @@ textarea.settings-input::-webkit-scrollbar-corner {
   gap: 4px;
 }
 
-.ssh-password-save {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
 .ssh-profile-actions {
   display: flex;
   gap: 6px;
-}
-
-.ssh-enable-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
 }
 
 .ssh-agent-card {
