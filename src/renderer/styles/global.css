@@ -1141,15 +1141,6 @@ html[data-maximized='true'] .app-root.with-shell {
   flex: 0 0 auto;
 }
 
-.sidebar-category.device-category .sidebar-category-icon {
-  color: var(--color-info, #f0f);
-}
-
-.sidebar-category.device-category .sidebar-category-title {
-  font-size: 13px;
-  font-weight: 600;
-}
-
 .sidebar-category-title {
   display: flex;
   align-items: center;
@@ -1262,24 +1253,6 @@ html[data-maximized='true'] .app-root.with-shell {
   color: var(--color-text-primary, #f0f);
   font-weight: 500;
   line-height: 1.25;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.path-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.path-subtitle {
-  color: var(--color-text-muted, #f0f);
-  font-size: 10px;
-  line-height: 1.2;
-  font-family: var(--terminal-font-family, monospace);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
