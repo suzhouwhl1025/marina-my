@@ -24,6 +24,7 @@ import { WindowManager } from './window-manager';
 import { TrayManager } from './tray';
 import { SessionManager } from './session-manager';
 import { PathManager } from './path-manager';
+import { SshProfileManager } from './ssh-profile-manager';
 import { SettingsManager, DEFAULT_SETTINGS } from './settings-manager';
 import { TemplatesManager } from './templates-manager';
 import { JsonStore } from './persistence';
@@ -38,6 +39,7 @@ import type {
   BookmarksFile,
   RecentFile,
   Settings,
+  SshProfilesFile,
   TemplatesFile,
 } from '@shared/types';
 
@@ -65,6 +67,7 @@ async function scanInvalidPathsAsync(pathManager: PathManager): Promise<void> {
   ];
   const invalid: string[] = [];
   for (const node of allPaths) {
+    if (node.kind === 'ssh') continue;
     try {
       if (!existsSync(node.path)) {
         invalid.push(node.path);
@@ -162,10 +165,12 @@ function bootstrap(): void {
   const settingsStore = new JsonStore<Settings>(join(dataDir, 'settings.json'));
   const bookmarksStore = new JsonStore<BookmarksFile>(join(dataDir, 'bookmarks.json'));
   const recentStore = new JsonStore<RecentFile>(join(dataDir, 'recent.json'));
+  const sshProfilesStore = new JsonStore<SshProfilesFile>(join(dataDir, 'ssh-profiles.json'));
   const templatesStore = new JsonStore<TemplatesFile>(join(dataDir, 'templates.json'));
 
   const settingsManager = new SettingsManager(settingsStore);
   const pathManager = new PathManager(bookmarksStore, recentStore);
+  const sshProfileManager = new SshProfileManager(sshProfilesStore);
   const templatesManager = new TemplatesManager(templatesStore);
   const sessionManager = new SessionManager(
     windowManager,
@@ -343,6 +348,8 @@ function bootstrap(): void {
       );
       const { bookmarksSource } = await pathManager.initialize();
       logger.info('main', `bookmarks loaded from: ${bookmarksSource}`);
+      const sshProfilesSrc = await sshProfileManager.initialize();
+      logger.info('main', `ssh profiles loaded from: ${sshProfilesSrc}`);
       const tmplSrc = await templatesManager.initialize();
       logger.info('main', `templates loaded from: ${tmplSrc}`);
 
@@ -356,6 +363,7 @@ function bootstrap(): void {
         pathManager,
         settingsManager,
         sessionManager,
+        sshProfileManager,
         templatesManager,
         aiClient,
       });
@@ -561,6 +569,7 @@ function bootstrap(): void {
       const flushAll = Promise.all([
         settingsManager.flush(),
         pathManager.flush(),
+        sshProfileManager.flush(),
         templatesManager.flush(),
         logger.flush(),
       ]);

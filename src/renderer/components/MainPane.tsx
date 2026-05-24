@@ -31,9 +31,11 @@ import {
   type CreateSessionResponse,
   type ListShellsResponse,
 } from '@shared/protocol';
+import { formatPathDisplayPath } from '@shared/path-display';
 import type { SessionInfo, Template } from '@shared/types';
 import {
   findMyOwnedSessionId,
+  findPathNode,
   getDisplayableSession,
   getSessionsInSelectedPath,
   useAppDispatch,
@@ -80,6 +82,7 @@ const MIN_ROWS = 5;
  * 落到 templateShell 兜底。
  */
 function shellIcon(id: string): IconName {
+  if (id === 'wsl' || id.startsWith('wsl:')) return 'shell';
   switch (id) {
     case 'pwsh':
       return 'shellPwsh';
@@ -92,6 +95,22 @@ function shellIcon(id: string): IconName {
     default:
       return 'templateShell';
   }
+}
+
+function getWslDistroName(path: string): string | null {
+  const match = path.match(/^\\\\(?:wsl\$|wsl\.localhost)\\([^\\]+)(?:\\|$)/i);
+  return match?.[1] ?? null;
+}
+
+function filterShellsForWslPath(
+  shells: DetectedShell[],
+  distroName: string | null,
+): DetectedShell[] {
+  if (!distroName) return shells;
+  const targetId = `wsl:${distroName}`.toLowerCase();
+  const distroShells = shells.filter((s) => s.id.toLowerCase() === targetId);
+  if (distroShells.length > 0) return distroShells;
+  return shells.filter((s) => s.id.toLowerCase() === 'wsl');
 }
 
 export function MainPane(): JSX.Element {
@@ -200,12 +219,25 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   const dispatch = useAppDispatch();
   const toast = useToast();
   const [creating, setCreating] = useState(false);
-  const displayPath = pathId;
+  const node = findPathNode(state.pathTree, pathId);
+  const isSshPath = node?.kind === 'ssh';
+  const wslDistroName = node ? getWslDistroName(node.path) : null;
+  const isWslPath = !!wslDistroName;
+  const displayPath =
+    isSshPath && node
+      ? node.path
+      : node
+        ? formatPathDisplayPath(node)
+        : pathId;
   // 勘误第二轮 #3:启动期拉一次 detectShells,缓存到组件状态。SessionManager
   // 内部已 cache,所以二次以上调用是 O(1)。
   const [shells, setShells] = useState<DetectedShell[] | null>(null);
 
   useEffect(() => {
+    if (isSshPath) {
+      setShells([]);
+      return;
+    }
     let cancelled = false;
     window.api
       .invoke<unknown, ListShellsResponse>(
@@ -222,11 +254,12 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isSshPath]);
 
   const handleCreate = async (
     templateId: string,
     shellId?: string,
+    sshTmuxMode?: 'disabled' | 'attach-or-create',
   ): Promise<void> => {
     if (creating) return;
     setCreating(true);
@@ -238,11 +271,15 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
           pathId,
           templateId,
           ...(shellId ? { shellId } : {}),
+          ...(isSshPath ? { sshTmuxMode: sshTmuxMode ?? 'disabled' } : {}),
           cols: dims.cols,
           rows: dims.rows,
         },
       );
       dispatch({ type: 'view/select-session', sessionId: res.session.id });
+      if (res.warning) {
+        toast.push({ kind: 'warn', message: tx(res.warning, res.warning) });
+      }
       // FOC-3:模板按钮点击后焦点漂在 button 上,挂载 TerminalView 后
       // 自动把焦点送回 xterm。A4 的 selectedSessionId effect 也会兜底,
       // 但显式 + rAF 让"立即可打字"语义更清晰。
@@ -259,6 +296,8 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
   };
 
   const templates = state.templates;
+  const visibleShells = shells ? filterShellsForWslPath(shells, wslDistroName) : null;
+  const wslShellId = isWslPath ? visibleShells?.[0]?.id : undefined;
 
   return (
     <div className="empty-path-state">
@@ -267,11 +306,43 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
         {tx(' 新建终端', '')}
       </p>
 
-      {shells && shells.length > 0 && (
+      {isSshPath && (
+        <div className="empty-section">
+          <div className="empty-section-title">SSH</div>
+          <div className="empty-button-grid">
+            <button
+              type="button"
+              className="template-button"
+              onClick={() => void handleCreate('shell', undefined, 'disabled')}
+              disabled={creating}
+              title={displayPath}
+            >
+              <span className="template-icon">
+                <Icon name="shell" size={18} />
+              </span>
+              <span className="template-label">{tx('连接', 'Connect')}</span>
+            </button>
+            <button
+              type="button"
+              className="template-button"
+              onClick={() => void handleCreate('shell', undefined, 'attach-or-create')}
+              disabled={creating}
+              title={tx(`通过 tmux 连接 ${displayPath}`, `Connect with tmux to ${displayPath}`)}
+            >
+              <span className="template-icon">
+                <Icon name="templateShell" size={18} />
+              </span>
+              <span className="template-label">tmux</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!isSshPath && visibleShells && visibleShells.length > 0 && (
         <div className="empty-section">
           <div className="empty-section-title">{tx('检测到的 Shell', 'Detected shells')}</div>
           <div className="empty-button-grid">
-            {shells.map((s) => (
+            {visibleShells.map((s) => (
               <button
                 key={s.id}
                 type="button"
@@ -293,12 +364,12 @@ function EmptyPathState({ pathId }: { pathId: string }): JSX.Element {
       <div className="empty-section">
         <div className="empty-section-title">{tx('启动模板', 'Launch templates')}</div>
         <div className="empty-button-grid">
-          {templates.map((t) => (
+          {(isSshPath || !isWslPath || wslShellId) && templates.map((t) => (
             <TemplateLaunchButton
               key={t.id}
               template={t}
               creating={creating}
-              onLaunch={() => void handleCreate(t.id)}
+              onLaunch={() => void handleCreate(t.id, isSshPath ? undefined : wslShellId, 'disabled')}
             />
           ))}
         </div>

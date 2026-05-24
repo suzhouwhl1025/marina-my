@@ -104,6 +104,7 @@ import {
   isLikelyHistoryFlush,
   type ImeProbeEntry,
 } from '@shared/ime-probe-ring';
+import { isDeviceAttributesResponse } from '@shared/terminal-input-filter';
 import { useAppDispatch, useAppState } from '../store';
 import { readClipboardText, writeClipboardText } from '../clipboard';
 import { Icon } from './icons';
@@ -544,6 +545,7 @@ function isLightTheme(themeId: ThemeId | undefined): boolean {
   return getXtermTheme(themeId).extendedAnsi === LIGHT_EXTENDED_ANSI;
 }
 const LIGHT_THEME_MIN_CONTRAST = 4.5;
+const SSH_STARTUP_DA_FILTER_MS = 5000;
 
 interface TerminalViewProps {
   /**
@@ -605,12 +607,13 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
 
   // 把"创建期"读到的初始值用 useMemo 锁定 (terminal 创建后只用 mutator 调整),
   // 否则每次 settings 引用变化都会重建 xterm 实例。
-  const initialTheme = useMemo(() => getXtermTheme(themeId), [
+  const initialTheme = useMemo(
+    () => getXtermTheme(themeId),
     // initial 仅依赖一次,但 themeId 仅作 dep 进入 effect 不等于 recreate
     // 这里读初值,运行时切换走另一个 effect。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    session.id,
-  ]);
+    [session.id],
+  );
 
   // SCROLL-1 二次修复(2026-05-24,KBD-1 同 PR):scrollback replay 期间整体
   // 隐藏 terminal-host,直到 fence callback + scrollToBottom + 一帧 RAF 让
@@ -791,7 +794,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       // CPB-P1:粘贴完成无论成功失败都归还焦点。
       focusTerminal(termRef, searchVisibleRef);
     }
-  }, [session.id, modal, bracketedPaste]);
+  }, [session.id, modal, bracketedPaste, tx]);
 
   const handleClear = useCallback(() => {
     const term = termRef.current;
@@ -1442,6 +1445,8 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
     //
     // XTM-7:打字时若有待定 resize,先 flush 再发输入 — 拖窗 + 立刻打字
     // 场景下避免 PTY 用旧 cols/rows 处理 prompt 折行错位。
+    const sshDaFilterUntil =
+      session.pathId.startsWith('ssh:') ? Date.now() + SSH_STARTUP_DA_FILTER_MS : 0;
     const dataHandler = term.onData((data) => {
       // [IME-1 PROBE A] 临时探针 — 检测 onData 收到的 data 是否疑似
       // "textarea 累积历史被冲刷出去"。判定下沉到 isLikelyHistoryFlush
@@ -1493,6 +1498,18 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
         clearTimeout(resizeTimer);
         resizeTimer = null;
         performResize();
+      }
+      // SSH 登录启动期的远端 shell/terminfo 可能发 DA 查询。xterm 的自动响应
+      // 会通过 onData 回到输入方向;如果当时没有 TUI 程序读取,响应就落进
+      // bash prompt,被拆成 `61;6;...: command not found`。只在 SSH session
+      // 创建后的短窗口内丢弃"整段都是 DA 响应"的数据,避免影响 vim/tmux/less
+      // 运行时对终端能力的正常探测。
+      if (Date.now() < sshDaFilterUntil && isDeviceAttributesResponse(data)) {
+        console.debug('[TerminalView] dropped startup DA response for SSH session', {
+          sessionId: session.id,
+          length: data.length,
+        });
+        return;
       }
       const base64 = encodeStringToBase64(data);
       void window.api

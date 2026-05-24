@@ -32,15 +32,19 @@ import {
 import {
   COMMAND_CHANNELS,
   type AddTemplatePayload,
+  type AddSshProfileResponse,
   type AddTemplateResponse,
   type ExplorerIntegrationStatus,
   type ImportSettingsResponse,
   type ListShellsResponse,
   type ExportSettingsResponse,
+  type PickSshKeyFileResponse,
   type SetExplorerIntegrationResponse,
+  type UpdateSshProfileResponse,
   type UpdateTemplatePayload,
   type UpdateTemplateResponse,
 } from '@shared/protocol';
+import { formatDisplayPath, toWslUncPath } from '@shared/path-display';
 import type {
   NewTerminalShellPolicy,
   PostExitAction,
@@ -260,33 +264,24 @@ function AppearancePanel({
         label={tx('主题', 'Theme')}
         hint={tx('所有窗口立即同步;xterm 颜色与 UI 同步切换', 'Applies to all windows immediately; xterm colors stay in sync')}
       >
-        {/* BETA-032:主题选择改纯文本列表 + tone tag,不再色卡 */}
-        <ul className="settings-theme-list" role="radiogroup" aria-label={tx('主题', 'Theme')}>
+        <select
+          className="settings-input"
+          value={theme}
+          aria-label={tx('主题', 'Theme')}
+          onChange={(e) =>
+            void updateSettings(
+              { appearance: { theme: e.target.value as ThemeId } },
+              setError,
+            )
+          }
+        >
           {THEMES.map((t) => (
-            <li
-              key={t.id}
-              className={`settings-theme-row${theme === t.id ? ' active' : ''}`}
-              role="radio"
-              aria-checked={theme === t.id}
-              tabIndex={0}
-              onClick={() =>
-                void updateSettings({ appearance: { theme: t.id } }, setError)
-              }
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  void updateSettings({ appearance: { theme: t.id } }, setError);
-                }
-              }}
-            >
-              <span className="theme-name">{t.label}</span>
-              <span className={`theme-tone-tag tone-${t.tone === '深色' ? 'dark' : 'light'}`}>
-                {t.tone === '深色' ? tx('深色', 'Dark') : tx('浅色', 'Light')}
-                {t.note ? ` · ${t.note === '默认' ? tx('默认', 'Default') : t.note}` : ''}
-              </span>
-            </li>
+            <option key={t.id} value={t.id}>
+              {t.label} · {t.tone === '深色' ? tx('深色', 'Dark') : tx('浅色', 'Light')}
+              {t.note ? ` · ${t.note === '默认' ? tx('默认', 'Default') : t.note}` : ''}
+            </option>
           ))}
-        </ul>
+        </select>
       </SettingRow>
 
       <SettingRow
@@ -473,7 +468,7 @@ function ShellPanel({
     return () => {
       cancelled = true;
     };
-  }, [setError]);
+  }, [setError, tx]);
 
   if (templateMode.kind === 'edit') {
     return (
@@ -1138,8 +1133,27 @@ function DataPanel({
   setError: (msg: string | null) => void;
 }): JSX.Element {
   const { tx } = useTranslation();
+  const state = useAppState();
   const [busy, setBusy] = useState<'export' | 'import' | null>(null);
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
+  const [sshName, setSshName] = useState('');
+  const [sshHost, setSshHost] = useState('');
+  const [sshPort, setSshPort] = useState('22');
+  const [sshUser, setSshUser] = useState('');
+  const [sshAuthType, setSshAuthType] = useState<'keyFile' | 'password'>('password');
+  const [sshKeyFile, setSshKeyFile] = useState('');
+  const [sshPassword, setSshPassword] = useState('');
+  const [sshSavePassword, setSshSavePassword] = useState(false);
+  /** 非 null 时表单进入"编辑"模式;按钮文案/提交动作随之切换 */
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [remoteProfileId, setRemoteProfileId] = useState('');
+  const [remotePath, setRemotePath] = useState('~');
+  const [remoteName, setRemoteName] = useState('');
+  const [wslDistros, setWslDistros] = useState<Array<{ id: string; name: string }>>([]);
+  const [wslDistroId, setWslDistroId] = useState('');
+  const [wslPath, setWslPath] = useState('/home');
+  const [wslPickedUncPath, setWslPickedUncPath] = useState<string | null>(null);
+  const [wslName, setWslName] = useState('');
   // BETA-039:从主进程取真实 userData 路径(app.getPath('userData')),
   // portable / dev / 自定义 userData 场景下 UI 都准确;首次渲染前显示占位。
   const [dataDir, setDataDir] = useState<string>('…');
@@ -1152,6 +1166,32 @@ function DataPanel({
       })
       .catch(() => {
         // 静默:UI 退回到占位文本;真实路径取不到不影响其他功能。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.api
+      .invoke<unknown, ListShellsResponse>(
+        COMMAND_CHANNELS.SETTINGS_LIST_SHELLS,
+        {},
+      )
+      .then((res) => {
+        if (cancelled) return;
+        const distros = res.shells
+          .filter((shell) => shell.id.startsWith('wsl:'))
+          .map((shell) => ({
+            id: shell.id,
+            name: shell.id.slice('wsl:'.length),
+          }));
+        setWslDistros(distros);
+        setWslDistroId((current) => current || distros[0]?.id || '');
+      })
+      .catch(() => {
+        if (!cancelled) setWslDistros([]);
       });
     return () => {
       cancelled = true;
@@ -1203,9 +1243,360 @@ function DataPanel({
     }
   };
 
+  const resetSshForm = (): void => {
+    setEditingProfileId(null);
+    setSshName('');
+    setSshHost('');
+    setSshPort('22');
+    setSshUser('');
+    setSshAuthType('password');
+    setSshKeyFile('');
+    setSshPassword('');
+    setSshSavePassword(false);
+  };
+
+  const handleEditSshProfile = (id: string): void => {
+    const p = state.sshProfiles.find((x) => x.id === id);
+    if (!p) return;
+    setError(null);
+    setEditingProfileId(id);
+    setSshName(p.name);
+    setSshHost(p.host);
+    setSshPort(String(p.port));
+    setSshUser(p.username);
+    setSshAuthType(p.authType === 'keyFile' ? 'keyFile' : 'password');
+    setSshKeyFile(p.keyFilePath ?? '');
+    // 密码不回填(main 永远不会送明文给 renderer);留空 + 未勾保存 = 保留旧密码。
+    setSshPassword('');
+    setSshSavePassword(false);
+  };
+
+  const handleSubmitSshProfile = async (): Promise<void> => {
+    setError(null);
+    try {
+      const port = Number.parseInt(sshPort, 10);
+      if (editingProfileId) {
+        // 更新:password 字段的语义见 protocol.ts —— undefined 保留旧密码,
+        // ''(空串) 清除已保存密码,非空字符串则替换。
+        const partial: Record<string, unknown> = {
+          name: sshName,
+          host: sshHost,
+          port,
+          username: sshUser,
+          authType: sshAuthType,
+          defaultRemoteCwd: remotePath || '~',
+        };
+        if (sshAuthType === 'keyFile' && sshKeyFile.trim()) {
+          partial.keyFilePath = sshKeyFile.trim();
+        }
+        if (sshAuthType === 'password') {
+          if (sshSavePassword && sshPassword) {
+            partial.password = sshPassword;
+          } else if (sshSavePassword && !sshPassword) {
+            // 勾了保存但密码框为空 → 用户想清除已保存密码
+            partial.password = '';
+          }
+          // 未勾 → 不带 password 字段,保留旧值
+        }
+        await window.api.invoke<unknown, UpdateSshProfileResponse>(
+          COMMAND_CHANNELS.SSH_PROFILE_UPDATE,
+          { id: editingProfileId, partial },
+        );
+        resetSshForm();
+      } else {
+        const res = await window.api.invoke<unknown, AddSshProfileResponse>(
+          COMMAND_CHANNELS.SSH_PROFILE_ADD,
+          {
+            name: sshName,
+            host: sshHost,
+            port,
+            username: sshUser,
+            authType: sshAuthType,
+            ...(sshAuthType === 'keyFile' && sshKeyFile.trim()
+              ? { keyFilePath: sshKeyFile.trim() }
+              : {}),
+            ...(sshAuthType === 'password' && sshSavePassword && sshPassword
+              ? { password: sshPassword }
+              : {}),
+            defaultRemoteCwd: remotePath || '~',
+          },
+        );
+        setRemoteProfileId(res.profile.id);
+        resetSshForm();
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePickSshKeyFile = async (): Promise<void> => {
+    setError(null);
+    try {
+      const res = await window.api.invoke<unknown, PickSshKeyFileResponse>(
+        COMMAND_CHANNELS.SSH_PROFILE_PICK_KEY_FILE,
+        { ...(sshKeyFile.trim() ? { defaultPath: sshKeyFile.trim() } : {}) },
+      );
+      if (res.path) setSshKeyFile(res.path);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDeleteSshProfile = async (id: string): Promise<void> => {
+    setError(null);
+    try {
+      await window.api.invoke(COMMAND_CHANNELS.SSH_PROFILE_DELETE, { id });
+      if (remoteProfileId === id) setRemoteProfileId('');
+      if (editingProfileId === id) resetSshForm();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleAddRemoteBookmark = async (): Promise<void> => {
+    setError(null);
+    try {
+      const profileId = remoteProfileId || state.sshProfiles[0]?.id;
+      if (!profileId) {
+        setError(tx('请先添加 SSH 服务器', 'Add an SSH server first'));
+        return;
+      }
+      await window.api.invoke(COMMAND_CHANNELS.REMOTE_BOOKMARK_ADD, {
+        sshProfileId: profileId,
+        remotePath,
+        ...(remoteName.trim() ? { displayName: remoteName.trim() } : {}),
+      });
+      setRemotePath('~');
+      setRemoteName('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleAddWslBookmark = async (): Promise<void> => {
+    setError(null);
+    try {
+      const distro = wslDistroId.startsWith('wsl:')
+        ? wslDistroId.slice('wsl:'.length)
+        : '';
+      if (!distro) {
+        setError(tx('请先选择 WSL 发行版', 'Select a WSL distro first'));
+        return;
+      }
+      const normalizedPath = wslPath.trim().replaceAll('\\', '/');
+      const usePickedUnc =
+        wslPickedUncPath !== null &&
+        formatDisplayPath(wslPickedUncPath) === normalizedPath;
+      if (!normalizedPath.startsWith('/') && !usePickedUnc) {
+        setError(tx('WSL 路径必须是 Linux 绝对路径,例如 /home/user/project', 'WSL path must be an absolute Linux path, for example /home/user/project'));
+        return;
+      }
+      const uncPath = usePickedUnc
+        ? wslPickedUncPath
+        : toWslUncPath(distro, normalizedPath);
+      await window.api.invoke(COMMAND_CHANNELS.BOOKMARK_ADD, {
+        path: uncPath,
+        ...(wslName.trim() ? { displayName: wslName.trim() } : {}),
+      });
+      setWslPath('/home');
+      setWslPickedUncPath(null);
+      setWslName('');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePickWslFolder = async (): Promise<void> => {
+    setError(null);
+    try {
+      const distro = wslDistroId.startsWith('wsl:')
+        ? wslDistroId.slice('wsl:'.length)
+        : '';
+      if (!distro) {
+        setError(tx('请先选择 WSL 发行版', 'Select a WSL distro first'));
+        return;
+      }
+      const result = await window.api.invoke<unknown, { path: string | null }>(
+        COMMAND_CHANNELS.BOOKMARK_PICK_FOLDER,
+        { defaultPath: toWslUncPath(distro, wslPath) },
+      );
+      if (!result.path) return;
+      setWslPickedUncPath(result.path);
+      setWslPath(formatDisplayPath(result.path));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <section className="settings-panel">
       <h2 className="settings-panel-title">{tx('数据', 'Data')}</h2>
+
+      <SettingRow
+        label={tx('SSH 服务器', 'SSH servers')}
+        hint={tx('保存连接参数;勾选"保存密码"会用 OS 凭据加密保存,登录时需 sshpass 才能自动注入', 'Saves connection parameters; "Save password" stores the password via OS keychain — auto-login requires sshpass on PATH')}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 520 }}>
+          {state.sshProfiles.length > 0 && (
+            <ul className="acknowledgements-list" style={{ margin: 0 }}>
+              {state.sshProfiles.map((p) => (
+                <li key={p.id}>
+                  <span className="settings-info-text">
+                    {p.name} — {p.username}@{p.host}:{p.port}
+                    {p.hasSavedPassword ? tx(' · 已保存密码', ' · password saved') : ''}
+                    {editingProfileId === p.id ? tx(' · 编辑中', ' · editing') : ''}
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-button"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => handleEditSshProfile(p.id)}
+                  >
+                    {tx('编辑', 'Edit')}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-button danger"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => void handleDeleteSshProfile(p.id)}
+                  >
+                    {tx('删除', 'Delete')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <input className="settings-input" value={sshName} onChange={(e) => setSshName(e.target.value)} placeholder={tx('名称', 'Name')} />
+            <input className="settings-input" value={sshHost} onChange={(e) => setSshHost(e.target.value)} placeholder="host.example.com" />
+            <input className="settings-input" value={sshUser} onChange={(e) => setSshUser(e.target.value)} placeholder={tx('用户名', 'Username')} />
+            <input className="settings-input" type="number" value={sshPort} onChange={(e) => setSshPort(e.target.value)} placeholder="22" />
+            <select className="settings-input" value={sshAuthType} onChange={(e) => setSshAuthType(e.target.value as 'keyFile' | 'password')}>
+              <option value="password">{tx('密码', 'Password')}</option>
+              <option value="keyFile">{tx('密钥文件', 'Key file')}</option>
+            </select>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <input
+                className="settings-input"
+                style={{ flex: 1, minWidth: 0 }}
+                value={sshKeyFile}
+                onChange={(e) => setSshKeyFile(e.target.value)}
+                placeholder={tx('密钥路径', 'Key path')}
+                disabled={sshAuthType !== 'keyFile'}
+              />
+              <button
+                type="button"
+                className="settings-button"
+                disabled={sshAuthType !== 'keyFile'}
+                onClick={() => void handlePickSshKeyFile()}
+              >
+                {tx('选择', 'Select')}
+              </button>
+            </div>
+          </div>
+          {sshAuthType === 'password' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <input
+                className="settings-input"
+                type="password"
+                value={sshPassword}
+                onChange={(e) => setSshPassword(e.target.value)}
+                placeholder={
+                  editingProfileId
+                    ? tx('新密码(留空则保留旧密码)', 'New password (leave blank to keep existing)')
+                    : tx('密码(可选,留空则连接时手动输入)', 'Password (optional; leave blank to type at connect time)')
+                }
+                autoComplete="new-password"
+              />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={sshSavePassword}
+                  onChange={(e) => setSshSavePassword(e.target.checked)}
+                />
+                {editingProfileId
+                  ? tx('应用密码修改(勾选 + 留空可清除已保存密码)', 'Apply password change (checked + empty clears saved password)')
+                  : tx('保存密码(OS 加密;需 sshpass 才能自动登录)', 'Save password (OS-encrypted; needs sshpass on PATH for auto-login)')}
+              </label>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" className="settings-button" onClick={() => void handleSubmitSshProfile()}>
+              {editingProfileId ? tx('保存修改', 'Save changes') : tx('添加服务器', 'Add server')}
+            </button>
+            {editingProfileId && (
+              <button type="button" className="settings-button" onClick={resetSshForm}>
+                {tx('取消', 'Cancel')}
+              </button>
+            )}
+          </div>
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('添加远程文件夹', 'Add remote folder')}
+        hint={tx('添加后会出现在左侧对应服务器分组;双击即通过 SSH 进入该远程目录', 'Appears under the matching server group; double-click opens SSH in that remote directory')}
+      >
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select
+            className="settings-input"
+            value={remoteProfileId || state.sshProfiles[0]?.id || ''}
+            onChange={(e) => setRemoteProfileId(e.target.value)}
+            disabled={state.sshProfiles.length === 0}
+          >
+            {state.sshProfiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <input className="settings-input" value={remotePath} onChange={(e) => setRemotePath(e.target.value)} placeholder="/home/user/project" />
+          <input className="settings-input" value={remoteName} onChange={(e) => setRemoteName(e.target.value)} placeholder={tx('显示名(可选)', 'Display name (optional)')} />
+          <button type="button" className="settings-button" onClick={() => void handleAddRemoteBookmark()}>
+            {tx('加入收藏', 'Add bookmark')}
+          </button>
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        label={tx('WSL 文件夹', 'WSL folder')}
+        hint={tx('选择 WSL 发行版并填写 Linux 绝对路径;添加后会出现在左侧对应 WSL 分组', 'Pick a WSL distro and enter an absolute Linux path; it appears under the matching WSL group in the sidebar')}
+      >
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select
+            className="settings-input"
+            value={wslDistroId}
+            onChange={(e) => setWslDistroId(e.target.value)}
+            disabled={wslDistros.length === 0}
+          >
+            {wslDistros.length === 0 ? (
+              <option value="">{tx('未检测到 WSL 发行版', 'No WSL distro detected')}</option>
+            ) : (
+              wslDistros.map((distro) => (
+                <option key={distro.id} value={distro.id}>
+                  {distro.name}
+                </option>
+              ))
+            )}
+          </select>
+          <input
+            className="settings-input"
+            value={wslPath}
+            onChange={(e) => {
+              setWslPickedUncPath(null);
+              setWslPath(e.target.value);
+            }}
+            placeholder="/home/user/project"
+          />
+          <input className="settings-input" value={wslName} onChange={(e) => setWslName(e.target.value)} placeholder={tx('显示名(可选)', 'Display name (optional)')} />
+          <button type="button" className="settings-button" onClick={() => void handleAddWslBookmark()} disabled={wslDistros.length === 0}>
+            {tx('加入 WSL', 'Add WSL')}
+          </button>
+          <button type="button" className="settings-button" onClick={() => void handlePickWslFolder()}>
+            {tx('选择文件夹', 'Pick folder')}
+          </button>
+        </div>
+      </SettingRow>
 
       <SettingRow label={tx('数据目录', 'Data directory')} hint={tx('所有 Marina 配置文件存放处', 'Where all Marina configuration files live')}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

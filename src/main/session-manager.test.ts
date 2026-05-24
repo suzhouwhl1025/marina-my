@@ -24,6 +24,7 @@ import {
 } from './session-manager';
 import { Osc1337Parser } from './osc1337-parser';
 import { BUILTIN_TEMPLATES, mergeBuiltins } from './templates-manager';
+import { makePathId } from './path-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { SettingsManager } from './settings-manager';
 import type { WindowManager } from './window-manager';
@@ -135,9 +136,11 @@ function makeStubPathManager(): StubPathManager {
   return stub as unknown as StubPathManager;
 }
 
-function makeStubTemplatesManager(): TemplatesManager {
+function makeStubTemplatesManager(
+  extraTemplates: Template[] = [],
+): TemplatesManager {
   // 用真实的 BUILTIN_TEMPLATES,resolve('shell') 返回内置 shell 模板
-  const templates = BUILTIN_TEMPLATES;
+  const templates = [...BUILTIN_TEMPLATES, ...extraTemplates];
   return {
     resolve(id: string | undefined | null): Template {
       if (id) {
@@ -221,6 +224,10 @@ function makeFakeAdapter(opts: FakeAdapterOpts = {}): PlatformAdapter {
     async detectShells() {
       return [shell];
     },
+    resolveExecutable(commandName: string) {
+      if (!commandName.trim()) return null;
+      return commandName;
+    },
     buildShellLaunchParams() {
       return { args: ['-NoLogo'], env: {} };
     },
@@ -266,6 +273,7 @@ function makeManager(
     inputQuietMs?: number;
     /** PER-2 / F1:默认 0 — 测试每个 chunk 立即 emit,保持现有时序断言 */
     emitBatchMs?: number;
+    templates?: Template[];
   } = {},
 ): {
   mgr: SessionManager;
@@ -275,7 +283,7 @@ function makeManager(
   FakePty.reset();
   const win = makeStubWindowManager();
   const path = makeStubPathManager();
-  const tmpl = makeStubTemplatesManager();
+  const tmpl = makeStubTemplatesManager(opts.templates ?? []);
   const settings = opts.settings ?? makeStubSettingsManager();
   const mgr = new SessionManager(win, path, tmpl, settings, {
     spawnFn: opts.spawnFn ?? fakeSpawn,
@@ -288,6 +296,14 @@ function makeManager(
     skipCwdValidation: true,
   });
   return { mgr, win, path };
+}
+
+function decodeEmbeddedTmuxScript(command: string): string {
+  const match = command.match(/printf %s (?:'\\'')?([A-Za-z0-9+/=]+)(?:'\\'')? \| base64 -d/);
+  if (!match?.[1]) {
+    throw new Error(`测试无法从 SSH 命令中提取 tmux base64 脚本: ${command}`);
+  }
+  return Buffer.from(match[1], 'base64').toString('utf8');
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -397,6 +413,417 @@ describe('SessionManager — createSession', () => {
         rows: 24,
       }),
     ).rejects.toThrow(/NoShellAvailable/);
+  });
+
+  it('SSH session 用平台解析出的 ssh.exe 启动,而不是默认 shell 路径', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    const info = await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    expect(info.displayName).toBe('prod:~/repo');
+    expect(FakePty.instances[0]!.file).toBe(
+      'C:\\Windows\\System32\\OpenSSH\\ssh.exe',
+    );
+    expect(FakePty.instances[0]!.args).toEqual([
+      '-tt',
+      '-p',
+      '22',
+      '-o',
+      'ServerAliveInterval=30',
+      'alice@example.com',
+      "cd \"$HOME\"/'repo' && exec \"${SHELL:-/bin/sh}\" -l",
+    ]);
+  });
+
+  it('SSH remotePath 为 ~ 时使用无参数 cd,避免 quote 后禁用 home 展开', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    expect(FakePty.instances[0]!.args).toContain(
+      'cd && exec "${SHELL:-/bin/sh}" -l',
+    );
+  });
+
+  it('SSH 启动模板在远端 cwd 中执行命令/参数/env', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const template: Template = {
+      id: 'remote-codex',
+      name: 'Remote Codex',
+      icon: 'R',
+      isBuiltin: false,
+      command: 'codex',
+      args: ['--model', 'gpt-5', "it's-ok"],
+      env: { MARINA_MODE: 'remote test' },
+      shellFirst: true,
+      postExitAction: 'keep_shell',
+    };
+    const { mgr } = makeManager({ adapter, templates: [template] });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'remote-codex',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('cd "$HOME"/');
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -ic');
+    expect(command).toContain("env '\\''MARINA_MODE=remote test'\\''");
+    expect(command).toContain("'\\''codex'\\''");
+    expect(command).toContain("'\\''--model'\\''");
+    expect(command).toContain("'\\''gpt-5'\\''");
+    expect(command).toContain("'\\''it'\\''\\'\\'''\\''s-ok'\\''");
+    expect(command).toContain('marina_template_status=$?;');
+    expect(command).toContain('if [ "$marina_template_status" -eq 127 ]; then');
+    expect(command).toContain('Marina: remote template command not found or not in PATH: codex');
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -l');
+  });
+
+  it('SSH 启用 tmux 时自动 attach-or-create,远端无 tmux 默认回退 shell', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+        tmuxMode: 'attach-or-create',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('exec "${SHELL:-/bin/sh}" -lc');
+    expect(command).toContain('command -v tmux >/dev/null 2>&1');
+    expect(command).toContain('MARINA_TMUX_BASE=');
+    expect(command).toContain('base64 -d');
+    expect(command).not.toContain("sh -c '");
+    expect(command).not.toContain('<<');
+    const decodedTmuxScript = decodeEmbeddedTmuxScript(command);
+    expect(decodedTmuxScript).toContain("grep -Eq '^[0-9]+$'");
+    expect(decodedTmuxScript).not.toContain('case ');
+    expect(decodedTmuxScript).not.toContain(';;');
+    expect(decodedTmuxScript).not.toContain('exec tmux');
+    expect(decodedTmuxScript).toContain('exit $?');
+    expect(command).toContain('then exec "${SHELL:-/bin/sh}" -l; else');
+    expect(command).toContain('tmux attach/create failed; falling back to shell.');
+    expect(command).toContain('else exec "${SHELL:-/bin/sh}" -l; fi');
+  });
+
+  it('SSH tmux 正常退出后回到远端登录 shell,不让 ssh.exe 结束 Marina session', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+        tmuxMode: 'attach-or-create',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+
+    expect(command).toContain('if MARINA_TMUX_BASE=');
+    expect(command).toContain('base64 -d');
+    expect(command).not.toContain('<<');
+    expect(command).toContain('then exec "${SHELL:-/bin/sh}" -l; else');
+    expect(command).not.toContain('then MARINA_TMUX_BASE=');
+  });
+
+  it('SSH tmux 忽略旧版自定义 session 名,始终按目录末级派生', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '/srv/app',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+        tmuxMode: 'attach-or-create',
+        tmuxSessionName: 'deploy.api',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('/srv/app');
+    expect(command).toContain('command -v tmux');
+    expect(command).toContain('MARINA_TMUX_BASE=');
+    expect(command).toContain('marina-app');
+    expect(command).not.toContain('deploy.api');
+  });
+
+  it('SSH tmux 可配置远端缺 tmux 时直接失败', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+        tmuxMode: 'attach-or-create',
+        tmuxOnMissing: 'fail',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('Marina: tmux attach/create failed on the remote host.');
+    expect(command).toContain('exit 127');
+  });
+
+  it('SSH tmux 忽略旧版 new-per-launch 策略,统一走智能选择脚本', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+    const common = {
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent' as const,
+        tmuxMode: 'attach-or-create' as const,
+        tmuxSessionName: 'work',
+        tmuxSessionPolicy: 'new-per-launch' as const,
+      },
+    };
+
+    await mgr.createSession(common);
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('MARINA_TMUX_BASE=');
+    expect(command).toContain('marina-repo');
+    expect(command).toContain('base64 -d');
+    expect(command).not.toContain('work-');
+  });
+
+  it('SSH tmux 默认 session 名按远程目录末级派生', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable(commandName: string) {
+        return commandName === 'ssh' ? 'C:\\Windows\\System32\\OpenSSH\\ssh.exe' : null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '/home/u1/projects',
+    });
+
+    await mgr.createSession({
+      pathId,
+      templateId: 'shell',
+      ownerWindowId: 'w-1',
+      cols: 80,
+      rows: 24,
+      sshProfile: {
+        id: 'ssh-1',
+        name: 'prod',
+        host: 'example.com',
+        port: 22,
+        username: 'alice',
+        authType: 'agent',
+        tmuxMode: 'attach-or-create',
+      },
+    });
+
+    const command = (FakePty.instances[0]!.args as string[]).at(-1)!;
+    expect(command).toContain('MARINA_TMUX_BASE=');
+    expect(command).toContain('marina-projects');
+  });
+
+  it('SSH 本机 ssh.exe 找不到时,错误信息明确指向 ssh 而不是 PowerShell', async () => {
+    const adapter: PlatformAdapter = {
+      ...makeFakeAdapter(),
+      resolveExecutable() {
+        return null;
+      },
+    };
+    const { mgr } = makeManager({ adapter });
+    const pathId = makePathId({
+      kind: 'ssh',
+      sshProfileId: 'ssh-1',
+      path: '~/repo',
+    });
+
+    await expect(
+      mgr.createSession({
+        pathId,
+        templateId: 'shell',
+        ownerWindowId: 'w-1',
+        cols: 80,
+        rows: 24,
+        sshProfile: {
+          id: 'ssh-1',
+          name: 'prod',
+          host: 'example.com',
+          port: 22,
+          username: 'alice',
+          authType: 'agent',
+        },
+      }),
+    ).rejects.toThrow(/无法定位本机 ssh\.exe/);
   });
 });
 

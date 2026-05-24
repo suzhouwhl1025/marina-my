@@ -21,7 +21,7 @@
  * - cmd:session:create / close / claim / release / focus-owner / send-input / resize
  * - 所有 evt:* 广播
  */
-import { app, BrowserWindow, clipboard, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, clipboard, ipcMain, dialog, safeStorage, shell } from 'electron';
 import { getBuildType } from './build-type';
 import {
   getExplorerIntegrationStatus,
@@ -38,6 +38,9 @@ import {
   PROTOCOL_VERSION,
   type AddBookmarkPayload,
   type AddBookmarkResponse,
+  type AddRemoteBookmarkPayload,
+  type AddSshProfilePayload,
+  type AddSshProfileResponse,
   type AppStateChangedPayload,
   type BookmarksUpdatedPayload,
   type ClaimSessionPayload,
@@ -57,6 +60,7 @@ import {
   type AddTemplatePayload,
   type AddTemplateResponse,
   type DeleteTemplatePayload,
+  type DeleteSshProfilePayload,
   type ExportSettingsResponse,
   type GetAutoStartResponse,
   type GetProtocolVersionResponse,
@@ -66,6 +70,7 @@ import {
   type GetSnapshotPayload,
   type ImportSettingsResponse,
   type ListShellsResponse,
+  type ListSshProfilesResponse,
   type OpenExternalPayload,
   type SetDefaultTemplatePayload,
   type SettingsArchiveV1,
@@ -75,6 +80,8 @@ import {
   type PathTreeUpdatedPayload,
   type PickFolderPayload,
   type PickFolderResponse,
+  type PickSshKeyFilePayload,
+  type PickSshKeyFileResponse,
   type QuitPayload,
   type QuitResponse,
   type OpenSessionInNewWindowPayload,
@@ -96,9 +103,14 @@ import {
   type SessionStateChangedPayload,
   type SetDefaultTemplateForBookmarkPayload,
   type SettingsChangedPayload,
+  type SshProfilesUpdatedPayload,
   type ShowInExplorerPayload,
   type TemplateListUpdatedPayload,
+  type TestSshProfilePayload,
+  type TestSshProfileResponse,
   type UpdateSettingsPayload,
+  type UpdateSshProfilePayload,
+  type UpdateSshProfileResponse,
   type WindowFocusRequestedPayload,
   type WindowListUpdatedPayload,
   type ImeProbeDumpPayload,
@@ -107,8 +119,10 @@ import {
 import type { AppSnapshot, Settings, Template } from '@shared/types';
 import type { WindowManager } from './window-manager';
 import type { PathManager } from './path-manager';
+import { pathRefFromId } from './path-manager';
 import type { SettingsManager } from './settings-manager';
 import type { SessionManager } from './session-manager';
+import type { SshProfileManager } from './ssh-profile-manager';
 import type { TemplatesManager } from './templates-manager';
 import type { AIClient } from './ai-client';
 import { logger } from './logger';
@@ -119,6 +133,7 @@ export interface IpcLayerDeps {
   pathManager: PathManager;
   settingsManager: SettingsManager;
   sessionManager: SessionManager;
+  sshProfileManager?: SshProfileManager;
   templatesManager: TemplatesManager;
   /** BETA-031:可选,未注入时 AI_TEST_CONNECTION 返回 ok:false */
   aiClient?: AIClient;
@@ -168,6 +183,7 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     pathManager,
     settingsManager,
     sessionManager,
+    sshProfileManager,
     templatesManager,
   } = deps;
 
@@ -268,14 +284,51 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
       _e,
       envelope: CommandEnvelope<CreateSessionPayload>,
     ): Promise<CreateSessionResponse> => {
-      const { pathId, templateId, shellId, takeOwnership = true, cols, rows } = envelope.payload;
+      const {
+        pathId,
+        templateId,
+        shellId,
+        takeOwnership = true,
+        cols,
+        rows,
+        sshTmuxMode,
+      } = envelope.payload;
       const oldTreeJson = JSON.stringify(pathManager.getTree());
       const effectiveTemplateId =
         templateId ?? templatesManager.getDefaultTemplateId();
+      const pathRef = pathId ? pathRefFromId(pathId) : null;
+      const sshProfile =
+        pathRef?.kind === 'ssh' && pathRef.sshProfileId
+          ? sshProfileManager?.getInternal(pathRef.sshProfileId)
+          : null;
+      if (pathRef?.kind === 'ssh' && !sshProfile) {
+        throw makeIpcError('SshProfileNotFound', `sshProfileId="${pathRef.sshProfileId}"`);
+      }
       // takeOwnership=false 时直接传空 owner — createSession 内部
       // `input.ownerWindowId || null` 会落到 info.ownerWindowId = null。
       // 不要先创建带 owner 再 releaseOwner:那条路径在 owner=='' 时已被
       // 折叠为 null,后续 releaseOwner 会因 null !== envelope.windowId 抛 NotOwner。
+      const sshProfileForLaunch = sshProfile
+        ? {
+            ...sshProfile,
+            // tmux 是首页按钮表达的"本次启动意图",不是 SSH profile 状态。
+            // 这样即使旧 profile 里残留 tmuxMode,首页"连接"仍稳定是纯 SSH。
+            tmuxMode:
+              sshTmuxMode === 'attach-or-create'
+                ? 'attach-or-create' as const
+                : 'disabled' as const,
+            tmuxOnMissing: 'fallback-shell' as const,
+            // 在 main 进程里立刻解密;session-manager 只看到明文,不持有
+            // safeStorage 句柄。解密失败(profile 文件来自另一台机器 / 用户)
+            // 时悄悄丢弃,会自动回退到交互式密码提示。
+            ...(sshProfile.passwordEncrypted
+              ? decryptStoredPassword(sshProfile.passwordEncrypted)
+              : {}),
+          }
+        : null;
+      if (sshProfileForLaunch) {
+        delete (sshProfileForLaunch as { passwordEncrypted?: string }).passwordEncrypted;
+      }
       const session = await sessionManager.createSession({
         pathId: pathId ?? '',
         templateId: effectiveTemplateId,
@@ -283,10 +336,12 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
         cols,
         rows,
         ...(shellId ? { shellIdOverride: shellId } : {}),
+        ...(sshProfileForLaunch ? { sshProfile: sshProfileForLaunch } : {}),
       });
       const pathTreeChanged =
         JSON.stringify(pathManager.getTree()) !== oldTreeJson;
-      return { session, pathTreeChanged };
+      const warning = sessionManager.lastLaunchWarning ?? undefined;
+      return warning ? { session, pathTreeChanged, warning } : { session, pathTreeChanged };
     },
   );
 
@@ -583,6 +638,127 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     COMMAND_CHANNELS.PATH_REMOVE_FROM_RECENT,
     (_e, envelope: CommandEnvelope<RemoveFromRecentPayload>): void => {
       pathManager.removeFromRecent(envelope.payload.path);
+    },
+  );
+
+  // SSH profiles / remote bookmarks
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_LIST,
+    (_e, _envelope: CommandEnvelope<undefined>): ListSshProfilesResponse => {
+      return { profiles: sshProfileManager?.list() ?? [] };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_ADD,
+    (_e, envelope: CommandEnvelope<AddSshProfilePayload>): AddSshProfileResponse => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      const { password, ...rest } = envelope.payload;
+      const addInput: Omit<typeof rest, never> & { passwordEncrypted?: string } = { ...rest };
+      if (typeof password === 'string' && password.length > 0) {
+        addInput.passwordEncrypted = encryptPasswordOrThrow(password);
+      }
+      const profile = sshProfileManager.add(addInput);
+      return { profile };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_UPDATE,
+    (_e, envelope: CommandEnvelope<UpdateSshProfilePayload>): UpdateSshProfileResponse => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      const { password, ...partialRest } = envelope.payload.partial;
+      const partial: typeof partialRest & { passwordEncrypted?: string } = { ...partialRest };
+      if (typeof password === 'string') {
+        // '' 表示清除已保存密码;非空字符串则加密落盘。
+        partial.passwordEncrypted = password.length > 0 ? encryptPasswordOrThrow(password) : '';
+      }
+      const profile = sshProfileManager.update(envelope.payload.id, partial);
+      return { profile };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_PICK_KEY_FILE,
+    async (
+      _e,
+      envelope: CommandEnvelope<PickSshKeyFilePayload>,
+    ): Promise<PickSshKeyFileResponse> => {
+      const fromWindow = BrowserWindow.fromWebContents(_e.sender);
+      const result = await dialog.showOpenDialog(
+        fromWindow ?? BrowserWindow.getFocusedWindow()!,
+        {
+          title: '选择 SSH 私钥文件',
+          properties: ['openFile', 'showHiddenFiles'],
+          ...(envelope.payload.defaultPath
+            ? { defaultPath: envelope.payload.defaultPath }
+            : {}),
+        },
+      );
+      if (result.canceled || result.filePaths.length === 0) {
+        return { path: null };
+      }
+      return { path: result.filePaths[0]! };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_DELETE,
+    (_e, envelope: CommandEnvelope<DeleteSshProfilePayload>): void => {
+      if (!sshProfileManager) {
+        throw makeIpcError('SshProfileUnavailable', 'SSH profile manager 未初始化');
+      }
+      if (pathManager.hasSshProfileReferences(envelope.payload.id)) {
+        throw makeIpcError(
+          'SshProfileInUse',
+          '该 SSH 服务器仍被收藏 / 最近 / 运行中的会话引用,请先移除这些远程路径。',
+        );
+      }
+      sshProfileManager.delete(envelope.payload.id);
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SSH_PROFILE_TEST,
+    async (
+      _e,
+      envelope: CommandEnvelope<TestSshProfilePayload>,
+    ): Promise<TestSshProfileResponse> => {
+      const profile = sshProfileManager?.get(envelope.payload.id);
+      if (!profile) return { ok: false, message: 'SSH 配置不存在' };
+      // MVP:不主动建立后台连接,避免无交互密码/host key prompt 卡死。
+      // 真正连接由 session 启动时的 ssh CLI 处理;这里做可执行输入校验。
+      return {
+        ok: true,
+        message: `${profile.username}@${profile.host}:${profile.port}`,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.REMOTE_BOOKMARK_ADD,
+    (_e, envelope: CommandEnvelope<AddRemoteBookmarkPayload>): AddBookmarkResponse => {
+      const profile = sshProfileManager?.get(envelope.payload.sshProfileId);
+      if (!profile) {
+        throw makeIpcError(
+          'SshProfileNotFound',
+          `sshProfileId="${envelope.payload.sshProfileId}"`,
+        );
+      }
+      const bookmark = pathManager.addBookmark({
+        kind: 'ssh',
+        sshProfileId: profile.id,
+        path: envelope.payload.remotePath,
+        ...(envelope.payload.displayName ? { displayName: envelope.payload.displayName } : {}),
+        ...(envelope.payload.defaultTemplateId
+          ? { defaultTemplateId: envelope.payload.defaultTemplateId }
+          : {}),
+      });
+      return { bookmark };
     },
   );
 
@@ -979,11 +1155,7 @@ async function buildArchive(deps: IpcLayerDeps): Promise<SettingsArchiveV1> {
     }
   };
   // 强制先 flush,以保证读盘时拿到最新写入
-  await Promise.all([
-    deps.settingsManager.flush(),
-    deps.pathManager.flush(),
-    deps.templatesManager.flush(),
-  ]);
+  await flushAllStores(deps);
   const settings = deps.settingsManager.get();
   const bookmarks = await readJson<{ paths: unknown[] }>('bookmarks.json', { paths: [] });
   const recent = await readJson<{ paths: unknown[] }>('recent.json', { paths: [] });
@@ -1001,6 +1173,7 @@ async function buildArchive(deps: IpcLayerDeps): Promise<SettingsArchiveV1> {
     // 类型断言:JSON 上读出来已经是合法 schema (持久化文件不通过 IPC 不需要严格 schema 校验)
     bookmarks: bookmarks as SettingsArchiveV1['bookmarks'],
     recent: recent as SettingsArchiveV1['recent'],
+    sshProfiles: { profiles: deps.sshProfileManager?.list() ?? [] },
     templates,
   };
 }
@@ -1082,10 +1255,23 @@ async function applyArchiveInMemory(
     throw new Error(`paths: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  if (archive.sshProfiles?.profiles && deps.sshProfileManager) {
+    try {
+      deps.sshProfileManager.replaceAll(archive.sshProfiles.profiles);
+    } catch (err) {
+      throw new Error(`sshProfiles: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // 等待所有 store debounce 落盘
+  await flushAllStores(deps);
+}
+
+async function flushAllStores(deps: IpcLayerDeps): Promise<void> {
   await Promise.all([
     deps.settingsManager.flush(),
     deps.pathManager.flush(),
+    deps.sshProfileManager?.flush() ?? Promise.resolve(),
     deps.templatesManager.flush(),
   ]);
 }
@@ -1100,6 +1286,7 @@ function wireEventBroadcasts(deps: IpcLayerDeps): void {
     pathManager,
     settingsManager,
     sessionManager,
+    sshProfileManager,
     templatesManager,
   } = deps;
 
@@ -1114,6 +1301,13 @@ function wireEventBroadcasts(deps: IpcLayerDeps): void {
     broadcastEvent<BookmarksUpdatedPayload>(EVENT_CHANNELS.BOOKMARKS_UPDATED, {
       bookmarks: pathManager.listBookmarks(),
     });
+  });
+
+  sshProfileManager?.on('sshProfilesUpdated', (e: SshProfilesUpdatedPayload) => {
+    broadcastEvent<SshProfilesUpdatedPayload>(
+      EVENT_CHANNELS.SSH_PROFILES_UPDATED,
+      e,
+    );
   });
 
   // 设置变化 → 广播 evt:settings:changed
@@ -1214,6 +1408,7 @@ function buildSnapshot(deps: IpcLayerDeps, myWindowId: string): AppSnapshot {
     windows: deps.windowManager.list(),
     sessions: deps.sessionManager.list(),
     pathTree: deps.pathManager.getTree(),
+    sshProfiles: deps.sshProfileManager?.list() ?? [],
     templates: deps.templatesManager.list(),
     defaultTemplateId: deps.templatesManager.getDefaultTemplateId(),
     settings: deps.settingsManager.get(),
@@ -1239,6 +1434,26 @@ function makeIpcError(
   err.code = code;
   if (details) err.details = details;
   return err;
+}
+
+function encryptPasswordOrThrow(plaintext: string): string {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw makeIpcError(
+      'SafeStorageUnavailable',
+      '当前系统未启用 OS 凭据加密(Linux 上可能缺少 libsecret/GNOME Keyring)。无法安全保存密码。',
+    );
+  }
+  return safeStorage.encryptString(plaintext).toString('base64');
+}
+
+function decryptStoredPassword(blob: string): { password?: string } {
+  if (!safeStorage.isEncryptionAvailable()) return {};
+  try {
+    const buf = Buffer.from(blob, 'base64');
+    return { password: safeStorage.decryptString(buf) };
+  } catch {
+    return {};
+  }
 }
 
 async function assertDirectory(path: string): Promise<void> {

@@ -18,6 +18,7 @@ import type {
   PathTree,
   SessionInfo,
   Settings,
+  SshProfile,
   Template,
   WindowInfo,
 } from './types';
@@ -86,6 +87,15 @@ export const COMMAND_CHANNELS = {
   BOOKMARK_SET_DEFAULT_TEMPLATE: 'cmd:bookmark:set-default-template',
   BOOKMARK_PICK_FOLDER: 'cmd:bookmark:pick-folder',
   PATH_REMOVE_FROM_RECENT: 'cmd:path:remove-from-recent',
+
+  // SSH profile / remote path 域
+  SSH_PROFILE_LIST: 'cmd:ssh-profile:list',
+  SSH_PROFILE_ADD: 'cmd:ssh-profile:add',
+  SSH_PROFILE_UPDATE: 'cmd:ssh-profile:update',
+  SSH_PROFILE_DELETE: 'cmd:ssh-profile:delete',
+  SSH_PROFILE_TEST: 'cmd:ssh-profile:test',
+  SSH_PROFILE_PICK_KEY_FILE: 'cmd:ssh-profile:pick-key-file',
+  REMOTE_BOOKMARK_ADD: 'cmd:remote-bookmark:add',
 
   // Settings 域
   SETTINGS_GET: 'cmd:settings:get',
@@ -167,6 +177,7 @@ export const EVENT_CHANNELS = {
   // Path / Bookmark / Settings
   PATH_TREE_UPDATED: 'evt:path:tree-updated',
   BOOKMARKS_UPDATED: 'evt:bookmarks:updated',
+  SSH_PROFILES_UPDATED: 'evt:ssh-profiles:updated',
   SETTINGS_CHANGED: 'evt:settings:changed',
   TEMPLATES_UPDATED: 'evt:templates:updated',
 
@@ -284,12 +295,25 @@ export interface CreateSessionPayload {
   /** 终端尺寸初始值 */
   cols: number;
   rows: number;
+  /**
+   * SSH 路径专用:本次连接是否启用远端 tmux。
+   *
+   * 这是一次性启动选项,不持久化到 SSH profile。首页的"连接"按钮传
+   * disabled,旁边的"tmux"按钮传 attach-or-create,避免旧 profile 里的
+   * tmux 字段影响普通 SSH 连接。
+   */
+  sshTmuxMode?: 'disabled' | 'attach-or-create';
 }
 
 export interface CreateSessionResponse {
   session: SessionInfo;
   /** 是否触发了 path 树变化 (临时分类等) */
   pathTreeChanged: boolean;
+  /**
+   * 非阻塞的提示信息。例如保存了 SSH 密码但本机没装 sshpass,无法自动注入。
+   * renderer 收到非空字符串时弹一条 warn toast。
+   */
+  warning?: string;
 }
 
 export interface RenameSessionPayload {
@@ -447,6 +471,75 @@ export interface RemoveFromRecentPayload {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// SSH / Remote Path 域
+// ──────────────────────────────────────────────────────────────────
+
+export interface AddSshProfilePayload {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'agent' | 'keyFile' | 'password';
+  keyFilePath?: string;
+  /**
+   * 可选明文密码。main 收到后用 safeStorage 加密落盘,renderer 永远拿不到。
+   * undefined = 不更新已有保存密码;'' (空字符串) = 清除已保存密码。
+   */
+  password?: string;
+  defaultRemoteCwd?: string;
+  tmuxMode?: 'disabled' | 'attach-or-create';
+  tmuxSessionName?: string;
+  tmuxSessionPolicy?: 'reuse' | 'new-per-launch';
+  tmuxOnMissing?: 'fallback-shell' | 'fail';
+}
+
+export interface AddSshProfileResponse {
+  profile: SshProfile;
+}
+
+export interface UpdateSshProfilePayload {
+  id: string;
+  partial: Partial<AddSshProfilePayload>;
+}
+
+export interface UpdateSshProfileResponse {
+  profile: SshProfile;
+}
+
+export interface DeleteSshProfilePayload {
+  id: string;
+}
+
+export interface ListSshProfilesResponse {
+  profiles: SshProfile[];
+}
+
+export interface PickSshKeyFilePayload {
+  defaultPath?: string;
+}
+
+export interface PickSshKeyFileResponse {
+  /** 用户取消 → null */
+  path: string | null;
+}
+
+export interface TestSshProfilePayload {
+  id: string;
+}
+
+export interface TestSshProfileResponse {
+  ok: boolean;
+  message: string;
+}
+
+export interface AddRemoteBookmarkPayload {
+  sshProfileId: string;
+  remotePath: string;
+  displayName?: string;
+  defaultTemplateId?: string;
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Settings 域
 // ──────────────────────────────────────────────────────────────────
 
@@ -528,6 +621,7 @@ export interface SettingsArchiveV1 {
   settings: Settings;
   bookmarks: { paths: Bookmark[] };
   recent: { paths: Array<{ path: string; lastUsedAt: number; useCount: number }> };
+  sshProfiles?: { profiles: SshProfile[] };
   templates: { defaultTemplateId: string; templates: Template[] };
 }
 
@@ -737,6 +831,10 @@ export interface PathTreeUpdatedPayload {
 
 export interface BookmarksUpdatedPayload {
   bookmarks: Bookmark[];
+}
+
+export interface SshProfilesUpdatedPayload {
+  profiles: SshProfile[];
 }
 
 export interface SettingsChangedPayload {

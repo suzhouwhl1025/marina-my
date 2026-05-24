@@ -26,6 +26,12 @@
 export type PathCategory = 'bookmarked' | 'temporary' | 'recent';
 
 /**
+ * Path 的来源。local 是本机文件夹;ssh 是某个 SSH profile 下的远程目录。
+ * 旧数据没有 kind 字段时一律按 local 处理。
+ */
+export type PathKind = 'local' | 'ssh';
+
+/**
  * Session 的运行时状态 (软件定义书 8.3 节状态机)。
  *
  * v1.2 起 (ADR-008):状态机砍掉了 tombstoned (5 分钟自动过期 + 重启)。
@@ -100,6 +106,28 @@ export type StartupBehavior = 'open-window' | 'tray-only';
  */
 export type NewTerminalShellPolicy = 'default' | 'last-used';
 
+/**
+ * SSH 远端 tmux 启动策略。
+ *
+ * 这是 SSH 启动链路的轻量增强,不是 Marina 的 tmux session 管理模型:
+ * Marina 仍只管理本地 ssh.exe PTY;远端 tmux 仅用于断线后 attach 回同一个
+ * 远端会话。
+ */
+export type SshTmuxMode = 'disabled' | 'attach-or-create';
+
+/**
+ * 远端没有 tmux 命令时的行为。
+ */
+export type SshTmuxOnMissing = 'fallback-shell' | 'fail';
+
+/**
+ * SSH tmux session 命名策略。
+ *
+ * - reuse:按远程目录末级派生基名,远端已有同名 session 时按数量智能选择
+ * - new-per-launch:每次从 Marina 新建 session 都创建新的 tmux session,适合强制多开
+ */
+export type SshTmuxSessionPolicy = 'reuse' | 'new-per-launch';
+
 // ──────────────────────────────────────────────────────────────────
 // 内存数据 (Window / Session / Path)
 // ──────────────────────────────────────────────────────────────────
@@ -167,8 +195,12 @@ export interface SessionInfo {
 export interface PathNode {
   /** UUID 内部 id */
   id: string;
-  /** 文件系统绝对路径 */
+  /** 本地文件系统绝对路径,或 SSH 远程目录路径 */
   path: string;
+  /** 路径来源。旧节点缺省视为 local。 */
+  kind?: PathKind;
+  /** kind === 'ssh' 时指向 SshProfile.id */
+  sshProfileId?: string;
   /** 用户自定义显示名,无则取路径最后一段 */
   displayName?: string;
   category: PathCategory;
@@ -348,7 +380,10 @@ export interface BookmarksFile {
 
 export interface Bookmark {
   id: string;
+  /** 旧数据缺省为 local */
+  kind?: PathKind;
   path: string;
+  sshProfileId?: string;
   displayName?: string;
   defaultTemplateId?: string;
   /** Unix ms */
@@ -364,10 +399,43 @@ export interface RecentFile {
 }
 
 export interface RecentEntry {
+  /** 旧数据缺省为 local */
+  kind?: PathKind;
   path: string;
+  sshProfileId?: string;
   /** Unix ms,降序排序的依据 */
   lastUsedAt: number;
   useCount: number;
+}
+
+/**
+ * SSH 服务器连接配置。可选保存密码:passwordEncrypted 是 Electron
+ * safeStorage 加密后的 base64 文本,仅 main 进程能解密。送到 renderer
+ * 的副本始终剥去 passwordEncrypted,仅保留 hasSavedPassword 标志。
+ */
+export interface SshProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: 'agent' | 'keyFile' | 'password';
+  keyFilePath?: string;
+  /** safeStorage.encryptString 结果的 base64;只在 main 内部保留 */
+  passwordEncrypted?: string;
+  /** 仅 renderer 副本带:是否已保存密码 */
+  hasSavedPassword?: boolean;
+  defaultRemoteCwd?: string;
+  tmuxMode?: SshTmuxMode;
+  tmuxSessionName?: string;
+  tmuxSessionPolicy?: SshTmuxSessionPolicy;
+  tmuxOnMissing?: SshTmuxOnMissing;
+  addedAt: number;
+}
+
+export interface SshProfilesFile {
+  version: 1;
+  profiles: SshProfile[];
 }
 
 /**
@@ -404,6 +472,7 @@ export interface AppSnapshot {
   windows: WindowInfo[];
   sessions: SessionInfo[];
   pathTree: PathTree;
+  sshProfiles: SshProfile[];
   templates: Template[];
   defaultTemplateId: string;
   settings: Settings;
