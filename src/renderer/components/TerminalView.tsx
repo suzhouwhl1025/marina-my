@@ -100,6 +100,7 @@ import {
 } from '@shared/protocol';
 import type { SessionInfo, ThemeId } from '@shared/types';
 import { attachImeCompositionEndCleaner } from '@shared/ime-textarea-workaround';
+import { attachImeCompositionPositionLock } from '@shared/ime-composition-position-lock';
 import {
   createImeProbeRing,
   isLikelyHistoryFlush,
@@ -1107,6 +1108,53 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       console.warn('[TerminalView] IME-1 workaround attach failed', err);
     }
 
+    // IME-2 workaround:在 _core._compositionHelper 上 monkey-patch
+    // updateCompositionElements,让 composition 期间 helper-textarea 位置锁定在
+    // compositionstart 瞬间的 buffer.x/y,不再跟着 Claude Code / aider / vim
+    // insert mode 等 TUI 的 cursor save→move→draw→restore 抖动。
+    //
+    // 走的是 term['_core'] 私有 API(与 xterm-serialize-mode-polyfill 同套妥协),
+    // 字段缺失走 try/catch + 字段存在性判定,失败仅 console.warn 不阻塞挂载 —
+    // 退化为 xterm 默认行为(候选框跟着抖,功能可用)。
+    // 详见 docs/issues/ime-2-composition-textarea-position-drift.md 与
+    // src/shared/ime-composition-position-lock.ts 的 JSDoc。
+    let detachImePositionLock: (() => void) | null = null;
+    try {
+      const helperTaForLock = container.querySelector(
+        '.xterm-helper-textarea',
+      ) as HTMLTextAreaElement | null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const core = (term as any)._core;
+      const compHelper = core?._compositionHelper;
+      const bufferService = core?._bufferService;
+      if (
+        helperTaForLock &&
+        compHelper &&
+        typeof compHelper.updateCompositionElements === 'function' &&
+        bufferService?.buffer &&
+        typeof bufferService.buffer.x === 'number' &&
+        typeof bufferService.buffer.y === 'number'
+      ) {
+        detachImePositionLock = attachImeCompositionPositionLock(
+          helperTaForLock,
+          compHelper,
+          bufferService,
+        );
+      } else {
+        console.warn(
+          '[TerminalView] IME-2 position lock skipped — _core shape changed?',
+          {
+            hasHelperTa: !!helperTaForLock,
+            hasCompHelper: !!compHelper,
+            hasUpdateFn: typeof compHelper?.updateCompositionElements,
+            hasBufferService: !!bufferService,
+          },
+        );
+      }
+    } catch (err) {
+      console.warn('[TerminalView] IME-2 position lock attach failed', err);
+    }
+
     // [IME-1 PROBE B] 临时探针:追踪 helper-textarea 的 composition 时序与
     // keydown 229 事件,用来定位"中文 IME 按标点冲刷历史"的触发路径。
     //
@@ -1545,6 +1593,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       cleanupMaxState();
       cleanupOutput();
       detachImeWorkaround?.();
+      detachImePositionLock?.();
       // PASTE-1 cleanup:显式 remove。实际上 container 被 React 卸载时
       // listener 一起 GC,但留显式 remove 让未来读代码的人有 invariant 可循。
       helperTaForPaste?.removeEventListener('paste', pasteInterceptor, true);
