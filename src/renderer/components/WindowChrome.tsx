@@ -27,14 +27,12 @@ import {
 import type { WindowStyle } from '@shared/types';
 import {
   Minus,
-  PanelLeftClose,
-  PanelLeftOpen,
   Square,
   Copy as RestoreIcon,
   X,
 } from 'lucide-react';
 import { focusTerminalDom } from '../focus';
-import { useAppDispatch, useAppState } from '../store';
+import { useAppState } from '../store';
 
 interface Props {
   windowStyle: WindowStyle;
@@ -53,8 +51,6 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
   const windowNumber = window.api.windowNumber;
   const [maximized, setMaximized] = useState(false);
   const state = useAppState();
-  const dispatch = useAppDispatch();
-  const sidebarVisible = state.sidebarVisible;
   const hoverSymbols = state.settings.appearance?.macOSTrafficLightHoverSymbols ?? false;
 
   // 初次拉一次 + 订阅变化
@@ -101,10 +97,6 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
     // 关闭按钮不归还焦点 — 窗口都关了,无意义。
     void window.api.invoke(COMMAND_CHANNELS.WINDOW_CLOSE_SELF, undefined);
   };
-  const toggleSidebar = (): void => {
-    dispatch({ type: 'view/toggle-sidebar' });
-    focusTerminalDom();
-  };
 
   // 双击标题栏拖动区切最大化(原生 frame 默认行为,自绘后需要自己接)
   const handleDragRegionDblClick = (e: ReactMouseEvent<HTMLDivElement>): void => {
@@ -127,8 +119,6 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
         callMin={callMin}
         callClose={callClose}
         callToggleMax={callToggleMax}
-        sidebarVisible={sidebarVisible}
-        toggleSidebar={toggleSidebar}
         hoverSymbols={hoverSymbols}
         handleDragRegionDblClick={handleDragRegionDblClick}
       />
@@ -148,15 +138,6 @@ export function WindowChrome({ windowStyle, buildVersion, buildType }: Props): J
       <div className="titlebar-spacer titlebar-drag" />
       <span className="titlebar-version titlebar-drag">v{buildVersion}</span>
       <div className="titlebar-controls" aria-label="窗口控制(Windows 风格)">
-        <button
-          type="button"
-          className="titlebar-btn sidebar-toggle"
-          onClick={toggleSidebar}
-          title={sidebarVisible ? '隐藏侧边栏' : '显示侧边栏'}
-          aria-label={sidebarVisible ? '隐藏侧边栏' : '显示侧边栏'}
-        >
-          {sidebarVisible ? <PanelLeftClose size={14} strokeWidth={1.6} /> : <PanelLeftOpen size={14} strokeWidth={1.6} />}
-        </button>
         <button
           type="button"
           className="titlebar-btn min"
@@ -211,8 +192,6 @@ function MacosTitlebar({
   callMin,
   callClose,
   callToggleMax,
-  sidebarVisible,
-  toggleSidebar,
   hoverSymbols,
   handleDragRegionDblClick,
 }: {
@@ -223,8 +202,6 @@ function MacosTitlebar({
   callMin: () => void;
   callClose: () => void;
   callToggleMax: () => void;
-  sidebarVisible: boolean;
-  toggleSidebar: () => void;
   hoverSymbols: boolean;
   handleDragRegionDblClick: (e: ReactMouseEvent<HTMLDivElement>) => void;
 }): JSX.Element {
@@ -275,15 +252,6 @@ function MacosTitlebar({
           )}
         </button>
       </div>
-      <button
-        type="button"
-        className="titlebar-btn sidebar-toggle"
-        onClick={toggleSidebar}
-        title={sidebarVisible ? '隐藏侧边栏' : '显示侧边栏'}
-        aria-label={sidebarVisible ? '隐藏侧边栏' : '显示侧边栏'}
-      >
-        {sidebarVisible ? <PanelLeftClose size={14} strokeWidth={1.6} /> : <PanelLeftOpen size={14} strokeWidth={1.6} />}
-      </button>
       <div className="titlebar-spacer titlebar-drag" />
       <div className="titlebar-title titlebar-drag">
         <span className="titlebar-app-name">{appLabel}</span>
