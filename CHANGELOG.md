@@ -2,6 +2,22 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/),版本号遵循 [SemVer](https://semver.org/)。
 
+## [0.2.2] — 2026-06-03
+
+issue #4 落地 + xterm 6.1 升级对齐 VSCode + CURSOR-2 调研记录归档。
+
+### 新增
+
+- **设置 → 外观 → 隐藏顶部标签栏(issue #4)。** Sidebar 已按路径分组显示所有 session,TabBar 内容重复且占纵向空间。新增 `appearance.hideTopTabBar` 开关(默认关),勾上后 MainPane 不渲染 TabBar;同时改写 `view/select-path` reducer 的拦截语义 —— 点 Sidebar 里的 PathItem 永远进 EmptyPathState 新建页(不再自动选第一个本窗口持有的 session),要切到已有 session 必须从 Sidebar 显式点 SessionItem。与 BETA-027 simpleMode 正交:simpleMode 仍连 Sidebar 一起藏,只是优先级更高。`SettingsManager` deep-merge 保证老 settings.json 缺字段时静默回落 `false`。
+
+### 改进
+
+- **`@xterm/xterm` / `@xterm/headless` 升级到 6.1.0-beta.256 — 对齐 VSCode bundle 版本。** 6.x 破坏性变更:`windowsMode: true` → `windowsPty: { backend: 'conpty' | 'winpty', buildNumber }`,buildNumber 从 preload `os.release()` 同步暴露给 renderer。本升级独立于 CURSOR-2 调研结论,版本对齐本身是基础设施层面的 hygiene(便于未来从 VSCode 反向移植 patch / 比对行为)。
+
+### 文档
+
+- **CURSOR-2 调研记录归档 — `docs/issues/cursor-2-codex-tui-jitter-vs-vscode.md`。** Codex TUI 在 Marina 中光标逐帧跳变(VSCode 无此问题)的三天调研挂起记录:7 条假说排除表 + 6 次实验细节 + 6 条尚未尝试的下一步方向(D1-D6,按 ROI 排序)。下次接手优先级:D1(`cursorBlink: false` 5 分钟)→ D2(读 xterm 6.1 WebGL CursorRenderLayer 源码)→ D3(`onWriteParsed` 探针)。GitHub issue #11 同步建档。
+
 ## [0.2.1] — 2026-05-26
 
 0.2.0 后的体验微调 patch — sidebar 形态调整 + Git Bash 警告标志根因修复。
