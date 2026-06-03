@@ -298,15 +298,22 @@ function reducer(state: AppState, action: AppAction): AppState {
       // 点击 tab 才会切换 owner。
       // 如果该 path 下没有本窗口持有的 session → selectedSessionId=null
       // → MainPane 显示 EmptyPathState (新建终端页面)。
+      //
+      // issue #4:hideTopTabBar=true 时强制走 EmptyPathState 路径,
+      // 用户切到已有 session 必须从 Sidebar 显式点 SessionItem。
       let selectedSessionId: string | null = state.selectedSessionId;
       if (action.pathId !== state.selectedPathId) {
-        const node = findPathNode(state.pathTree, action.pathId ?? '');
-        const myOwnedSid =
-          node?.sessionIds.find((sid) => {
-            const s = state.sessions.get(sid);
-            return s?.ownerWindowId === state.myWindowId;
-          }) ?? null;
-        selectedSessionId = myOwnedSid;
+        if (state.settings.appearance?.hideTopTabBar) {
+          selectedSessionId = null;
+        } else {
+          const node = findPathNode(state.pathTree, action.pathId ?? '');
+          const myOwnedSid =
+            node?.sessionIds.find((sid) => {
+              const s = state.sessions.get(sid);
+              return s?.ownerWindowId === state.myWindowId;
+            }) ?? null;
+          selectedSessionId = myOwnedSid;
+        }
       }
       return {
         ...state,

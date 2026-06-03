@@ -178,6 +178,7 @@ function makeStubSettingsManager(
       uiFontFamily: '',
       uiZoom: 1,
       macOSTrafficLightHoverSymbols: false,
+      hideTopTabBar: false,
     },
     ai: {
       provider: null,

@@ -178,8 +178,9 @@ export function MainPane(): JSX.Element {
 
   return (
     <main className="main-pane" ref={containerRef}>
-      {/* BETA-027:简易模式下 Tab bar 隐藏(浮动工具栏由 App.tsx 直接渲染) */}
-      {!state.simpleMode && (
+      {/* BETA-027:简易模式下 Tab bar 隐藏(浮动工具栏由 App.tsx 直接渲染)
+          issue #4:appearance.hideTopTabBar=true 时也隐藏 TabBar(Sidebar 仍在) */}
+      {!state.simpleMode && !state.settings.appearance?.hideTopTabBar && (
         <TabBar
           sessions={sessions}
           selectedSessionId={state.selectedSessionId}

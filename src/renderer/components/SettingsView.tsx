@@ -488,6 +488,29 @@ function AppearancePanel({
           </label>
         </SettingRow>
       )}
+
+      {/* issue #4:隐藏顶部标签栏 */}
+      <SettingRow
+        label={tx('隐藏顶部标签栏', 'Hide top tab bar')}
+        hint={tx(
+          '侧栏已按路径分组显示所有会话;隐藏后点路径直接进新建页,要切已有会话从侧栏点',
+          'Sidebar already groups sessions by path; when hidden, clicking a path opens the new-session page — switch to an existing session via the sidebar',
+        )}
+      >
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={a?.hideTopTabBar ?? false}
+            onChange={(e) =>
+              void updateSettings(
+                { appearance: { hideTopTabBar: e.target.checked } },
+                setError,
+              )
+            }
+          />
+          <span>{tx('启用', 'Enable')}</span>
+        </label>
+      </SettingRow>
     </section>
   );
 }

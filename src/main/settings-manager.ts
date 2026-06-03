@@ -45,6 +45,8 @@ export const DEFAULT_SETTINGS: Settings = {
     uiZoom: 1.0,
     // BETA-023 macOS 红绿灯悬浮符号,默认关(与 CP-4 勘误第二轮决策一致)
     macOSTrafficLightHoverSymbols: false,
+    // issue #4 默认关。TabBar 与 Sidebar 内容重复,用户可勾上更紧凑。
+    hideTopTabBar: false,
   },
   shell: {
     defaultShellId: '',

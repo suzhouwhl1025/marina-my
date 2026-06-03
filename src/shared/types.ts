@@ -295,6 +295,15 @@ export interface Settings {
      * 设为 true 可恢复原生 macOS 观感。
      */
     macOSTrafficLightHoverSymbols: boolean;
+    /**
+     * issue #4:隐藏顶部 TabBar。侧边栏已按路径分组显示所有 session,
+     * TabBar 内容重复且占纵向空间。开启后:
+     * - MainPane 不渲染 TabBar
+     * - 点 PathItem 永远进 EmptyPathState 新建页(不再自动选第一个持有的 session)
+     * - 切到已有 session 必须从 Sidebar 点 SessionItem
+     * 与 simpleMode 正交:simpleMode 优先(它连 Sidebar 一起藏)。
+     */
+    hideTopTabBar: boolean;
   };
 
   /**
