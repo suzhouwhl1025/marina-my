@@ -301,19 +301,20 @@ function reducer(state: AppState, action: AppAction): AppState {
       //
       // issue #4:hideTopTabBar=true 时强制走 EmptyPathState 路径,
       // 用户切到已有 session 必须从 Sidebar 显式点 SessionItem。
+      // 注意:这里不能加 `action.pathId !== state.selectedPathId` 守卫 —
+      // 否则当前 path 已选中时再点同一 path 不会清空 selectedSessionId,
+      // 用户得"先切 B 再切回 A"才能看到新建页(用户反馈 issue #4 续)。
       let selectedSessionId: string | null = state.selectedSessionId;
-      if (action.pathId !== state.selectedPathId) {
-        if (state.settings.appearance?.hideTopTabBar) {
-          selectedSessionId = null;
-        } else {
-          const node = findPathNode(state.pathTree, action.pathId ?? '');
-          const myOwnedSid =
-            node?.sessionIds.find((sid) => {
-              const s = state.sessions.get(sid);
-              return s?.ownerWindowId === state.myWindowId;
-            }) ?? null;
-          selectedSessionId = myOwnedSid;
-        }
+      if (state.settings.appearance?.hideTopTabBar) {
+        selectedSessionId = null;
+      } else if (action.pathId !== state.selectedPathId) {
+        const node = findPathNode(state.pathTree, action.pathId ?? '');
+        const myOwnedSid =
+          node?.sessionIds.find((sid) => {
+            const s = state.sessions.get(sid);
+            return s?.ownerWindowId === state.myWindowId;
+          }) ?? null;
+        selectedSessionId = myOwnedSid;
       }
       return {
         ...state,

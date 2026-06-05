@@ -329,8 +329,12 @@ export function Sidebar(): JSX.Element {
         },
       );
       // session 创建后:store reducer 自动 select 它(因 ownerWindowId === myWindowId)。
-      // 这里再显式 dispatch 一次 select-path,防御性把视图切到该路径。
+      // 这里再显式 dispatch 一次 select-path,防御性把视图切到该路径;紧随
+      // 其后 select-session 把焦点重新落到新 session 上 —— hideTopTabBar=true
+      // 模式下 view/select-path reducer 会清空 selectedSessionId,不补一次
+      // select-session 会落到 EmptyPathState(用户刚显式新建却看不到终端)。
       dispatch({ type: 'view/select-path', pathId: res.session.pathId });
+      dispatch({ type: 'view/select-session', sessionId: res.session.id });
       if (res.warning) {
         toast.push({ kind: 'warn', message: res.warning });
       }

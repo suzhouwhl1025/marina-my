@@ -2,6 +2,14 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/),版本号遵循 [SemVer](https://semver.org/)。
 
+## [0.2.3] — 2026-06-05
+
+issue #4 续 — hideTopTabBar 模式重选当前 path 不进 EmptyPathState 的修复。
+
+### 修复
+
+- **hideTopTabBar=true 时,点已选中的 path 不会回到新建页(issue #4 续)。** 现象:开了文件夹 A 的终端后再点 A 本身,view 不动;必须先点 B 再点回 A 才能看到 EmptyPathState。根因:`view/select-path` reducer 把"清空 selectedSessionId"放在 `action.pathId !== state.selectedPathId` 守卫里,同 path 走 no-op 分支,selectedSessionId 不变 → MainPane 继续渲染 TerminalView。修法:hideTopTabBar=true 时无条件清空 selectedSessionId(同 path / 切 path 都清),恢复 issue #4 设计意图——"点 PathItem 永远进新建页"。配套修正 `Sidebar.handlePickFolderForTemp` 在临时栏 + 新建 session 后显式补一次 `view/select-session`,否则新 reducer 行为会把 `sessions/created` 刚 set 的 selectedSessionId 又抹掉,用户刚显式新建却看到空白页。
+
 ## [0.2.2] — 2026-06-03
 
 issue #4 落地 + xterm 6.1 升级对齐 VSCode + CURSOR-2 调研记录归档。
