@@ -122,6 +122,10 @@ export const COMMAND_CHANNELS = {
 
   // System 域
   SYSTEM_SHOW_IN_EXPLORER: 'cmd:system:show-in-explorer',
+  /** 带目录逐级回退的"在资源管理器中打开"(终端路径链接用) */
+  SYSTEM_OPEN_EXPLORER_FALLBACK: 'cmd:system:open-explorer-fallback',
+  /** 解析路径:返回最长存在的路径前缀(终端路径链接高亮用) */
+  SYSTEM_RESOLVE_PATH: 'cmd:system:resolve-path',
   SYSTEM_OPEN_DATA_DIR: 'cmd:system:open-data-dir',
   SYSTEM_OPEN_LOGS_DIR: 'cmd:system:open-logs-dir',
   SYSTEM_OPEN_EXTERNAL: 'cmd:system:open-external',
@@ -741,6 +745,13 @@ export interface GetAutoStartResponse {
 
 export interface ShowInExplorerPayload {
   path: string;
+}
+
+export interface ResolvePathPayload {
+  path: string;
+}
+export interface ResolvePathResponse {
+  resolved: string;
 }
 
 export interface OpenExternalPayload {

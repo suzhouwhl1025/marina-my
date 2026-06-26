@@ -1,11 +1,11 @@
 {
   "name": "marina-app",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Marina — path-centric, AI-agent-friendly terminal manager for Windows (formerly EasyTerm)",
   "license": "MIT",
-  "author": "Liyue-Cheng <liyue_cheng@163.com>",
-  "homepage": "https://github.com/Liyue-Cheng/marina",
+  "author": "suzhouwhl1025",
+  "homepage": "https://github.com/suzhouwhl1025/marina-my",
   "main": "out/main/index.js",
   "type": "module",
   "engines": {

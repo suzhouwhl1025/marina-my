@@ -81,7 +81,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react';
-import { Terminal, type ITheme } from '@xterm/xterm';
+import { Terminal, type ITheme, type ILinkProvider, type ILink, type IBufferRange } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -95,6 +95,8 @@ import {
   type GetScrollbackResponse,
   type ImeProbeDumpPayload,
   type ImeProbeDumpResponse,
+  type ResolvePathPayload,
+  type ResolvePathResponse,
   type SendInputResponse,
   type SessionOutputPayload,
 } from '@shared/protocol';
@@ -933,13 +935,45 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
     termRef.current = term;
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      window.api
+        .invoke(COMMAND_CHANNELS.SYSTEM_OPEN_EXTERNAL, { url: uri })
+        .catch((err: unknown) =>
+          console.warn('[WebLinks] open-external failed', err),
+        );
+    });
     const searchAddon = new SearchAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(searchAddon);
     fitRef.current = fitAddon;
     searchRef.current = searchAddon;
+
+    // 文件路径链接:匹配 Windows 绝对路径(支持空格),如 `C:\Program Files\Git\bin\bash.exe`
+    // 用 FileLinkProvider 而非 WebLinksAddon,因为 WebLinksAddon 内部有
+    // isUrl() 过滤,文件路径不会通过 URL 校验。
+    const FILE_PATH_REGEX =
+      /[A-Za-z]:[\\/][^\s"'|*?<>]+(?:\s+[^\s"'|*?<>]+)*/;
+    const resolvePath = async (p: string): Promise<string> => {
+      const resp = await window.api.invoke<
+        ResolvePathPayload,
+        ResolvePathResponse
+      >(COMMAND_CHANNELS.SYSTEM_RESOLVE_PATH, { path: p });
+      return resp.resolved;
+    };
+    const fileLinkProvider = new FileLinkProvider(
+      term,
+      FILE_PATH_REGEX,
+      resolvePath,
+      (path: string) => {
+        window.api
+          .invoke(COMMAND_CHANNELS.SYSTEM_OPEN_EXPLORER_FALLBACK, { path })
+          .catch((err: unknown) =>
+            console.warn('[FileLink] show-in-explorer failed', err),
+          );
+      },
+    );
+    const fileLinkDisposable = term.registerLinkProvider(fileLinkProvider);
 
     // PER-1 / XTM-1:装 WebGL 渲染器替代默认 DOM renderer。
     // 性能 10-50× 提升,长瀑布输出 (npm install / find / Claude Code 流式
@@ -1613,6 +1647,7 @@ export function TerminalView({ session }: TerminalViewProps): JSX.Element {
       container.removeEventListener('paste', pasteInterceptor, true);
       dataHandler.dispose();
       searchResultsDisposable?.dispose();
+      fileLinkDisposable.dispose();
       searchAddon.dispose();
       // PER-1:WebGL addon 必须在 term.dispose 之前释放,否则 GL context
       // 句柄泄漏(显存累积,大量切 session 后会触发显卡警告)
@@ -2168,6 +2203,99 @@ function decodeBase64ToBytes(b64: string): Uint8Array {
   // V8 内部能识别这个常用模式并 SIMD 加速,实测 100KB chunk 解码从
   // 5-8ms 降到 1-2ms。视觉上"大段输出涌入"的卡顿明显减少。
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+/**
+ * 文件路径链接提供器 —— 让终端中的 Windows 绝对路径(`C:\...`)可点击,
+ * 点击后通过 SYSTEM_SHOW_IN_EXPLORER 在文件资源管理器中打开。
+ *
+ * 与 WebLinksAddon (处理 http/https)互补,绕过其内部的 isUrl() 过滤。
+ */
+class FileLinkProvider implements ILinkProvider {
+  /** 路径解析缓存:原始文本 → 已存在的最长前缀 */
+  private _cache = new Map<string, string>();
+
+  constructor(
+    private readonly _terminal: Terminal,
+    private readonly _regex: RegExp,
+    private readonly _resolvePath: (path: string) => Promise<string>,
+    private readonly _openHandler: (path: string) => void,
+  ) {}
+
+  provideLinks(
+    bufferLineNumber: number,
+    callback: (links: ILink[] | undefined) => void,
+  ): void {
+    const buf = this._terminal.buffer.active;
+    const line = buf.getLine(bufferLineNumber - 1);
+    if (!line) {
+      callback(undefined);
+      return;
+    }
+
+    const lineText = line.translateToString();
+    const rex = new RegExp(
+      this._regex.source,
+      (this._regex.flags || '') + 'g',
+    );
+    const matches: Array<{ text: string; startX: number }> = [];
+    let match: RegExpExecArray | null;
+    while ((match = rex.exec(lineText)) !== null) {
+      matches.push({ text: match[0], startX: match.index });
+    }
+
+    if (matches.length === 0) {
+      callback(undefined);
+      return;
+    }
+
+    // 异步解析所有匹配,然后一次性回调
+    void this._resolveAndCallback(matches, bufferLineNumber, callback);
+  }
+
+  private async _resolveAndCallback(
+    matches: Array<{ text: string; startX: number }>,
+    bufferLineNumber: number,
+    callback: (links: ILink[] | undefined) => void,
+  ): Promise<void> {
+    const result: ILink[] = [];
+    const handler = this._openHandler;
+
+    for (const { text, startX } of matches) {
+      let resolved: string;
+      const cached = this._cache.get(text);
+      if (cached !== undefined) {
+        resolved = cached;
+      } else {
+        try {
+          resolved = await this._resolvePath(text);
+          this._cache.set(text, resolved);
+        } catch {
+          resolved = text; // 解析失败时退回到完整文本
+        }
+      }
+
+      // resolved 是路径中实际存在的部分,可能比 text 短
+      const resolvedLen = resolved.length;
+      const endX = startX + resolvedLen;
+
+      const range: IBufferRange = {
+        start: { x: startX + 1, y: bufferLineNumber },
+        end: { x: endX, y: bufferLineNumber },
+      };
+
+      result.push({
+        range,
+        text: resolved,
+        activate() {
+          handler(text); // 点击时用原始文本(让 fallback IPC 走完整回退链)
+        },
+        decorations: { pointerCursor: true, underline: true },
+      });
+    }
+
+    callback(result.length > 0 ? result : undefined);
+  }
 }
 
 /**

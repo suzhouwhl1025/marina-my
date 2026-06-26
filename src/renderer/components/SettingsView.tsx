@@ -2755,7 +2755,7 @@ function AdvancedPanel({
 // 关于分类
 // ──────────────────────────────────────────────────────────────────
 
-const GITHUB_REPO = 'https://github.com/Liyue-Cheng/marina';
+const GITHUB_REPO = 'https://github.com/suzhouwhl1025/marina-my';
 const GITHUB_RELEASES = `${GITHUB_REPO}/releases`;
 
 const ACKNOWLEDGEMENTS: Array<{ name: string; url: string; tone: string }> = [

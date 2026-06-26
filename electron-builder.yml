@@ -10,9 +10,9 @@
 # 旧 EasyTerm 数据目录 %APPDATA%\EasyTerm 需手动迁移到 %APPDATA%\Marina,
 # 详见 docs/marina-改名工作记录-20260512.md。
 
-appId: com.liyue-cheng.marina
+appId: com.suzhouwhl1025.marina-my
 productName: Marina
-copyright: Copyright (c) 2026 Liyue-Cheng
+copyright: Copyright (c) 2026 suzhouwhl1025
 
 directories:
   output: release/${version}

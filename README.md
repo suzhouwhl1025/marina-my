@@ -3,13 +3,15 @@
 > Your terminal sessions shouldn't die just because you closed the window.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/Liyue-Cheng/marina/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/suzhouwhl1025/marina-my/releases)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#roadmap)
 [![中文文档](https://img.shields.io/badge/中文文档-README.zh--CN.md-red)](README.zh-CN.md)
 
 A path-centric, AI-agent-friendly terminal manager for Windows. Built for developers who run multiple long-running tasks (including Claude Code, Codex, OpenCode, and other AI coding agents) across many local or SSH working directories — and refuse to lose them when the window closes.
 
 > **History note**: Marina is the product previously known as EasyTerm during alpha development (CP-1 through Milestone 1). The rename happened at v1.5, and historical documents under `docs/` may still refer to "EasyTerm" — those are intentional snapshots of past decisions.
+>
+> **Fork note**: This repository is a fork of [Liyue-Cheng/marina](https://github.com/Liyue-Cheng/marina) v0.2.3, modified for personal use.
 
 ---
 
@@ -111,7 +113,7 @@ Marina gives you:
 
 ### Install
 
-1. Download the latest installer from [Releases](https://github.com/Liyue-Cheng/marina/releases)
+1. Download the latest installer from [Releases](https://github.com/suzhouwhl1025/marina-my/releases)
 2. Run `Marina-Setup-x.y.z.exe`
 3. Launch from Start Menu or your desktop
 
@@ -198,7 +200,7 @@ For details:
 
 ```bash
 # Prerequisites: Node.js 20+, Windows 10/11
-git clone https://github.com/Liyue-Cheng/marina.git
+git clone https://github.com/suzhouwhl1025/marina-my.git
 cd marina
 npm install
 npm run dev      # development mode with hot reload

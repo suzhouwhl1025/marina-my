@@ -31,7 +31,7 @@ import {
 } from './explorer-integration';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { join as joinPath } from 'node:path';
+import { dirname, join as joinPath } from 'node:path';
 import {
   COMMAND_CHANNELS,
   EVENT_CHANNELS,
@@ -184,6 +184,37 @@ function sendEventTo<P>(win: BrowserWindow, channel: string, payload: P): void {
 // ──────────────────────────────────────────────────────────────────
 // Command handlers
 // ──────────────────────────────────────────────────────────────────
+
+/**
+ * 从给定路径向上逐级查找第一个存在的目录/文件。
+ * 用于终端路径链接:如果完整路径不存在，自动回退到最近的有效祖先。
+ */
+async function resolveExplorerPath(rawPath: string): Promise<string> {
+  // 去掉末尾的空白和反斜杠
+  let p = rawPath.replace(/[\\/]+$/, '').trim();
+  // 精确路径存在 → 直接返回
+  try {
+    await fs.access(p);
+    return p;
+  } catch {
+    /* 不存在，继续向上查找 */
+  }
+  // 逐级向上找
+  let prev = '';
+  while (p !== prev) {
+    prev = p;
+    p = dirname(p);
+    try {
+      await fs.access(p);
+      return p;
+    } catch {
+      /* 不存在继续向上 */
+    }
+  }
+  // 兜底：返回到驱动器根目录
+  const driveMatch = rawPath.match(/^([A-Za-z]:)/);
+  return driveMatch ? driveMatch[1] + '\\' : 'C:\\';
+}
 
 function registerCommandHandlers(deps: IpcLayerDeps): void {
   const {
@@ -879,6 +910,45 @@ function registerCommandHandlers(deps: IpcLayerDeps): void {
     },
   );
 
+
+  /**
+   * 带逐级回退的"在资源管理器中打开"。
+   * 如果精确路径不存在，逐级向上找第一个存在的目录打开。
+   */
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_OPEN_EXPLORER_FALLBACK,
+    async (
+      _e,
+      envelope: CommandEnvelope<ShowInExplorerPayload>,
+    ): Promise<void> => {
+      const p = envelope.payload.path.replace(/[\\/\s]+$/, '');
+      const resolved = await resolveExplorerPath(p);
+      // 如果是文件 → showItemInFolder(高亮选中);如果是目录 → openPath(直接打开)
+      try {
+        const stat = await fs.stat(resolved);
+        if (stat.isDirectory()) {
+          await shell.openPath(resolved);
+        } else {
+          shell.showItemInFolder(resolved);
+        }
+      } catch {
+        // stat 失败 → 当作文件处理,showItemInFolder 会打开其父目录
+        shell.showItemInFolder(resolved);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    COMMAND_CHANNELS.SYSTEM_RESOLVE_PATH,
+    async (
+      _e,
+      envelope: CommandEnvelope<ResolvePathPayload>,
+    ): Promise<ResolvePathResponse> => {
+      const p = envelope.payload.path.replace(/[\\/\s]+$/, '');
+      const resolved = await resolveExplorerPath(p);
+      return { resolved };
+    },
+  );
   ipcMain.handle(
     COMMAND_CHANNELS.SYSTEM_OPEN_DATA_DIR,
     async (_e, _envelope: CommandEnvelope<undefined>): Promise<void> => {
